@@ -156,6 +156,16 @@ pub fn paint(p: &Painter, t: &Touch) {
     if let Some(band) = geo.band {
         p.rect_filled(band, 0.0, BAND);
     }
+    if t.settings.show_fps
+        && let Some(stats) = &t.stats
+    {
+        // At the top in the middle, clear of L and R; drawn even while the controls are hidden.
+        let at = pos2(geo.screen.center().x, geo.screen.min.y + 14.0);
+        let galley = p.layout_no_wrap(stats.clone(), theme::game(13.0), CREAM);
+        let back = Rect::from_center_size(at, galley.size() + vec2(12.0, 6.0));
+        p.rect_filled(back, radius(4.0), Color32::from_rgba_unmultiplied(0, 0, 0, 160));
+        p.galley(back.min + vec2(6.0, 3.0), galley, CREAM);
+    }
     if t.mode == Mode::Edit {
         // The picture dims while the layout is edited.
         p.rect_filled(geo.picture, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 140));
@@ -236,10 +246,7 @@ fn window(p: &Painter, t: &Touch, panel: &Panel) {
         };
         p.rect_filled(b.rect, 0.0, fill);
         p.rect_stroke(b.rect, 0.0, Stroke::new(2.0, line), StrokeKind::Inside);
-        let centred = matches!(
-            b.id,
-            PBtn::SizeDown | PBtn::SizeUp | PBtn::OpDown | PBtn::OpUp | PBtn::HidePadToggle
-        );
+        let centred = matches!(b.id, PBtn::SizeDown | PBtn::SizeUp | PBtn::OpDown | PBtn::OpUp);
         let mut size = if centred { 22.0 } else { 17.0 };
         // Long labels shrink to fit the button.
         let probe = p.layout_no_wrap(b.label.clone(), theme::game(size), ink);
@@ -259,43 +266,23 @@ fn window(p: &Painter, t: &Touch, panel: &Panel) {
             );
         }
     }
-    match t.mode {
-        Mode::Menu => {
-            let y = r.min.y + 50.0 + 3.0 * 56.0 + 24.0;
-            wrapped(
-                p,
-                pos2(r.min.x + 14.0, y - 20.0),
-                "Hide controls when a gamepad is connected",
-                14.0,
-                r.width() - 130.0,
-                TEXT_DARK,
-            );
-        }
-        Mode::Edit => {
-            p.text(
-                r.min + vec2(16.0, 46.0),
-                Align2::LEFT_CENTER,
-                format!("Selected: {}", t.selected.name()),
-                theme::game(15.0),
-                DARK_RED,
-            );
-            let place = t.settings.place(t.orient(), t.selected);
-            let pct = place.scale.unwrap_or(100);
-            bar(p, r.min + vec2(0.0, 62.0), "Size", pct, SCALE_MIN, SCALE_MAX);
-            bar(
-                p,
-                r.min + vec2(0.0, 118.0),
-                "Opacity",
-                t.settings.opacity,
-                OPACITY_MIN,
-                OPACITY_MAX,
-            );
-        }
-        _ => {}
+    if t.mode == Mode::Edit {
+        p.text(
+            r.min + vec2(16.0, 46.0),
+            Align2::LEFT_CENTER,
+            format!("Selected: {}", t.selected.name()),
+            theme::game(15.0),
+            DARK_RED,
+        );
+        let place = t.settings.place(t.orient(), t.selected);
+        let pct = place.scale.unwrap_or(100);
+        bar(p, r.min + vec2(0.0, 62.0), "Size", pct, SCALE_MIN, SCALE_MAX);
+        bar(p, r.min + vec2(0.0, 118.0), "Opacity", t.settings.opacity, OPACITY_MIN, OPACITY_MAX);
     }
     let note_y = match t.mode {
         Mode::Edit => r.min.y + 176.0,
-        _ => r.min.y + 50.0 + 3.0 * 56.0 + 56.0,
+        // under the last row of buttons
+        _ => panel.buttons.iter().map(|b| b.rect.max.y).fold(r.min.y + 50.0, f32::max) + 8.0,
     };
     if t.mode != Mode::Edit || note_y < r.max.y {
         wrapped(p, pos2(r.min.x + 14.0, note_y), panel.note, 12.0, r.width() - 28.0, NOTE);

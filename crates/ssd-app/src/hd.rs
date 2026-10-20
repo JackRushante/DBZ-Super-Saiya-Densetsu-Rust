@@ -1164,8 +1164,11 @@ mod tests {
         ];
         for ppp in [1.0, 1.25, 1.5] {
             for area in areas {
-                for (width, height, aspect) in frames {
-                    let picture = crate::layout::picture_rect(ppp, area, width, height, aspect);
+                for ((width, height, aspect), whole) in
+                    frames.into_iter().flat_map(|frame| [(frame, true), (frame, false)])
+                {
+                    let picture =
+                        crate::layout::picture_rect(ppp, area, width, height, aspect, whole);
                     assert!(area.contains_rect(picture), "{picture:?} in {area:?}");
                     let fit = Fit::new(picture);
                     let canvas = fit.rect(Rect::new(0.0, 0.0, layout::WIDTH, layout::HEIGHT));

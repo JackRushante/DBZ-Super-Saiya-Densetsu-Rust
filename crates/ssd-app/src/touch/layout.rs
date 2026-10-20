@@ -5,7 +5,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-use super::settings::{Group, Orient, Settings};
+use super::settings::{Group, Orient, Picture, Settings};
 use egui::{Color32, Pos2, Rect, Vec2, pos2, vec2};
 
 /// The smallest size of a control, in dp.
@@ -101,29 +101,84 @@ pub fn orient_of(screen: Rect) -> Orient {
     if screen.width() >= screen.height() { Orient::Landscape } else { Orient::Portrait }
 }
 
-/// The default centre of a group on `screen`.
-fn default_centre(o: Orient, g: Group, s: Rect) -> Pos2 {
+/// The space kept between two groups a short screen pushes together, in dp.
+const GAP: f32 = 8.0;
+/// The size of the controls of the Large picture and of the full screen, on top of the player's: smaller, so the
+/// picture has the room.
+const COMPACT: f32 = 0.85;
+/// The parts of the portrait band its rows are at (the design's band is 270..932): the top row, the d-pad and the
+/// diamond, Start/Select.
+const ROW: f32 = 0.0906;
+const PADS: f32 = 0.459;
+const START: f32 = 0.831;
+/// The SNES picture's height for its width (256 x 224): a picture this tall spans the whole width.
+const FULL_WIDTH: f32 = 224.0 / 256.0;
+
+/// The size of the controls for the picture size: [`COMPACT`] for the Large picture and the full screen.
+fn compact(picture: Picture) -> f32 {
+    if picture == Picture::Standard { 1.0 } else { COMPACT }
+}
+
+/// The least portrait band the controls of size `k` fit in: the top row, MIN under it, the d-pad (three cells of
+/// 56 dp), Start/Select and the gaps between them, at the band's own proportions.
+fn least_band(k: f32) -> f32 {
+    let stack = 56.0 + MIN_DP / 2.0 + GAP + 84.0 + 84.0 + GAP + MIN_DP / 2.0 + MIN_DP / 2.0;
+    (stack * k + GAP) / (1.0 - ROW)
+}
+
+/// The top of the portrait band under the picture, from the screen's top: the design's 16:9 area under a 28 dp
+/// margin (Standard); the whole width of the picture as far as the band of compact controls leaves room, and never
+/// less than the design (Large); the controls' least band at the bottom of the screen, over the picture (Full).
+fn band_top(w: f32, h: f32, picture: Picture) -> f32 {
+    let standard = 28.0 + w * 9.0 / 16.0;
+    match picture {
+        Picture::Standard => standard,
+        Picture::Large => (28.0 + w * FULL_WIDTH).min(h - least_band(COMPACT)).max(standard),
+        Picture::Full => (h - least_band(COMPACT)).max(0.0),
+    }
+}
+
+/// The default centre of a group on `screen`: the design's place at its size (932 x 430, 430 x 932), and on a
+/// shorter screen (split screen, a window) the d-pad, the face buttons and Start/Select kept under the top
+/// buttons, and in portrait under the picture. The Large picture and the full screen pack the controls closer to
+/// the edges, at [`COMPACT`] size.
+fn default_centre(o: Orient, g: Group, s: Rect, picture: Picture) -> Pos2 {
     let (w, h) = (s.width(), s.height());
+    let k = compact(picture);
     let at = |x: f32, y: f32| pos2(s.min.x + x, s.min.y + y);
     match o {
-        Orient::Landscape => match g {
-            Group::Dpad => at(80.0, 0.619 * h),
-            Group::Face => at(w - 82.0, 0.633 * h),
-            Group::L => at(65.0, 34.0),
-            Group::R => at(w - 65.0, 34.0),
-            Group::Speed => at(46.0, 94.0),
-            Group::Menu => at(w - 65.0, 94.0),
-            Group::StartSelect => at(w / 2.0, h - 28.0),
-        },
-        Orient::Portrait => match g {
-            Group::Dpad => at(0.256 * w, 0.616 * h),
-            Group::Face => at(0.749 * w, 0.616 * h),
-            Group::L => at(0.137 * w, 0.354 * h),
-            Group::Speed => at(0.379 * w, 0.354 * h),
-            Group::Menu => at(0.62 * w, 0.354 * h),
-            Group::R => at(0.863 * w, 0.354 * h),
-            Group::StartSelect => at(0.5 * w, 0.88 * h),
-        },
+        Orient::Landscape => {
+            // MIN's bottom (under the speed button) and MENU's, then the half heights of the d-pad and the diamond
+            let (min_bottom, menu_bottom) =
+                ((94.0 + 56.0 + MIN_DP / 2.0) * k, (94.0 + MIN_DP / 2.0) * k);
+            match g {
+                Group::Dpad => at(80.0 * k, (0.619 * h).max(min_bottom + GAP + 72.0 * k)),
+                Group::Face => at(w - 82.0 * k, (0.633 * h).max(menu_bottom + GAP + 75.0 * k)),
+                Group::L => at(65.0 * k, 34.0 * k),
+                Group::R => at(w - 65.0 * k, 34.0 * k),
+                Group::Speed => at(46.0 * k, 94.0 * k),
+                Group::Menu => at(w - 65.0 * k, 94.0 * k),
+                Group::StartSelect => at(w / 2.0, h - 28.0 * k),
+            }
+        }
+        Orient::Portrait => {
+            let top = band_top(w, h, picture);
+            let band = (h - top).max(0.0);
+            let row = top + ROW * band;
+            // under MIN (a row under the top one), then the d-pad's half height (cells of 56 dp)
+            let pads = (top + PADS * band).max(row + (56.0 + MIN_DP / 2.0 + 84.0) * k + GAP);
+            match g {
+                Group::Dpad => at(0.256 * w, pads),
+                Group::Face => at(0.749 * w, pads),
+                Group::L => at(0.137 * w, row),
+                Group::Speed => at(0.379 * w, row),
+                Group::Menu => at(0.62 * w, row),
+                Group::R => at(0.863 * w, row),
+                Group::StartSelect => {
+                    at(0.5 * w, (top + START * band).max(pads + (84.0 + MIN_DP / 2.0) * k + GAP))
+                }
+            }
+        }
     }
 }
 
@@ -140,14 +195,14 @@ fn base_scale(o: Orient, g: Group) -> f32 {
 #[must_use]
 pub fn placed(o: Orient, g: Group, s: Rect, settings: &Settings) -> (Pos2, f32) {
     let p = settings.place(o, g);
-    let mut c = default_centre(o, g, s);
+    let mut c = default_centre(o, g, s, settings.picture);
     if let Some(x) = p.x {
         c.x = s.min.x + s.width() * x as f32 / 1000.0;
     }
     if let Some(y) = p.y {
         c.y = s.min.y + s.height() * y as f32 / 1000.0;
     }
-    let k = base_scale(o, g) * p.scale.unwrap_or(100) as f32 / 100.0;
+    let k = base_scale(o, g) * compact(settings.picture) * p.scale.unwrap_or(100) as f32 / 100.0;
     (pos2(c.x.clamp(s.min.x, s.max.x), c.y.clamp(s.min.y, s.max.y)), k)
 }
 
@@ -164,18 +219,29 @@ fn push(items: &mut Vec<Item>, btn: Btn, group: Group, shape: Shape, accent: Col
 pub fn compute(screen: Rect, minimal: bool, settings: &Settings) -> Geometry {
     let o = orient_of(screen);
     let (w, h) = (screen.width(), screen.height());
-    let (picture, band) = match o {
-        Orient::Landscape => {
-            let top = 8.0_f32.max(0.02 * h);
+    let (picture, band) = match (o, settings.picture) {
+        // The full screen: the picture as big as the screen holds (in portrait from the top, the width's height),
+        // the controls over it.
+        (Orient::Landscape, Picture::Full) => (screen, None),
+        (Orient::Portrait, Picture::Full) => {
+            let bottom = screen.min.y + h.min(w * FULL_WIDTH);
+            (Rect::from_min_max(screen.min, pos2(screen.max.x, bottom)), None)
+        }
+        (Orient::Landscape, size) => {
+            let (top, bottom) = if size == Picture::Large {
+                (0.0, 56.0 * COMPACT)
+            } else {
+                (8.0_f32.max(0.02 * h), 56.0)
+            };
             let area = Rect::from_min_max(
                 pos2(screen.min.x, screen.min.y + top),
-                pos2(screen.max.x, screen.max.y - 56.0),
+                pos2(screen.max.x, screen.max.y - bottom),
             );
             (area, None)
         }
-        Orient::Portrait => {
+        (Orient::Portrait, size) => {
             let top = screen.min.y + 28.0;
-            let bottom = top + w * 9.0 / 16.0;
+            let bottom = screen.min.y + band_top(w, h, size);
             let area = Rect::from_min_max(pos2(screen.min.x, top), pos2(screen.max.x, bottom));
             (area, Some(Rect::from_min_max(pos2(screen.min.x, bottom), screen.max)))
         }
@@ -356,6 +422,81 @@ mod tests {
         let band = g.band.unwrap();
         assert!((g.picture.max.y - band.min.y).abs() < 0.01);
         assert!(g.items.iter().all(|i| i.shape.bounds().min.y >= band.min.y));
+    }
+
+    #[test]
+    fn on_split_screen_sizes_no_group_covers_another_or_the_portrait_picture() {
+        // the designs, a phone (both ways), a Fold's inner screen (both ways, then halved) and a short window
+        let sizes = [
+            (932.0, 430.0),
+            (430.0, 932.0),
+            (411.0, 891.0),
+            (891.0, 411.0),
+            (787.0, 873.0),
+            (873.0, 787.0),
+            (420.0, 673.0),
+            (841.0, 337.0),
+            (800.0, 360.0),
+        ];
+        let pictures = [Picture::Standard, Picture::Large, Picture::Full];
+        for ((w, h), picture) in sizes.into_iter().flat_map(|s| pictures.map(|p| (s, p))) {
+            let s = screen(w, h);
+            let g = compute(s, false, &Settings { picture, ..Settings::default() });
+            let groups = [
+                Group::Dpad,
+                Group::Face,
+                Group::L,
+                Group::R,
+                Group::Speed,
+                Group::Menu,
+                Group::StartSelect,
+            ];
+            let bounds: Vec<(Group, Rect)> =
+                groups.iter().map(|&k| (k, g.group_bounds(k).unwrap())).collect();
+            for (i, &(a, ra)) in bounds.iter().enumerate() {
+                assert!(
+                    s.expand(1.0).contains_rect(ra),
+                    "{a:?} off the {w}x{h} screen ({picture:?})"
+                );
+                for &(b, rb) in &bounds[i + 1..] {
+                    assert!(
+                        !ra.intersects(rb),
+                        "{a:?} {ra:?} covers {b:?} {rb:?} on {w}x{h} ({picture:?})"
+                    );
+                }
+                if g.orient == Orient::Portrait && picture != Picture::Full {
+                    assert!(
+                        ra.min.y >= g.picture.max.y,
+                        "{a:?} {ra:?} on the picture on {w}x{h} ({picture:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_large_picture_takes_the_width_where_it_can_and_the_full_screen_is_the_screen() {
+        let large = Settings { picture: Picture::Large, ..Settings::default() };
+        let full = Settings { picture: Picture::Full, ..Settings::default() };
+        // a phone in portrait: the whole width, so no bars at the sides
+        let phone = compute(screen(411.0, 891.0), false, &large);
+        assert!(phone.picture.height() >= 411.0 * FULL_WIDTH - 0.5, "{:?}", phone.picture);
+        // a Fold's inner screen: much more picture than the design gives it
+        let standard = compute(screen(787.0, 873.0), false, &Settings::default()).picture;
+        let unfolded = compute(screen(787.0, 873.0), false, &large).picture;
+        assert!(unfolded.height() > standard.height() * 1.2, "{unfolded:?} against {standard:?}");
+        // the controls are smaller, never tiny
+        for i in &phone.items {
+            let b = i.shape.bounds();
+            assert!(b.width().min(b.height()) >= MIN_DP * COMPACT - 0.01, "{i:?}");
+        }
+        assert_eq!(compute(screen(891.0, 411.0), false, &full).picture, screen(891.0, 411.0));
+        let tall = compute(screen(787.0, 873.0), false, &full);
+        assert!(tall.band.is_none() && tall.picture.min.y == 0.0);
+        assert!(
+            (tall.picture.height() - 787.0 * FULL_WIDTH).abs() < 0.5,
+            "the width's height, from the top"
+        );
     }
 
     #[test]

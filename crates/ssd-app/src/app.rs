@@ -219,6 +219,9 @@ struct WindowState {
     stages: Stages,
     /// The last frames run were a fast-forward's batch (see [`run_frames`]).
     fast_forward: bool,
+    /// The game runs at speed 1: a batch is frames the clock owes (a screen slower than the game), not a
+    /// fast-forward, so every frame's sound is heard (see [`run_frames`]).
+    real_time: bool,
     /// The Video page's choices as the run shows them (the command line's scale and look included).
     video: VideoSettings,
     /// The choices the PC file held when they were last read: the player's changes are measured from them.
@@ -271,6 +274,7 @@ impl WindowState {
             hd_view: None,
             stages: Stages::default(),
             fast_forward: false,
+            real_time: false,
             video: VideoSettings::default(),
             video_saved: VideoSettings::default(),
             video_apply: false,
@@ -934,7 +938,9 @@ fn run_frames(
     // Only the last frame of a batch is shown, and only the first one's sound is heard: the
     // others run without drawing their pixels, logging their render or resampling their sound.
     // A breakpoint stops a frame wherever it is, and the HD menu's frames behind its curtain are
-    // few: both run every frame whole.
+    // few: both run every frame whole. At speed 1 the batch is the frames the clock owes (a phone
+    // whose screen fell behind): each one's sound is heard, or the sound would starve.
+    let every_sound = state.real_time;
     let fast_forward = frames > 1
         && !state.step_once
         && machine.breakpoints().is_empty()
@@ -950,10 +956,10 @@ fn run_frames(
             let shown = n + 1 == frames;
             machine.set_compose_pixels(shown);
             machine.set_line_log(logging && shown);
-            machine.set_audio_resampling(n == 0);
+            machine.set_audio_resampling(n == 0 || every_sound);
         }
         let driven = Instant::now();
-        let stopped = if n == 0 {
+        let stopped = if n == 0 || every_sound {
             session.run(machine, pad, &events, audio, &stops)?
         } else {
             session.run(machine, pad, &events, &mut null, &stops)?
@@ -1519,10 +1525,15 @@ impl Enhanced {
 const BATCH_TIME: Duration = Duration::from_millis(50);
 /// The most frames a window frame runs.
 const MAX_BATCH: u32 = 64;
+/// The most frames a window frame runs at speed 1 to keep up with the clock when the screen is slower than the game
+/// (a phone's adaptive refresh rate drops to 24 Hz or so while nothing touches it, and the present waits for it): the
+/// game and its sound keep their time, and only the picture is less smooth.
+const CATCH_UP: u32 = 4;
 
 /// The clock of the frame loop: how many frames a window frame runs, and when the next one starts.
 ///
-/// At speed 1 a window frame runs one frame and the clock is one frame long. At speed N it runs N
+/// At speed 1 a window frame runs one frame and the clock is one frame long (and the frames it is behind by, up to
+/// [`CATCH_UP`], when the screen is slower than the game). At speed N it runs N
 /// frames of a clock that is still one display refresh long, and more when it is behind (the
 /// frames it owes, as many as [`BATCH_TIME`] holds at the cost a frame has had lately): the speed is
 /// the machine's to give, never the picture's.
@@ -1543,7 +1554,9 @@ impl Pacer {
     /// The frames to run in the window frame that starts at `now`, at `speed`.
     fn frames(&self, speed: u32, now: Instant) -> u32 {
         if speed <= 1 {
-            return 1;
+            let owed = now.saturating_duration_since(self.next).as_secs_f64()
+                / self.frame_time.as_secs_f64();
+            return (1 + owed as u32).min(CATCH_UP);
         }
         let period = self.frame_time.as_secs_f64() / f64::from(speed);
         let owed = (now.saturating_duration_since(self.next).as_secs_f64() / period) as u32;
@@ -1834,6 +1847,16 @@ fn windowed_loop(
                     }
                     touch::Out::Haptic => touch::haptic(),
                     touch::Out::Persist => persist_touch(&mut state),
+                    touch::Out::Quit => break 'main,
+                    touch::Out::Restart => {
+                        // The launch loop starts the game again (Android); a desktop run has none, and Restart
+                        // there waits for the next start.
+                        #[cfg(target_os = "android")]
+                        {
+                            crate::android_setup::request(crate::android_setup::Forced::Relaunch);
+                            break 'main;
+                        }
+                    }
                 }
             }
             input.set_touch(state.touch.pressed());
@@ -1892,6 +1915,7 @@ fn windowed_loop(
         if env.verify.is_none() && (!state.controls.paused || state.step_once) {
             requested = if state.step_once { 1 } else { pacer.frames(multiplier, Instant::now()) };
             state.stages = Stages::default();
+            state.real_time = multiplier <= 1;
             frames_run =
                 window_frames(&mut state, machine, session, &env, pad, &mut audio, requested)?;
             pacer.note_cost(frames_run, state.stages.frames());
@@ -1909,6 +1933,11 @@ fn windowed_loop(
         }
         let now = video.now();
         let rate = fps.add(now, frames_run);
+        if state.touch.enabled && state.touch.settings.show_fps {
+            let (queued_ms, gaps) = audio.health();
+            state.touch.stats =
+                Some(format!("{rate:.1} fps · sound {queued_ms:.0} ms · {gaps} gaps"));
+        }
         note_wram(&mut state, machine);
         if any_verify(machine)
             && let Some(routine) = state.watch.update(&machine.hook_stats())
@@ -2760,10 +2789,13 @@ mod tests {
         let frame = Duration::from_millis(16);
         let mut pacer = Pacer::new(frame);
         let start = pacer.next;
+        assert_eq!(pacer.frames(1, start), 1, "speed 1 on time is a frame");
+        // a screen at 24 Hz: 42 ms a window frame, two frames owed on top of this one
+        assert_eq!(pacer.frames(1, start + Duration::from_millis(42)), 3);
         assert_eq!(
             pacer.frames(1, start + Duration::from_secs(1)),
-            1,
-            "speed 1 is a frame, always"
+            CATCH_UP,
+            "never more than that"
         );
         assert_eq!(pacer.frames(4, start), 4, "on time: the speed's frames");
         // 48 ms behind at speed 4 (4 ms a frame): 12 more frames are owed; 2 ms a frame lets 25 in

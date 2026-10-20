@@ -28,6 +28,10 @@ pub enum Out {
     Haptic,
     /// The choices changed: write them to the settings file.
     Persist,
+    /// The GAME page: end the game and start it again at the title screen.
+    Restart,
+    /// The GAME page: end the game and close the app.
+    Quit,
 }
 
 /// What the screen shows besides the game.
@@ -36,6 +40,8 @@ pub enum Mode {
     Play,
     Menu,
     Options,
+    /// The GAME page: restart, quit.
+    Game,
     Edit,
 }
 
@@ -47,14 +53,18 @@ pub enum PBtn {
     Options,
     Edit,
     HideControls,
+    Game,
     Resume,
-    HidePadToggle,
+    Restart,
+    Quit,
     OptLayout,
     OptOpacity,
     OptHaptics,
     OptAuto,
     OptHidePad,
     OptReset,
+    OptFps,
+    OptPicture,
     Back,
     SizeDown,
     SizeUp,
@@ -126,10 +136,14 @@ pub struct Touch {
     pub speed_label: &'static str,
     pub slot: u8,
     in_battle: bool,
+    /// The line of the frame rate and the sound buffer, told by the host; drawn while Show FPS is on.
+    pub stats: Option<String>,
     geo: Geometry,
     fingers: Vec<Finger>,
     pressed: [bool; 12],
     out: Vec<Out>,
+    /// The GAME page's button tapped once: a second tap does it (the progress since the last save is lost).
+    armed: Option<PBtn>,
 }
 
 static FORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -196,10 +210,12 @@ impl Touch {
             speed_label: "x1",
             slot: 1,
             in_battle: false,
+            stats: None,
             geo,
             fingers: Vec::new(),
             pressed: [false; 12],
             out: Vec::new(),
+            armed: None,
         }
     }
 
@@ -327,23 +343,32 @@ impl Touch {
                 cell(&mut p, PBtn::Options, "Options".into(), 0.0, 1.0, false);
                 cell(&mut p, PBtn::Edit, "Edit layout".into(), 1.0, 1.0, false);
                 cell(&mut p, PBtn::HideControls, "Hide controls".into(), 0.0, 2.0, false);
-                cell(&mut p, PBtn::Resume, "Resume".into(), 1.0, 2.0, true);
-                let toggle = Rect::from_min_size(
-                    p.rect.min + vec2(w - 14.0 - 90.0, 50.0 + 3.0 * 56.0),
-                    vec2(90.0, MIN_DP),
-                );
-                let label = if self.settings.hide_pad { "ON" } else { "OFF" };
-                p.buttons.push(PanelButton {
-                    id: PBtn::HidePadToggle,
-                    rect: toggle,
-                    label: label.into(),
-                    primary: false,
-                });
+                cell(&mut p, PBtn::Game, "Game: restart, quit".into(), 1.0, 2.0, false);
+                cell(&mut p, PBtn::Resume, "Resume".into(), 1.0, 3.0, true);
                 p.note = "Menu pauses the game. Slots 1 to 4 as on the PC (F5, F9).";
                 Some(p)
             }
+            Mode::Game => {
+                let mut p = make(338.0, "GAME");
+                let armed = |id, idle: &str, again: &str| {
+                    if self.armed == Some(id) { again.to_owned() } else { idle.to_owned() }
+                };
+                let restart = armed(PBtn::Restart, "Restart game", "Tap again: restart");
+                cell(&mut p, PBtn::Restart, restart, 0.0, 0.0, false);
+                cell(
+                    &mut p,
+                    PBtn::Quit,
+                    armed(PBtn::Quit, "Quit", "Tap again: quit"),
+                    1.0,
+                    0.0,
+                    false,
+                );
+                cell(&mut p, PBtn::Back, "Back".into(), 0.0, 3.0, true);
+                p.note = "Restart and Quit lose what was played since the last save.";
+                Some(p)
+            }
             Mode::Options => {
-                let mut p = make(338.0, "TOUCH OPTIONS");
+                let mut p = make(394.0, "TOUCH OPTIONS");
                 let st = &self.settings;
                 cell(
                     &mut p,
@@ -386,7 +411,23 @@ impl Touch {
                     false,
                 );
                 cell(&mut p, PBtn::OptReset, "Reset layout".into(), 1.0, 2.0, false);
-                cell(&mut p, PBtn::Back, "Back".into(), 0.0, 3.0, true);
+                cell(
+                    &mut p,
+                    PBtn::OptFps,
+                    format!("Show FPS: {}", if st.show_fps { "On" } else { "Off" }),
+                    0.0,
+                    3.0,
+                    false,
+                );
+                cell(
+                    &mut p,
+                    PBtn::OptPicture,
+                    format!("Picture: {}", st.picture.name()),
+                    1.0,
+                    3.0,
+                    false,
+                );
+                cell(&mut p, PBtn::Back, "Back".into(), 0.0, 4.0, true);
                 p.note = "Saved on this device only, in ssd.settings. Auto battle switches to the minimal layout in fights.";
                 Some(p)
             }
@@ -537,7 +578,7 @@ impl Touch {
                     }
                 }
             }
-            Mode::Menu | Mode::Options => {
+            Mode::Menu | Mode::Options | Mode::Game => {
                 if let Some(b) =
                     self.panel().and_then(|p| p.buttons.into_iter().find(|b| b.rect.contains(pos)))
                 {
@@ -608,7 +649,7 @@ impl Touch {
         match self.mode {
             Mode::Play => self.open_menu(),
             Mode::Menu => self.panel_press(PBtn::Resume),
-            Mode::Options => self.panel_press(PBtn::Back),
+            Mode::Options | Mode::Game => self.panel_press(PBtn::Back),
             Mode::Edit => self.panel_press(PBtn::Done),
         }
     }
@@ -636,6 +677,13 @@ impl Touch {
     }
 
     fn panel_press(&mut self, b: PBtn) {
+        // Restart and Quit lose the play since the last save: the first tap only arms the button.
+        let confirmed = matches!(b, PBtn::Restart | PBtn::Quit);
+        if confirmed && self.armed != Some(b) {
+            self.armed = Some(b);
+            return;
+        }
+        self.armed = None;
         match b {
             PBtn::Save => {
                 self.emit(Out::Save);
@@ -656,7 +704,20 @@ impl Touch {
                 self.close_menu();
             }
             PBtn::Resume => self.close_menu(),
-            PBtn::HidePadToggle | PBtn::OptHidePad => {
+            PBtn::Game => self.mode = Mode::Game,
+            PBtn::Restart | PBtn::Quit => {
+                self.close_menu();
+                self.emit(if b == PBtn::Restart { Out::Restart } else { Out::Quit });
+            }
+            PBtn::OptFps => {
+                self.settings.show_fps = !self.settings.show_fps;
+                self.persist();
+            }
+            PBtn::OptPicture => {
+                self.settings.picture = self.settings.picture.next();
+                self.persist();
+            }
+            PBtn::OptHidePad => {
                 self.settings.hide_pad = !self.settings.hide_pad;
                 self.persist();
             }
@@ -709,6 +770,7 @@ impl Touch {
     }
 
     fn close_menu(&mut self) {
+        self.armed = None;
         self.mode = Mode::Play;
         self.fingers.clear();
         self.emit(Out::Pause(false));
@@ -832,6 +894,7 @@ impl Touch {
             }
             ["menu"] => self.mode = Mode::Menu,
             ["options"] => self.mode = Mode::Options,
+            ["game"] => self.mode = Mode::Game,
             ["edit"] => {
                 self.minimal = false;
                 self.mode = Mode::Edit;
@@ -1050,6 +1113,33 @@ mod tests {
         assert!(!btns.contains(&Btn::X) && !btns.contains(&Btn::L));
         t.set_status("x1", 1, false, false);
         assert!(!t.minimal);
+    }
+
+    #[test]
+    fn the_game_page_asks_a_second_tap_before_it_restarts_or_quits() {
+        let mut t = touch();
+        let tap = |t: &mut Touch, id: PBtn| {
+            let at = t.panel().unwrap().buttons.iter().find(|b| b.id == id).unwrap().rect.center();
+            t.finger_down(7, at);
+            t.finger_up(7, false);
+        };
+        t.back_key();
+        tap(&mut t, PBtn::Game);
+        assert_eq!(t.mode, Mode::Game);
+        t.take_out();
+        tap(&mut t, PBtn::Quit);
+        assert_eq!(t.mode, Mode::Game, "one tap only arms it");
+        assert!(!t.take_out().contains(&Out::Quit));
+        tap(&mut t, PBtn::Restart);
+        tap(&mut t, PBtn::Quit);
+        assert!(!t.take_out().contains(&Out::Quit), "another button disarmed it");
+        tap(&mut t, PBtn::Quit);
+        assert!(t.take_out().contains(&Out::Quit));
+        assert_eq!(t.mode, Mode::Play);
+        t.back_key();
+        tap(&mut t, PBtn::Game);
+        t.back_key();
+        assert_eq!(t.mode, Mode::Menu, "back leaves the page for the MENU");
     }
 
     #[test]

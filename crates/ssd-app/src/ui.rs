@@ -193,12 +193,16 @@ fn fitted(ui: &Ui, area: Rect, game: &GameImage) {
 /// The rect a game view is drawn in, within `area`: the one [`fitted`] paints, and the one an HD
 /// menu's backdrop and layout are fitted to.
 fn picture_of(ui: &Ui, area: Rect, game: &GameImage) -> Rect {
+    // With the touch controls (a phone) an HD picture fills its area at any scale: its whole multiples do not
+    // fit there. The machine's own frame, and the desktop, keep whole scales.
+    let whole = !(crate::touch::wanted() && game.height > layout::MACHINE_LINES);
     let picture = layout::picture_rect(
         ui.ctx().pixels_per_point(),
         area,
         game.width,
         game.height,
         game.pixel_aspect,
+        whole,
     );
     log::debug!("game picture {picture:?} in area {area:?}");
     picture

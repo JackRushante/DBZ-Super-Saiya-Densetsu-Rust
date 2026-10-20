@@ -65,9 +65,41 @@ pub fn fit_game(
     }
 }
 
+/// The most lines a frame of the machine has (239 with overscan): a taller picture is an HD one, already drawn at
+/// a multiple of the machine's resolution.
+pub const MACHINE_LINES: u32 = 239;
+
+/// Fits a frame as [`fit_game`] does, at any scale: as big as the area holds, keeping the aspect. For an HD
+/// picture, which is drawn smoothed, on a screen its whole multiples do not fill (a phone: the HD picture is
+/// about a thousand pixels wide, and twice that is wider than the screen).
+#[must_use]
+pub fn fit_any(
+    area_width: f32,
+    area_height: f32,
+    frame_width: u32,
+    frame_height: u32,
+    pixel_aspect: f64,
+) -> Fit {
+    let aspect = if pixel_aspect.is_finite() && pixel_aspect > 0.0 { pixel_aspect } else { 1.0 };
+    if frame_width == 0 || frame_height == 0 || area_width <= 0.0 || area_height <= 0.0 {
+        return Fit { scale: 0.0, x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+    }
+    let natural_width = (f64::from(frame_width) * aspect) as f32;
+    let scale = (area_width / natural_width).min(area_height / frame_height as f32);
+    let (width, height) = ((natural_width * scale).floor(), (frame_height as f32 * scale).floor());
+    Fit {
+        scale,
+        x: ((area_width - width) / 2.0).floor(),
+        y: ((area_height - height) / 2.0).floor(),
+        width,
+        height,
+    }
+}
+
 /// Where a game picture (`width` x `height` pixels, each with the ratio `pixel_aspect`) is drawn in
-/// `area`, in points at `pixels_per_point`: the [`fit_game`] fit, worked out on the pixel grid. The
-/// live frame and the backdrop of an HD menu are both drawn in this rect, so they cannot differ.
+/// `area`, in points at `pixels_per_point`: the [`fit_game`] fit (`whole`), else the [`fit_any`] one,
+/// worked out on the pixel grid. The live frame and the backdrop of an HD menu are both drawn in this
+/// rect, so they cannot differ.
 #[must_use]
 pub fn picture_rect(
     pixels_per_point: f32,
@@ -75,12 +107,14 @@ pub fn picture_rect(
     width: u32,
     height: u32,
     pixel_aspect: f64,
+    whole: bool,
 ) -> egui::Rect {
     let ppp = pixels_per_point;
     let origin = (area.min.to_vec2() * ppp).round();
     let end = (area.max.to_vec2() * ppp).floor();
     let pixels = end - origin;
-    let fit = fit_game(pixels.x, pixels.y, width, height, pixel_aspect);
+    let fit =
+        if whole { fit_game } else { fit_any }(pixels.x, pixels.y, width, height, pixel_aspect);
     let min = (origin + egui::vec2(fit.x, fit.y)) / ppp;
     egui::Rect::from_min_size(min.to_pos2(), egui::vec2(fit.width, fit.height) / ppp)
 }
@@ -94,7 +128,7 @@ mod tests {
         // A 1440x900 pixel window at 1.5 points per pixel is 960x600 points; the panel takes 240
         // points, so the area is 720x600 points, which is 1080x900 pixels.
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(720.0, 600.0));
-        let rect = picture_rect(1.5, area, 256, 224, 8.0 / 7.0);
+        let rect = picture_rect(1.5, area, 256, 224, 8.0 / 7.0, true);
         // ×4 is 1170 pixels wide, too wide for 1080; ×3 is 878 x 672 pixels, centred in the area.
         assert_eq!(rect.size(), egui::vec2(878.0, 672.0) / 1.5);
         assert_eq!(
@@ -102,8 +136,23 @@ mod tests {
             egui::pos2(101.0 / 1.5, 114.0 / 1.5),
             "((1080 - 878) / 2, (900 - 672) / 2)"
         );
-        let again = picture_rect(1.5, area, 256, 224, 8.0 / 7.0);
+        let again = picture_rect(1.5, area, 256, 224, 8.0 / 7.0, true);
         assert_eq!(rect, again, "the same inputs give the same rect");
+    }
+
+    #[test]
+    fn any_scale_fills_the_area_one_way_keeping_the_aspect() {
+        // an HD picture (1024 x 896, 1170 wide at 8:7) on a phone 1768 pixels wide: ×1 only by whole numbers,
+        // about 1.51 by any (the width is the limit)
+        let whole = fit_game(1768.0, 1400.0, 1024, 896, 8.0 / 7.0);
+        assert!((whole.scale - 1.0).abs() < 1e-6);
+        let any = fit_any(1768.0, 1400.0, 1024, 896, 8.0 / 7.0);
+        assert!((any.width - 1768.0).abs() < 0.5 && (any.height - 1353.0).abs() < 1.5, "{any:?}");
+        assert!(
+            (any.x).abs() < 0.5 && (any.y - 23.0).abs() < 1.5,
+            "centred the other way: {any:?}"
+        );
+        assert_eq!(fit_any(0.0, 10.0, 1024, 896, 1.0).width, 0.0);
     }
 
     #[test]

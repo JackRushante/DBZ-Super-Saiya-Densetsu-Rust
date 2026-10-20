@@ -351,17 +351,30 @@ pub const TOUCH_HAPTICS: &str = "controls.touch.haptics";
 pub const TOUCH_AUTO_BATTLE: &str = "controls.touch.auto_battle";
 /// Hide the controls while a gamepad is connected: 0 off, 1 on (the default).
 pub const TOUCH_HIDE_PAD: &str = "controls.touch.hide_pad";
+/// The frame rate and the sound buffer at the top of the screen: 0 off (the default), 1 on.
+pub const TOUCH_SHOW_FPS: &str = "controls.touch.show_fps";
+/// The size of the picture beside the controls: 0 the design's (the default), 1 large, 2 the whole screen with the
+/// controls over it.
+pub const TOUCH_PICTURE: &str = "controls.touch.picture";
 /// The steps of the opacity row.
 pub const TOUCH_OPACITY_STEPS: u8 = 17;
 /// The step of 75%.
 pub const TOUCH_OPACITY_DEFAULT: u8 = 11;
 
-/// Puts the touch controls' places and sizes back to the design (the five choices stay).
+/// Puts the touch controls' places and sizes back to the design (the choices stay).
 pub fn reset_touch_layout(values: &mut Values) {
     values.retain(|key| {
         !key.starts_with(TOUCH_PREFIX)
-            || [TOUCH_STYLE, TOUCH_OPACITY, TOUCH_HAPTICS, TOUCH_AUTO_BATTLE, TOUCH_HIDE_PAD]
-                .contains(&key)
+            || [
+                TOUCH_STYLE,
+                TOUCH_OPACITY,
+                TOUCH_HAPTICS,
+                TOUCH_AUTO_BATTLE,
+                TOUCH_HIDE_PAD,
+                TOUCH_SHOW_FPS,
+                TOUCH_PICTURE,
+            ]
+            .contains(&key)
     });
 }
 
