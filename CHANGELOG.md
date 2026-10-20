@@ -21,6 +21,7 @@
   Accessibility (and `--lang`). Nothing is bundled: without the files nothing changes. The first one supported is
   Traditional Chinese (Hong Kong).
 - Android: the release build is signed when `SSD_KEYSTORE_PROPERTIES` names a key kept outside the repository.
+- Android: the app has its icon, the four-star Dragon Ball in pixel art (adaptive, round and themed).
 
 ### HD art
 

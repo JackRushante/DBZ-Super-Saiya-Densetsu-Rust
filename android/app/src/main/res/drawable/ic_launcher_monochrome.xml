@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Written by tools/android-icon.py from assets/icon/sfera-4-stelle-54.png: edit the picture, not this. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="54" android:viewportHeight="54">
+    <path android:fillColor="#FFFFFF" android:pathData="M23,13h8v1h-8zM21,14h3v1h-3zM25,14h8v1h-8zM19,15h5v1h-5zM25,15h10v1h-10zM18,16h5v1h-5zM26,16h10v1h-10zM17,17h4v1h-4zM28,17h9v1h-9zM16,18h6v1h-6zM27,18h6v1h-6zM34,18h4v1h-4zM15,19h8v1h-8zM26,19h7v1h-7zM34,19h5v1h-5zM15,20h7v1h-7zM24,20h1v1h-1zM27,20h5v1h-5zM35,20h4v1h-4zM14,21h8v1h-8zM23,21h3v1h-3zM27,21h3v1h-3zM37,21h3v1h-3zM14,22h17v1h-17zM36,22h4v1h-4zM13,23h19v1h-19zM35,23h6v1h-6zM13,24h18v1h-18zM33,24h1v1h-1zM36,24h5v1h-5zM13,25h7v1h-7zM21,25h10v1h-10zM32,25h3v1h-3zM36,25h5v1h-5zM13,26h7v1h-7zM21,26h20v1h-20zM13,27h6v1h-6zM22,27h19v1h-19zM13,28h4v1h-4zM24,28h17v1h-17zM13,29h5v1h-5zM23,29h6v1h-6zM30,29h11v1h-11zM13,30h6v1h-6zM22,30h7v1h-7zM30,30h11v1h-11zM14,31h4v1h-4zM20,31h1v1h-1zM23,31h5v1h-5zM31,31h9v1h-9zM14,32h4v1h-4zM19,32h3v1h-3zM23,32h3v1h-3zM33,32h7v1h-7zM15,33h12v1h-12zM32,33h7v1h-7zM15,34h13v1h-13zM31,34h8v1h-8zM16,35h11v1h-11zM29,35h1v1h-1zM32,35h6v1h-6zM17,36h10v1h-10zM28,36h3v1h-3zM32,36h5v1h-5zM18,37h18v1h-18zM19,38h16v1h-16zM21,39h12v1h-12zM23,40h8v1h-8z" />
+</vector>

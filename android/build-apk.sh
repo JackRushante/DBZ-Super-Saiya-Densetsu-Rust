@@ -10,6 +10,9 @@ export CMAKE="${CMAKE_ANDROID:-$(command -v cmake)}"
 profile=debug; cargo_profile=(); gradle_task=assembleDebug
 if [ "${1:-}" = "--release" ]; then profile=release; cargo_profile=(--release); gradle_task=assembleRelease; shift; fi
 abis=("$@"); [ ${#abis[@]} -eq 0 ] && abis=(x86_64)
+# A debug build still runs the game's own crates fully optimised: at the dev profile's level 1 the HD renderer is too slow
+# on a phone. Without debug info the library is ten times smaller.
+export CARGO_PROFILE_DEV_OPT_LEVEL="${CARGO_PROFILE_DEV_OPT_LEVEL:-3}" CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
 
 jni=android/app/src/main/jniLibs
 rm -rf "$jni"
@@ -33,4 +36,6 @@ rm -rf android/app/src/main/java/org
 mkdir -p android/app/src/main/java/org/libsdl
 cp -r "$sdl_java" android/app/src/main/java/org/libsdl/app
 
+# Gradle packages an APK incrementally over the last one and never gives back the room of a bigger old library.
+rm -rf android/app/build/outputs/apk
 (cd android && ./gradlew --no-daemon "$gradle_task")

@@ -407,6 +407,13 @@ Test on a headless emulator (`emulator -avd NAME -no-window -no-audio -gpu swift
     adb push canonical.sfc /data/local/tmp/r.sfc
     adb shell "run-as io.github.dbz_ssd_recompiled sh -c 'mkdir -p files/cache/rom && cp /data/local/tmp/r.sfc files/cache/rom/canonical.sfc'"
 
+The launcher icon is pixel art (`assets/icon/sfera-4-stelle-54.png`, 54 x 54, a pixel for 2 dp of the adaptive icon's
+108 dp): `python tools/android-icon.py` writes it as vector drawables in `android/app/src/main/res/` (the four-star ball as the
+foreground, the starry blue as the background, and the ball with its stars cut out as the monochrome layer of themed icons),
+so it is sharp at every density and the repository holds no picture outside `assets/`. `build-apk.sh` builds the game's crates
+optimised even for a debug APK (the HD renderer at the dev profile's level 1 is too slow on a phone) and deletes the last APK
+first (Gradle packages over it and keeps the room of a bigger old library).
+
 `files/android-args.txt` (one line) holds extra launch arguments: `ENV:NAME=value` sets an environment variable, the rest is
 the command line (`--mode enhanced --install-hd-pack /data/data/io.github.dbz_ssd_recompiled/files/hd-pack.zip`).
 Errors and the log go to `adb logcat -s ssd`.

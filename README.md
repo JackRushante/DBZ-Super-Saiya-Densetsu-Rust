@@ -377,16 +377,7 @@ goes from polish to new content. Dates are not promised; each milestone ships wh
 | **M6** | **HD graphics and widescreen** | The frame-end HD renderer (pixel-exact against the PPU), 16:9, HD text, soft shadows, card tooltips, and the HD art: portraits and faces, fighters and effects, field sprites, maps, battle backgrounds, title and story pictures, cards, Mode 7 flights. |
 | **M7** | **Options and difficulty** | The Options screen in the original's style: difficulty presets over the cheats' numbers, gameplay (text speed, message auto-run, battle animation speed, random encounters), video (fullscreen, scale, look, 16:9 or 4:3, scanlines, CRT, V-sync, Keep or Revert), audio (volume, mono or stereo), keyboard and gamepad remapping, accessibility (larger text, high contrast, a colour-blind-safe cursor); saved with the game or kept for the PC. |
 | **M8** | **HD polish** | HD art for the last field sprites and the town rooms, story scenes checked by an audit of every replay (flicker, faces, margins, missing art), palette-exact recolouring of every layer, a fast-forward that keeps x8, and the scripted fights checked with cheats. |
-
-### M9: Android port of the HD Remastered edition (in progress)
-
-The finished Remastered game, on a phone or tablet. Built and played on phones; the release build (signing, icon) is
-what is left:
-
-- **Touch controls** (an on-screen pad and buttons, with a layout you can move) and **gamepad** support.
-- **Performance on mobile GPUs**: the HD renderer, the art streaming and the memory use tuned for phones.
-- **Installing the HD pack on the device**: one file, picked from the device's storage, installed on first launch.
-- **Bring your own ROM on Android**: pick your ROM file once; it is checked and cached like on the PC, and nothing is bundled.
+| **M9** | **Android** | The Remastered game on phones and tablets: touch controls in the original's style (a layout you can move, a large or full-screen picture, Restart and Quit), gamepads, your own ROM and the HD pack picked on the device and installed on the first launch, a steady speed and sound on adaptive-refresh screens, a pixel-art launcher icon and a signed release build. |
 
 ### M10: Cheats, mod support and data packs
 
@@ -433,6 +424,7 @@ A new story chapter after the Frieza saga, faithful to the anime, English only:
 - Alternate **soundtrack** packs through the mod system.
 - A **bestiary and card collection** screen.
 - An **accuracy mode** that always plays the recompiled code, for comparison with the original.
+- A lighter **HD renderer on phones**, for a steadier frame rate at the higher speeds.
 
 ## FAQ
 
@@ -451,7 +443,7 @@ settings of this PC are in `ssd.settings`), and a save that Classic plays afterw
 the bag from the game's list.
 
 **Will there be a Linux, macOS or Steam Deck version?** The dependencies (SDL3, wgpu) are portable but only Windows
-is built and tested; the Android port is [on the roadmap](#roadmap).
+and Android are built and tested; Linux, macOS and the Steam Deck are [on the roadmap](#roadmap) (M13).
 
 **Why GPL-3.0?** The emulator core it is built on is GPL-3.0, so the whole program is.
 
