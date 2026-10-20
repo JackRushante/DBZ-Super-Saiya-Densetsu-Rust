@@ -389,6 +389,17 @@ Build (Linux, or any host with the Android SDK and NDK, a JDK 17+, cmake, Rust w
     android/build-apk.sh                 # x86_64 for the emulator; add arm64-v8a for a phone; --release first for release
     # the APK: android/app/build/outputs/apk/debug/app-debug.apk
 
+A release build (`android/build-apk.sh --release arm64-v8a`) is unsigned unless `SSD_KEYSTORE_PROPERTIES` names a
+properties file, kept outside the repository with the keystore it points to:
+
+    storeFile=/path/to/release.jks
+    storePassword=...
+    keyAlias=...
+    keyPassword=...
+
+Then `app-release.apk` is signed with that key and installs with `adb install` (a newer build over an older one needs
+the same key). Without the variable nothing changes.
+
 Test on a headless emulator (`emulator -avd NAME -no-window -no-audio -gpu swiftshader_indirect`): install the APK with
 `adb install`, then put the files into the app's private folder (the debug build allows `run-as`):
 

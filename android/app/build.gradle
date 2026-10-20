@@ -14,13 +14,31 @@ android {
         versionName '0.1.0'
     }
 
+    // A release build is signed when SSD_KEYSTORE_PROPERTIES names a properties file (storeFile, storePassword,
+    // keyAlias, keyPassword) kept outside the repository; without it the release APK is unsigned, as before.
+    def signing = System.getenv('SSD_KEYSTORE_PROPERTIES')
+    if (signing) {
+        def props = new Properties()
+        file(signing).withInputStream { props.load(it) }
+        signingConfigs {
+            release {
+                storeFile file(props['storeFile'])
+                storePassword props['storePassword']
+                keyAlias props['keyAlias']
+                keyPassword props['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         debug {
             debuggable true
         }
         release {
-            // Signing is the release step of a later milestone; a release build is unsigned for now.
             minifyEnabled false
+            if (signing) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 
