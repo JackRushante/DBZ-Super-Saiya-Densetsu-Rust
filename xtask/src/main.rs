@@ -1112,6 +1112,10 @@ fn text_dump(args: &[&str]) -> anyhow::Result<ExitCode> {
             return Ok(usage());
         }
     };
+    if let Some(reason) = text_dump::refused(&repo_root()?, &std::path::absolute(&args.out)?) {
+        eprintln!("text-dump: {reason}");
+        return Ok(usage());
+    }
     let rom = cached_rom()?;
     text_dump::run(&rom, &args, &mut std::io::stdout())?;
     Ok(ExitCode::SUCCESS)

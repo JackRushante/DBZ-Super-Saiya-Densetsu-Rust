@@ -353,7 +353,8 @@ below).
 
 State: a feasibility spike with a real first launch. A debug APK builds, installs on an x86_64 emulator and runs the game,
 Classic and Enhanced (with the HD pack). The first launch asks for the ROM, the mode and, for Enhanced, the HD pack, on screens in
-the game's style (the system file picker is Android's). The touch controls are in (below); nothing has run on a phone (arm64) yet.
+the game's style (the system file picker is Android's). The touch controls are in (below). It has been played on phones (arm64),
+a foldable included (inner and outer screens, split screen, folded and unfolded).
 
 First launch (`crates/ssd-app/src/android_setup.rs`, before the game starts): the screens of the approved boards, drawn with the
 HD menus' own drawing. `ssd_menus::setup` (pure, tested) builds each page as a draw list in a 932 x 430 space (a cream window in
@@ -415,7 +416,16 @@ arguments file) wins; otherwise an emulator (system properties `ro.hardware`, `r
 Vulkan is SwiftShader, which crashes the emulator; any other device tries Vulkan first and falls back to OpenGL ES when the
 adapter or device cannot be created, or the Vulkan adapter is a software one.
 
-Lifecycle: the activity follows the sensor (landscape and portrait), keeps the screen on and hides the system bars (immersive, sticky). When the window loses
+Refresh rate and sound: an adaptive (LTPO) screen drops to about 24 Hz while nothing touches it, and every present waits for
+it. `GameActivity` asks for the lowest display mode of the current resolution that is a multiple of 60 Hz and sets the
+surface's frame rate to 60 (Android 11+), at start and on each focus (a fold or an unfold is another display); and at speed 1
+the pacer runs the frames the clock owes, up to four a window frame (`CATCH_UP`), each with its sound, so a slow screen costs
+smoothness only. The sound queue is kept near 60 ms by bending the playback speed by at most 0.5%
+(`SDL_SetAudioStreamFrequencyRatio`, on every platform: on a desktop it stays near 1.0), and every 5 s the log gets the
+sound's health (samples made per second, flushes that found the queue dry, the least and most queue).
+
+Lifecycle: the activity follows the sensor (landscape and portrait), keeps the screen on and hides the system bars (immersive, sticky;
+the `WindowInsetsController` on Android 11+). When the window loses
 the focus (home button, another app, screen off, the notification shade) the game stops running, the wgpu surface is dropped, the
 battery save is flushed and the whole machine state is written to `states/background.ssdstate` (not in a run that does not
 persist, a recording or a replay); SDL then blocks the event pump until the app is back, which also pauses the audio. On
@@ -442,16 +452,26 @@ controls' alone.
 - Minimal (battles): only the d-pad, a big A and B, MENU and FULL (back to all). Switched by hand with MIN and FULL, or by itself
   in a battle (option "Switch automatically in battle", off by default; a battle is the game mode of a battle with `in_battle`
   set, `ssd_game::gameplay::in_battle`).
-- Portrait (the activity is no longer locked to landscape): the picture on top, the controls on an opaque band below.
+- Portrait (the activity is no longer locked to landscape): the picture on top, the controls on an opaque band below. The
+  rows are parts of that band, so on a short screen (a split screen, a window, a Fold's halves) no group covers another or
+  the picture; a test checks every group at nine screen sizes, both ways.
+- Picture (Touch options): Standard (the design), Large (the controls at 85% and packed toward the edges; in portrait the
+  picture takes the whole width where the band still fits) or Full screen (the picture as big as the screen holds, the
+  controls floating over it at their opacity). With the touch controls an Enhanced picture fills its area at any scale
+  (`layout::fit_any`); the Classic frame and the desktop keep whole scales.
 - MENU pauses: Save state and Load state (the current slot), Options (the touch options), Edit layout, Hide controls (a chip
-  at the top right brings them back), Resume, and "Hide controls when a gamepad is connected" (on by default; only a pad
-  with a stick and face buttons counts). The Android back key opens it too.
+  at the top right brings them back), Resume, and a GAME page with Restart game and Quit, each on a second tap (the play
+  since the last save is lost; on Android the launch loop starts the game again, `android_setup::Forced::Relaunch`). The
+  Android back key opens it too.
 - Edit layout: tap a group to select it, drag it, drag a corner handle or use +/- for the size (100 to 180%, so never under
   48 dp), opacity, Reset to default, Done. The layout is kept per device in `saves/ssd.settings` under `controls.touch.*`
-  (`style`, `opacity` as a step of five percent, `haptics`, `auto_battle`, `hide_pad`, and `<group>.x|y|s` or
+  (`style`, `opacity` as a step of five percent, `haptics`, `auto_battle`, `hide_pad`, `picture` (0 Standard, 1 Large, 2 Full
+  screen), `show_fps`, and `<group>.x|y|s` or
   `p.<group>.x|y|s` for the portrait layout: the centre in per mille of the screen and the size in percent).
 - Options > Controls: the Device row has a third page, Touch, with Touch layout (D-pad or Stick), Opacity, Haptics, Switch
-  automatically in battle, Hide with gamepad and Reset touch layout.
+  automatically in battle, Hide with gamepad (on by default; only a pad with a stick and face buttons counts), Picture,
+  Show FPS (off by default: a line at the top with the frame rate, the sound queue in milliseconds and the frames that found
+  it dry, drawn even while the controls are hidden) and Reset touch layout (which keeps Picture and Show FPS).
 - Haptics: a light tick on a press, on by default; the native side sends a command to `GameActivity`, which performs the
   system's keyboard-tap feedback (no permission needed).
 

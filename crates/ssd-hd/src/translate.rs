@@ -794,8 +794,8 @@ mod tests {
             name_parts(cells, &character).into_iter().map(|(english, _)| english).collect()
         };
         assert_eq!(
-            english(&row("LONG DISAPPEARS FOR ONE YEAR.", 0)),
-            ["LONG DISAPPEARS FOR ONE YEAR."]
+            english(&row("A FROG HIDES IN A PILE OF REEDS.", 0)),
+            ["A FROG HIDES IN A PILE OF REEDS."]
         );
         assert_eq!(english(&row("FOR", 0)), ["FOR"], "a word alone is still a part");
         assert_eq!(english(&row("Goku   Piccolo", 0)), ["Goku", "Piccolo"], "a list's columns");

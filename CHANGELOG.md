@@ -7,6 +7,31 @@
 - A screenshot (F12, or the debug panel's Save screenshot and Save 1x frame) now writes the machine's
   state beside the picture, named the same with `.ssdstate`, so the moment can be played back headless
   (`xtask shots --state-in`). The PNG is deflate-compressed.
+- **Android**, from play on phones:
+  - The touch controls keep clear of each other and of the picture on short screens (split screen, a window, a
+    foldable's halves).
+  - Touch options: **Picture** (Standard, Large, or Full screen with the controls floating over it) and **Show FPS**
+    (the frame rate and the sound's health at the top).
+  - The touch MENU has a GAME page: **Restart game** and **Quit**, each on a second tap.
+  - An HD picture fills the area it is given at any size.
+- The Windows launchers find the game's data under `SSD_DATA_DIR` when it is set, as the game does.
+- **Translations** supplied by the player: with a translation's files in the data folder (the game's text keyed by
+  `xtask text-dump`, the HD menus' words and a font), Enhanced draws the story, the battle messages, the names and the
+  HD menus in that language, asks for the language on the first launch and has a Language row in Options >
+  Accessibility (and `--lang`). Nothing is bundled: without the files nothing changes. The first one supported is
+  Traditional Chinese (Hong Kong).
+- Android: the release build is signed when `SSD_KEYSTORE_PROPERTIES` names a key kept outside the repository.
+
+### HD art
+
+- The Saiyans' flight toward Earth: Nappa and Vegeta in the burst are drawn in HD (they were the original pixels), and
+  Vegeta flying beside Nappa in the scanner scene is redrawn on-model.
+
+### Fixes
+
+- On a phone whose screen lowers its refresh rate when idle, the game keeps its speed (it fell to about 24 fps) and the
+  sound no longer crackles: the playback speed is bent by at most 0.5% to keep the sound queue steady.
+- The system bars stay hidden on Android 11 and later.
 
 ## 0.2.0 (2026-10-16)
 

@@ -41,6 +41,21 @@ pub struct Args {
     pub out: PathBuf,
 }
 
+/// Why the TSV may not be written at `out` (absolute): inside the repository at `root` but outside `.work/`, where
+/// git could track the game's text. Anywhere outside the repository is the player's own business.
+pub fn refused(root: &Path, out: &Path) -> Option<String> {
+    let key = |path: &Path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        let text = text.trim_end_matches('/').to_owned();
+        if cfg!(windows) { text.to_lowercase() } else { text }
+    };
+    let (root, out) = (key(root), key(out));
+    let inside = |dir: &str| out == dir || out.starts_with(&format!("{dir}/"));
+    (inside(&root) && !inside(&format!("{root}/.work"))).then(|| {
+        format!("{out} is inside the repository: the text is the game's, write it under .work/ or outside")
+    })
+}
+
 /// The arguments: none, or the path of the TSV.
 pub fn parse_args(args: &[&str]) -> Result<Args, String> {
     match args {
@@ -655,6 +670,19 @@ pub fn run(rom: &[u8], args: &Args, out: &mut dyn std::io::Write) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_text_is_never_written_where_git_could_track_it() {
+        let root = Path::new("/repo");
+        assert!(refused(root, Path::new("/repo/strings.tsv")).is_some());
+        assert!(refused(root, Path::new("/repo/docs/strings.tsv")).is_some());
+        assert!(refused(root, Path::new("/repo/.work/text/strings-en.tsv")).is_none());
+        assert!(refused(root, Path::new("/elsewhere/strings.tsv")).is_none());
+        assert!(
+            refused(root, Path::new("/repository/strings.tsv")).is_none(),
+            "a sibling that shares the prefix"
+        );
+    }
 
     /// A blank 1 MiB image with `bytes` at their physical addresses.
     fn rom_with(bytes: &[(u32, &[u8])]) -> Vec<u8> {
