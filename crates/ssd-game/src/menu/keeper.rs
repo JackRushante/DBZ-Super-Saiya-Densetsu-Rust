@@ -16,6 +16,13 @@ use ssd_save::{CHECKSUM_OFFSET, IMAGE_LEN, PAGE_LEN, SLOT_BASES, SaveFile, SlotS
 
 /// The tag of the application event that binds the bag: its payload is the bag's bytes.
 pub const BIND_TAG: u8 = 1;
+/// The tag of the application event of the item spawner: its payload is the object and the count, so a replay puts
+/// the same units in the bag.
+pub const SPAWN_TAG: u8 = 3;
+/// Objects without the story bit that the story hands out or takes back itself, so that one spawned early can upset
+/// it: the "Moon" card (gone after the duel with Vegeta) and the Dragon Radar (given on Namek when it was not picked
+/// up). The item spawner warns before them as before a key item.
+const SPAWNER_STORY: [u8; 2] = [20, 23];
 /// The bus address of the item list's state words (`item_extra`), one word an entry.
 const EXTRA: u32 = d::ITEM_EXTRA;
 /// Offsets of the list and the count inside a save slot: the page starts at `$00:0100`, the image at
@@ -194,6 +201,31 @@ impl Keeper {
             let _ = bag.add(object, extra, class);
         }
         self.project(wram, labels, None)
+    }
+
+    /// The item spawner: `count` units of `object` go into the bag (as many as it has room for), and the list is
+    /// written back as the bag projects it. Returns the units added and the writes.
+    pub fn spawn(
+        &mut self,
+        wram: &[u8],
+        labels: &Labels,
+        object: u8,
+        count: u8,
+    ) -> (u8, Vec<HostEvent>) {
+        let Some(bag) = self.bag.as_mut() else { return (0, Vec::new()) };
+        let class = class_of(labels, object);
+        let mut added = 0;
+        while added < count && bag.add(object, 0, class).is_ok() {
+            added += 1;
+        }
+        (added, self.project(wram, labels, None))
+    }
+
+    /// Whether the item spawner warns before `object`: a key item of the bag (the story bit, or a Dragon Ball), or one
+    /// the story hands out itself ([`SPAWNER_STORY`]).
+    #[must_use]
+    pub fn story(labels: &Labels, object: u8) -> bool {
+        class_of(labels, object).key || SPAWNER_STORY.contains(&object)
     }
 
     /// The list writes that show `front` first, as the HD stages a use: the stack goes to the first

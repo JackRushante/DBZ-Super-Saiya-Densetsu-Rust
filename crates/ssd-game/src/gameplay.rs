@@ -10,8 +10,10 @@ use ssd_oracle::Joypad;
 
 /// The bus address of the first byte of work RAM.
 const WRAM_BASE: u32 = 0x7E_0000;
-/// The game mode (`$24`) of a battle, without its flag bit (bit 7).
+/// The game mode (`$24`) of a battle's running states, without its flag bit (bit 7).
 const BATTLE_MODE: u8 = 4;
+/// The game mode (`$24`) that starts a battle and that the command selection runs in.
+const BATTLE_START_MODE: u8 = 2;
 /// `in_battle` (`$0364`) in a battle.
 const IN_BATTLE: u8 = 0xFF;
 /// The battle state of the attack animation (`$AB`): the damage is known, the figures strike, the HP drops.
@@ -72,11 +74,13 @@ impl AutoRun {
     }
 }
 
-/// Whether a battle is on (the game mode is a battle and `in_battle` is set): the touch controls' automatic switch
-/// to the minimal layout reads it.
+/// Whether a battle is on: `in_battle` is set and the game mode is one of a battle's, 2 (its start and the command
+/// selection) or 4 (the rest). The touch controls' automatic switch to the minimal layout and the Cheats over a battle
+/// read it.
 #[must_use]
 pub fn in_battle(wram: &[u8]) -> bool {
-    byte(wram, d::IN_BATTLE) == IN_BATTLE && byte(wram, d::GAME_MODE) & 0x7F == BATTLE_MODE
+    byte(wram, d::IN_BATTLE) == IN_BATTLE
+        && matches!(byte(wram, d::GAME_MODE) & 0x7F, BATTLE_START_MODE | BATTLE_MODE)
 }
 
 /// Whether the battle is in its attack animation: nothing is asked of the player, no message is up, and the state
@@ -206,6 +210,16 @@ mod tests {
             run.apply(&waiting, &values, &mut pad);
             assert_eq!(pad, Joypad { left: true, ..Joypad::default() });
         }
+    }
+
+    #[test]
+    fn a_battle_is_on_in_its_command_selection_too() {
+        // The command selection of the Nappa fight, from a player's state: in_battle $FF, game mode 2.
+        assert!(in_battle(&wram_with(0, 2, 0, 0xFF)));
+        assert!(in_battle(&wram_with(0, 4, 0, 0xFF)));
+        assert!(in_battle(&wram_with(0, 0x84, 0, 0xFF)), "the just-entered bit does not count");
+        assert!(!in_battle(&wram_with(0, 0, 0, 0xFF)), "the map");
+        assert!(!in_battle(&wram_with(0, 2, 0, 0)), "in_battle clear");
     }
 
     #[test]

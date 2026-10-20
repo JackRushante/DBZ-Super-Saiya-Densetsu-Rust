@@ -223,9 +223,22 @@ check names each gap).
 In Enhanced mode the Menu list's Cheats entry opens the Cheats screen (original style, over the field; the original's
 Menu list stays open unseen underneath). Up and Down choose a row, Left and Right (or X) cycle its choices, X on Reset all
 turns everything off, Z goes back. The rows: damage dealt x1/2 to x10, defence x1/2 to x10, EXP x1 to x10, Z cards
-(Off, Attack, Defence, Both; for the whole party or one character), maximum zeni, endless items, random battles on or
+(Off, Attack, Defence, Both; for the whole party or one character), maximum zeni, zeni gained x1 to x10 (from selling and
+from the story's events: the wrapper of the sale `03:A790` adds the rest of the price first, the money event's scales its
+amount; the pair `GAIN` lies after the money's in the block, and a zero reads x1), endless items, the item spawner (A opens
+its page: the 40 objects by page with the units the bag holds and each one's help; Left and Right choose how many, up to 99,
+L and R turn the page, Y goes back to 1, A adds them to the bag through the keeper, `Keeper::spawn`; the objects the story
+checks, the bag's key items and the "Moon" card and the Dragon Radar, are red, one at a time, and A first asks "Add anyway"
+or "Cancel" with the cursor on Cancel; an add is the application event 3, `SPAWN_TAG`, so a recording replays it, and it
+marks the game, `Cheats::spawned`, whose saves keep the CHEATS badge even after Reset all), random battles on or
 off, how often they come x1/4 to x4, enemies per battle x1/2 to x3 and enemy power x1/2 to x5. A card previews the Z balls
 and an "On: N" box counts the active choices.
+
+Story fix (Remastered, with the cheat wrappers, always on): the level deadline of map 5 (`03:F300`, Piccolo at level 9, or
+Gohan at 10 without him) kills the fighters not yet recruited and stops the random battles; the wrapper of its body
+(`03:F320`, `story_level_deadline`) returns at once, as the routine does for a lower level, so the story never moves on a
+level. The deadline of walking into the Saiyans stays. `menu-test cheats deadline` runs the routine with Piccolo at levels
+8, 9 and 30 in Classic and Remastered.
 
 The cheats act in the running game only: Rust wrappers on top of the routines they change (`ssd_game::cheats`) read their
 numbers from a 32-byte block of work RAM at `$7F:FF00` (outside the save image), which the app writes as host events
@@ -280,7 +293,7 @@ Classic is untouched. `menu-test cheats screen-gameplay` plays the page through 
 waiting message); `cargo test -p ssd-game --release --test gameplay_real_rom -- --ignored` (with `SSD_ROM_PATH`) plays the auto-run on the
 story replay and checks that the animation frames ignore the pad on the reference battle.
 
-Difficulty presets: Easy is enemy power x1/2, EXP x2, money x2; Normal is the original (all x1, clean); Hard is enemy power x2, EXP x1, money x1/2. Enemy power and EXP are the Cheats screen's own values; the money multiplier is one more value of the cheat block (`MONEY`, a num/den pair after the marker, outside the settings bytes) that the Cheats screen has no row for. It scales the zeni of the story's events (`01:D7F9`, which adds `$0D53` to the zeni): a battle itself pays no zeni (`docs/re/data/battle.md`). The preset is read off the three values, never stored apart, so changing one on the Cheats screen reads Custom (the last change wins). Easy and Hard are cheats, so the save made on them carries the CHEATS badge; only Normal is clean. The money step is kept per slot in `saves/ssd.options` as `s<slot>.difficulty.money` (the preset is written there as `difficulty.preset` for reading, Normal leaves both out); the power and the EXP travel in `ssd.cheats` as ever. `menu-test cheats money` plays the event at x1/2, x1 and x2 against Classic.
+Difficulty presets: Easy is enemy power x1/2, EXP x2, money x2; Normal is the original (all x1, clean); Hard is enemy power x2, EXP x1, money x1/2. Enemy power and EXP are the Cheats screen's own values; the money multiplier is one more value of the cheat block (`MONEY`, a num/den pair after the marker, outside the settings bytes) that the Cheats screen has no row for. It scales the zeni of the story's events (`01:D7F9`, which adds `$0D53` to the zeni), and the Cheats screen's zeni gained scales them again: a battle itself pays no zeni (`docs/re/data/battle.md`). The preset is read off the three values, never stored apart, so changing one on the Cheats screen reads Custom (the last change wins). Easy and Hard are cheats, so the save made on them carries the CHEATS badge; only Normal is clean. The money step is kept per slot in `saves/ssd.options` as `s<slot>.difficulty.money` (the preset is written there as `difficulty.preset` for reading, Normal leaves both out); the power and the EXP travel in `ssd.cheats` as ever. `menu-test cheats money` plays the event at x1/2, x1 and x2 against Classic.
 
 The rows are a table per category (`crates/ssd-menus/src/options/<category>.rs`); a task adds rows to its own file. Where a
 value lives: Difficulty and Gameplay are saved with the game, per save slot, in `saves/ssd.options` (keyed by the slot's
@@ -346,7 +359,7 @@ F1 shows or hides the panel. Its tabs:
 - Below the transport and state controls: Save screenshot (the same as F12) and Save 1x frame (the PPU's own frame, 256 x 224
   or 239 lines, unscaled). The line next to them says where the file went.
 
-Keys 1–4 select the save-state slot. The panel can be checked without a window with `--ui-snapshot` (see "UI snapshots"
+Keys 1–4 select the save-state slot; F3 opens the Cheats screen over a battle (Enhanced; Back closes it and the battle goes on). The panel can be checked without a window with `--ui-snapshot` (see "UI snapshots"
 below).
 
 ## Android (M9)
@@ -466,7 +479,7 @@ controls' alone.
   picture takes the whole width where the band still fits) or Full screen (the picture as big as the screen holds, the
   controls floating over it at their opacity). With the touch controls an Enhanced picture fills its area at any scale
   (`layout::fit_any`); the Classic frame and the desktop keep whole scales.
-- MENU pauses: Save state and Load state (the current slot), Options (the touch options), Edit layout, Hide controls (a chip
+- MENU pauses: Save state and Load state (the current slot; State slot picks it, 1 to 4), Options (the touch options), Edit layout, Hide controls (a chip
   at the top right brings them back), Resume, and a GAME page with Restart game and Quit, each on a second tap (the play
   since the last save is lost; on Android the launch loop starts the game again, `android_setup::Forced::Relaunch`). The
   Android back key opens it too.
@@ -539,7 +552,7 @@ skipped, and a line that is not an action is a usage error (exit 2) that names i
 - `breakpoint SYMBOL` (or an address, as the Debugger's field takes it)
 - `mode ROUTINE original`, `mode ROUTINE rust` or `mode ROUTINE verify`
 - `menu open` (A on the field), `menu key up|down|left|right|a|b|l|r|y|select` (the HD menu's keys: a confirms, b cancels, l and r change a page, y and select reset on the options),
-  `menu tab all|allies|tools` (the bag's tab), `menu press <key>` (a raw key or `pad <button>` for a Controls box that waits) and `menu show field|menu|items|cheats|options` (checks the HD screen): with
+  `menu tab all|allies|tools` (the bag's tab), `menu press <key>` (a raw key or `pad <button>` for a Controls box that waits), `menu battle-cheats` (the Cheats screen over the battle the game is in, as F3 opens it) and `menu show field|menu|items|cheats|options` (checks the HD screen): with
   `--mode enhanced` only. A menu line plays its choice to its
   end before the next line; a replay still playing stops there, and the menu presses live (`--replay` with
   `--headless-frames` to the field first)

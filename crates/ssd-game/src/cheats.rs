@@ -20,8 +20,9 @@
 
 use crate::data as d;
 use ssd_menus::cheats::{
-    Cheats, ENDLESS, GENERATOR, GENERATOR_SEED, MARKER, MARKER_BYTES, MAX_ZENI, MONEY, Multiplier,
-    RANDOM_OFF, RANDOM_ONLY, SUSPENDED, Setting, Z_VALUE, ZCARDS, ZCARDS_FIGHTER, ZENI, ZTarget,
+    Cheats, ENDLESS, GAIN, GENERATOR, GENERATOR_SEED, MARKER, MARKER_BYTES, MAX_ZENI, MONEY,
+    Multiplier, RANDOM_OFF, RANDOM_ONLY, SUSPENDED, Setting, Z_VALUE, ZCARDS, ZCARDS_FIGHTER, ZENI,
+    ZTarget,
 };
 use ssd_oracle::{Ctx, HookAction, HookEntry, HookMode, HookTable, HostEvent, ReturnKind};
 
@@ -141,10 +142,23 @@ const FIGHTER_ENTRY_B801: u32 = 0x05_B801;
 const FIGHTER_ENTRY_B7FC: u32 = 0x05_B7FC;
 const ROLL_ENTRY: u32 = 0x02_D289;
 const ITEM_ENTRY: u32 = 0x01_C639;
-/// The story event that gives zeni (`01:D7F9`, a target of the event table at `01:D456`): it adds the word `.work/edit3.plD53` to the zeni.
+/// The story event that gives zeni (`01:D7F9`, a target of the event table at `01:D456`): it adds the word `$0D53` to the zeni.
 const MONEY_ENTRY: u32 = 0x01_D7F9;
-/// The amount the money event adds (`.work/edit3.plD53`, a word); set by the script that makes the event, read only by the event.
+/// The amount the money event adds (`$0D53`, a word); set by the script that makes the event, read only by the event.
 const MONEY_AMOUNT: u32 = 0x7E_0D53;
+/// The shop's sale (`03:A790`, `rtl`): it adds the price of the object sold to the zeni, capped at 999 (`menus.md`).
+const SALE_ENTRY: u32 = 0x03_A790;
+/// The body of the level deadline of map 5 (Earth, the Saiyans' chapter, `03:F320`): the map's routine (`03:F300`, run every
+/// frame the party is free) branches to it when Piccolo reaches level 9, or Gohan level 10 without Piccolo. It sets flag `0x1D`,
+/// which stops the random battles, and kills the fighters not yet recruited (Krillin, Yamcha, Tien, Chiaotzu): the story moves
+/// on a level, which the EXP cheat or long training reach before the recruits are found. A Remastered story fix: the wrapper
+/// returns at once, as the routine does for a lower level, so the recruits wait until the party walks into the Saiyans (the
+/// game's other deadline, which stays).
+pub const LEVEL_DEADLINE_ENTRY: u32 = 0x03_F320;
+/// The object the shop's list is on (`menu_item_id`), which the sale reads.
+const SALE_OBJECT: u32 = 0x7E_0D7C;
+/// The price of each object id (`item_prices`, 40 bytes, `$FF` = none), which the sale adds.
+const ITEM_PRICES: u32 = 0x01_CB8B;
 
 /// The hook entries of the cheats, in Rust mode. They replace any hook at the same address (the recompiled
 /// routine, which is the original's code) and are installed on top of the table [`install`] is given.
@@ -178,6 +192,14 @@ pub fn hook_entries() -> Vec<HookEntry> {
         entry("cheat_item", ITEM_ENTRY, item_wrapper, ReturnKind::Rtl),
         // A jump target: nothing returns from it, the wrapper always ends by resuming the original.
         entry("cheat_money", MONEY_ENTRY, money_wrapper, ReturnKind::Rtl),
+        entry("cheat_sale", SALE_ENTRY, sale_wrapper, ReturnKind::Rtl),
+        // A branch target inside `03:F300`: returning here is the routine's own `rtl` for a level below the deadline.
+        entry(
+            "story_level_deadline",
+            LEVEL_DEADLINE_ENTRY,
+            level_deadline_wrapper,
+            ReturnKind::Rtl,
+        ),
     ]
 }
 
@@ -218,6 +240,12 @@ pub fn money_event(cheats: &Cheats) -> HostEvent {
     HostEvent::Wram { address: BLOCK + MONEY as u32, bytes: cheats.money_bytes().to_vec() }
 }
 
+/// The host event that writes the zeni-gained multiplier of `cheats` (its pair lies after the money's).
+#[must_use]
+pub fn gain_event(cheats: &Cheats) -> HostEvent {
+    HostEvent::Wram { address: BLOCK + GAIN as u32, bytes: cheats.gain_bytes().to_vec() }
+}
+
 /// The host event that writes the settings of `cheats` (the first bytes of the block: the multipliers, the
 /// switches and the generator, reseeded; the runtime bytes stay as the wrappers left them).
 #[must_use]
@@ -229,7 +257,7 @@ pub fn settings_event(cheats: &Cheats) -> HostEvent {
 /// Z corners of the hand ([`hand_events`]).
 #[must_use]
 pub fn settings_events(cheats: &Cheats, wram: &[u8]) -> Vec<HostEvent> {
-    let mut events = vec![settings_event(cheats), money_event(cheats)];
+    let mut events = vec![settings_event(cheats), money_event(cheats), gain_event(cheats)];
     events.extend(hand_events(cheats, wram));
     events
 }
@@ -403,27 +431,58 @@ fn exp_wrapper(ctx: &mut Ctx<'_>) {
     ctx.set_cost(0);
 }
 
+/// A num/den pair of the block at `offset`, x1 when the block is not live or the pair holds a zero (an older run's block).
+fn block_pair(ctx: &mut Ctx<'_>, offset: usize) -> Multiplier {
+    if !live(ctx) {
+        return Multiplier::new(1, 1);
+    }
+    let (num, den) = (ctx.read8(BLOCK + offset as u32), ctx.read8(BLOCK + offset as u32 + 1));
+    if num == 0 || den == 0 { Multiplier::new(1, 1) } else { Multiplier::new(num, den) }
+}
+
 /// `01:D7F9`, the story event that gives zeni: it adds `$0D53` to the zeni (capped at 999). The amount is scaled by the money
-/// multiplier of the block before the original runs, and the original goes on inline (a jump target, not a call: nothing
-/// returns). A multiplier of x1 declines and changes nothing. A battle itself pays no zeni (`battle.md`), so this is the
-/// only place the game hands money out besides selling.
+/// multiplier (the Difficulty's) and then by the zeni gained (the Cheats') before the original runs, and the original goes
+/// on inline (a jump target, not a call: nothing returns). Both at x1 declines and changes nothing. A battle itself pays no
+/// zeni (`battle.md`), so this and selling ([`sale_wrapper`]) are the places the game hands money out.
 fn money_wrapper(ctx: &mut Ctx<'_>) {
     ctx.mark_gated();
-    let multiplier = if live(ctx) {
-        let (num, den) = (ctx.read8(BLOCK + MONEY as u32), ctx.read8(BLOCK + MONEY as u32 + 1));
-        if num == 0 || den == 0 { Multiplier::new(1, 1) } else { Multiplier::new(num, den) }
-    } else {
-        Multiplier::new(1, 1)
-    };
-    if !is_on(multiplier) {
+    let money = block_pair(ctx, MONEY);
+    let gain = block_pair(ctx, GAIN);
+    if !is_on(money) && !is_on(gain) {
         ctx.resume_at(MONEY_ENTRY);
         return;
     }
     let amount = u32::from(ctx.read8(MONEY_AMOUNT)) | u32::from(ctx.read8(MONEY_AMOUNT + 1)) << 8;
-    let scaled = multiplier.scale(amount, u32::from(MAX_ZENI)) as u16;
+    let cap = u32::from(MAX_ZENI);
+    let scaled = gain.scale(money.scale(amount, cap), cap) as u16;
     ctx.write8(MONEY_AMOUNT, (scaled & 0xFF) as u8);
     ctx.write8(MONEY_AMOUNT + 1, (scaled >> 8) as u8);
     ctx.resume_at(MONEY_ENTRY);
+}
+
+/// [`LEVEL_DEADLINE_ENTRY`]: returns (`rtl`) without the deadline, always (a story fix, not a cheat).
+fn level_deadline_wrapper(ctx: &mut Ctx<'_>) {
+    ctx.set_cost(0);
+}
+
+/// `03:A790`, the shop's sale (`rtl`): the original adds the price of the object sold to the zeni and caps it at 999. With the
+/// zeni gained above x1 the rest of the price times the multiplier is added first, capped the same way, and the original goes
+/// on: the zeni grows by the price times the multiplier, at most 999. An object without a price (`$FF`) is left to the
+/// original.
+fn sale_wrapper(ctx: &mut Ctx<'_>) {
+    ctx.mark_gated();
+    let gain = block_pair(ctx, GAIN);
+    let object = ctx.read8(SALE_OBJECT);
+    let price = ctx.read8(ITEM_PRICES + u32::from(object));
+    if is_on(gain) && price != 0xFF {
+        let price = u32::from(price);
+        let extra = gain.scale(price, u32::MAX).saturating_sub(price);
+        let zeni = u32::from(ctx.read8(d::ZENI)) | u32::from(ctx.read8(d::ZENI + 1)) << 8;
+        let total = (zeni + extra).min(u32::from(MAX_ZENI)) as u16;
+        ctx.write8(d::ZENI, (total & 0xFF) as u8);
+        ctx.write8(d::ZENI + 1, (total >> 8) as u8);
+    }
+    ctx.resume_at(SALE_ENTRY);
 }
 
 /// `01:F692`, the enemy group of a battle is set up (`rtl`). A group of a scripted fight turns the
@@ -725,7 +784,11 @@ mod tests {
             assert_eq!(entry.mode, HookMode::Rust);
             assert_eq!(entry.cycles, Some(0));
             assert!(matches!(entry.action, HookAction::Routine { .. }));
-            assert!(entry.name.starts_with("cheat_"), "{}", entry.name);
+            assert!(
+                entry.name.starts_with("cheat_") || entry.name.starts_with("story_"),
+                "{}",
+                entry.name
+            );
         }
         let rtl = entries
             .iter()

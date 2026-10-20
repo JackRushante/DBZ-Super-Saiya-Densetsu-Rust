@@ -40,8 +40,13 @@ pub const MARKER_BYTES: [u8; 4] = *b"SSDc";
 /// The money multiplier: a num/den pair after the marker (the zeni a story event gives). The Cheats screen has no row for it: the
 /// Difficulty presets of the Options write it. A pair with a zero is read as x1, so a block of an older run is neutral.
 pub const MONEY: usize = MARKER + 4;
-/// The version of the bytes [`Cheats::to_bytes`] writes.
-pub const VERSION: u32 = 1;
+/// The zeni-gained multiplier: a num/den pair after the money pair, for the zeni a sale or a story event adds (the Cheats
+/// screen's "Zeni gained"). A pair with a zero is read as x1, so a block of an older run is neutral.
+pub const GAIN: usize = MONEY + 2;
+const _: () = assert!(GAIN + 2 <= BLOCK_LEN, "the gain pair is inside the block");
+/// The version of the bytes [`Cheats::to_bytes`] writes (2: with the zeni gained, 3: with the item spawner's mark;
+/// versions 1 and 2 are still read).
+pub const VERSION: u32 = 3;
 /// The seed of the generator, written with the settings (so a settings change starts the same sequence).
 pub const GENERATOR_SEED: u32 = 0x2545_F491;
 /// The value of a Z ball: a corner showing a Z is the value 8 (the battle code counts it as 10).
@@ -121,6 +126,10 @@ const ENCOUNTERS_STEPS: [Multiplier; 5] =
 pub const MONEY_STEPS: [Multiplier; 3] = [Multiplier::new(1, 2), times(1), times(2)];
 /// The index of x1 in [`MONEY_STEPS`].
 pub const MONEY_NEUTRAL: usize = 1;
+
+/// The steps of the zeni gained, by a sale or a story event: x1, x2, x3, x5, x10 (x1 is the neutral step). The game pays
+/// no zeni for a battle.
+pub const GAIN_STEPS: [Multiplier; 5] = [times(1), times(2), times(3), times(5), times(10)];
 
 /// The multiplier settings, in the order of their pairs in the block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -272,6 +281,91 @@ pub struct Cheats {
     /// with the game's options (`difficulty.money`).
     #[serde(skip, default = "neutral_money")]
     money: u8,
+    /// The step of [`GAIN_STEPS`] (the saved cheats of version 2 carry it).
+    gain: u8,
+    /// The item spawner was used in this game: its saves carry the CHEATS badge whatever the choices, and Reset all
+    /// keeps it (version 3).
+    spawned: bool,
+}
+
+/// [`Cheats`] as version 2 saved them: without the item spawner's mark.
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct CheatsV2 {
+    damage: u8,
+    defence: u8,
+    exp: u8,
+    power: u8,
+    enemies: u8,
+    encounters: u8,
+    random_battles_off: bool,
+    z_mode: ZMode,
+    z_target: ZTarget,
+    zeni: bool,
+    endless: bool,
+    gain: u8,
+}
+
+impl From<CheatsV2> for Cheats {
+    fn from(old: CheatsV2) -> Self {
+        Self {
+            damage: old.damage,
+            defence: old.defence,
+            exp: old.exp,
+            power: old.power,
+            enemies: old.enemies,
+            encounters: old.encounters,
+            random_battles_off: old.random_battles_off,
+            z_mode: old.z_mode,
+            z_target: old.z_target,
+            zeni: old.zeni,
+            endless: old.endless,
+            money: MONEY_NEUTRAL as u8,
+            gain: old.gain,
+            spawned: false,
+        }
+    }
+}
+
+/// [`CheatSidecar`] as version 1 saved it: the version, then each save's slot, checksum, mark and cheats.
+type SidecarV1 = (u32, Vec<(u8, u16, bool, CheatsV1)>);
+/// [`CheatSidecar`] as version 2 saved it.
+type SidecarV2 = (u32, Vec<(u8, u16, bool, CheatsV2)>);
+
+/// [`Cheats`] as version 1 saved them: without the zeni gained, read as x1.
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct CheatsV1 {
+    damage: u8,
+    defence: u8,
+    exp: u8,
+    power: u8,
+    enemies: u8,
+    encounters: u8,
+    random_battles_off: bool,
+    z_mode: ZMode,
+    z_target: ZTarget,
+    zeni: bool,
+    endless: bool,
+}
+
+impl From<CheatsV1> for Cheats {
+    fn from(old: CheatsV1) -> Self {
+        Self {
+            damage: old.damage,
+            defence: old.defence,
+            exp: old.exp,
+            power: old.power,
+            enemies: old.enemies,
+            encounters: old.encounters,
+            random_battles_off: old.random_battles_off,
+            z_mode: old.z_mode,
+            z_target: old.z_target,
+            zeni: old.zeni,
+            endless: old.endless,
+            money: MONEY_NEUTRAL as u8,
+            gain: 0,
+            spawned: false,
+        }
+    }
 }
 
 fn neutral_money() -> u8 {
@@ -308,7 +402,20 @@ impl Cheats {
             zeni: false,
             endless: false,
             money: MONEY_NEUTRAL as u8,
+            gain: 0,
+            spawned: false,
         }
+    }
+
+    /// Whether the item spawner was used in this game (the CHEATS badge of its saves).
+    #[must_use]
+    pub fn spawned(&self) -> bool {
+        self.spawned
+    }
+
+    /// Marks the game as one the item spawner was used in.
+    pub fn set_spawned(&mut self, spawned: bool) {
+        self.spawned = spawned;
     }
 
     /// The index of the step `setting` is on.
@@ -412,6 +519,36 @@ impl Cheats {
         self.money_index() != MONEY_NEUTRAL
     }
 
+    /// The index of the step of [`GAIN_STEPS`] the zeni gained is on.
+    #[must_use]
+    pub fn gain_index(&self) -> usize {
+        usize::from(self.gain).min(GAIN_STEPS.len() - 1)
+    }
+
+    /// Puts the zeni gained on the step `index`, clamped to the last step.
+    pub fn set_gain_index(&mut self, index: usize) {
+        self.gain = index.min(GAIN_STEPS.len() - 1) as u8;
+    }
+
+    /// The multiplier of the zeni a sale or a story event adds.
+    #[must_use]
+    pub fn gain(&self) -> Multiplier {
+        GAIN_STEPS[self.gain_index()]
+    }
+
+    /// Whether the zeni gained is not at x1.
+    #[must_use]
+    pub fn gain_on(&self) -> bool {
+        self.gain_index() != 0
+    }
+
+    /// The zeni gained's pair, as the block holds it at [`GAIN`].
+    #[must_use]
+    pub fn gain_bytes(&self) -> [u8; 2] {
+        let gain = self.gain();
+        [gain.num, gain.den]
+    }
+
     /// Whether the encounter rate is on. It only changes the random battles, so it counts while they are on.
     #[must_use]
     pub fn encounters_on(&self) -> bool {
@@ -432,6 +569,7 @@ impl Cheats {
         multipliers
             + usize::from(self.encounters_on())
             + usize::from(self.money_on())
+            + usize::from(self.gain_on())
             + switches.iter().filter(|&&on| on).count()
     }
 
@@ -463,6 +601,9 @@ impl Cheats {
         }
         if self.zeni {
             lines.push(("Zeni", "max".to_owned()));
+        }
+        if self.gain_on() {
+            lines.push(("Zeni gained", multiplier_text(self.gain())));
         }
         if self.money_on() {
             lines.push(("Money", multiplier_text(self.money())));
@@ -531,6 +672,7 @@ impl Cheats {
         let money = self.money();
         block[MONEY] = money.num;
         block[MONEY + 1] = money.den;
+        block[GAIN..GAIN + 2].copy_from_slice(&self.gain_bytes());
         block
     }
 
@@ -548,13 +690,27 @@ impl Cheats {
     /// A message if the bytes are not a cheats file, or of another version, or name an index that no
     /// step has.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let (versioned, _): (Versioned, usize) = bincode::serde::decode_from_slice(bytes, config())
-            .map_err(|error| format!("not a cheats file: {error}"))?;
-        if versioned.version != VERSION {
-            return Err(format!("a cheats file of version {}, not {VERSION}", versioned.version));
-        }
-        versioned.cheats.check()?;
-        Ok(versioned.cheats)
+        let not = |error| format!("not a cheats file: {error}");
+        let cheats = match version_of(bytes)? {
+            1 => {
+                let (old, _): ((u32, CheatsV1), usize) =
+                    bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
+                Self::from(old.1)
+            }
+            2 => {
+                let (old, _): ((u32, CheatsV2), usize) =
+                    bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
+                Self::from(old.1)
+            }
+            VERSION => {
+                let (versioned, _): (Versioned, usize) =
+                    bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
+                versioned.cheats
+            }
+            other => return Err(format!("a cheats file of version {other}, not {VERSION}")),
+        };
+        cheats.check()?;
+        Ok(cheats)
     }
 
     /// Whether every choice is a step of its list, and the Z cards' character exists.
@@ -567,6 +723,9 @@ impl Cheats {
             if self.index(setting) >= setting.steps().len() {
                 return Err(format!("the step of {setting:?} is out of range"));
             }
+        }
+        if usize::from(self.gain) >= GAIN_STEPS.len() {
+            return Err("the step of the zeni gained is out of range".to_owned());
         }
         if matches!(self.z_target, ZTarget::Fighter(id) if id >= CHARACTERS) {
             return Err("the Z cards are for a character that does not exist".to_owned());
@@ -618,7 +777,9 @@ pub enum Row {
     ZCards,
     ZFor,
     MaxZeni,
+    ZeniGained,
     EndlessItems,
+    ItemSpawner,
     RandomBattles,
     HowOften,
     Enemies,
@@ -628,14 +789,16 @@ pub enum Row {
 
 impl Row {
     /// Every row, in the order the cursor moves through them.
-    pub const ALL: [Row; 12] = [
+    pub const ALL: [Row; 14] = [
         Row::Damage,
         Row::Defence,
         Row::Exp,
         Row::ZCards,
         Row::ZFor,
         Row::MaxZeni,
+        Row::ZeniGained,
         Row::EndlessItems,
+        Row::ItemSpawner,
         Row::RandomBattles,
         Row::HowOften,
         Row::Enemies,
@@ -653,7 +816,9 @@ impl Row {
             Self::ZCards => "Z cards",
             Self::ZFor => "For",
             Self::MaxZeni => "Max zeni",
+            Self::ZeniGained => "Zeni gained",
             Self::EndlessItems => "Endless items",
+            Self::ItemSpawner => "Item spawner",
             Self::RandomBattles => "Random battles",
             Self::HowOften => "How often",
             Self::Enemies => "Enemies",
@@ -668,7 +833,9 @@ impl Row {
         match self {
             Self::Damage | Self::Defence | Self::Exp => "Battle",
             Self::ZCards | Self::ZFor => "Cards",
-            Self::MaxZeni | Self::EndlessItems => "Resources",
+            Self::MaxZeni | Self::ZeniGained | Self::EndlessItems | Self::ItemSpawner => {
+                "Resources"
+            }
             Self::RandomBattles | Self::HowOften | Self::Enemies | Self::EnemyPower => "Encounters",
             Self::ResetAll => "",
         }
@@ -684,7 +851,9 @@ impl Row {
             Self::ZCards => "Every card you draw carries a Z.",
             Self::ZFor => "Who gets the Z cards.",
             Self::MaxZeni => "Keep zeni at the most you can carry.",
+            Self::ZeniGained => "Zeni from selling and from the story, multiplied.",
             Self::EndlessItems => "Using an item does not use it up.",
+            Self::ItemSpawner => "Put any object in the bag: A opens the list.",
             Self::RandomBattles => "Battles on the map. Story battles always happen.",
             Self::HowOften => "How often a random battle starts.",
             Self::Enemies => "How many enemies come at once.",
@@ -702,6 +871,8 @@ impl Row {
             Self::Enemies => ENEMIES_STEPS.len(),
             Self::EnemyPower => POWER_STEPS.len(),
             Self::HowOften => ENCOUNTERS_STEPS.len(),
+            Self::ZeniGained => GAIN_STEPS.len(),
+            Self::ItemSpawner => 1,
             Self::ZCards => ZMode::ALL.len(),
             Self::ZFor => ZTarget::COUNT,
             Self::MaxZeni | Self::EndlessItems | Self::RandomBattles => 2,
@@ -732,6 +903,8 @@ impl Row {
             Self::ZFor => names.get(index - 1).map_or("?", String::as_str).to_owned(),
             Self::MaxZeni | Self::EndlessItems => ["Off", "On"][index.min(1)].to_owned(),
             Self::RandomBattles => ["On", "Off"][index.min(1)].to_owned(),
+            Self::ZeniGained => multiplier_text(GAIN_STEPS[index.min(GAIN_STEPS.len() - 1)]),
+            Self::ItemSpawner => "Open".to_owned(),
             _ => self.setting().map_or_else(String::new, |setting| {
                 multiplier_text(setting.steps()[index.min(setting.steps().len() - 1)])
             }),
@@ -749,7 +922,8 @@ impl Row {
             Self::MaxZeni => usize::from(cheats.zeni()),
             Self::EndlessItems => usize::from(cheats.endless()),
             Self::RandomBattles => usize::from(cheats.random_battles_off()),
-            Self::ResetAll => 0,
+            Self::ZeniGained => cheats.gain_index(),
+            Self::ItemSpawner | Self::ResetAll => 0,
             _ => self.setting().map_or(0, |setting| cheats.index(setting)),
         }
     }
@@ -763,7 +937,8 @@ impl Row {
             Self::MaxZeni => cheats.set_zeni(index == 1),
             Self::EndlessItems => cheats.set_endless(index == 1),
             Self::RandomBattles => cheats.set_random_battles_off(index == 1),
-            Self::ResetAll => {}
+            Self::ZeniGained => cheats.set_gain_index(index),
+            Self::ItemSpawner | Self::ResetAll => {}
             _ => {
                 if let Some(setting) = self.setting() {
                     cheats.set_index(setting, index);
@@ -785,7 +960,7 @@ impl Row {
 }
 
 /// The layout version of [`CheatSidecar`].
-pub const SIDECAR_VERSION: u32 = 1;
+pub const SIDECAR_VERSION: u32 = 3;
 
 /// The cheats of one save slot, as the sidecar file keeps them. The slot's checksum word says which save
 /// they belong to; `marked` says whether that save was made with a cheat on (the CHEATS badge).
@@ -828,14 +1003,48 @@ impl CheatSidecar {
     ///
     /// The bytes are not a cheats file, or of another version.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let (sidecar, _): (Self, usize) = bincode::serde::decode_from_slice(bytes, config())
-            .map_err(|error| format!("not a cheats file: {error}"))?;
-        if sidecar.version != SIDECAR_VERSION {
-            return Err(format!(
-                "cheats file version {}, expected {SIDECAR_VERSION}",
-                sidecar.version
-            ));
-        }
+        let not = |error| format!("not a cheats file: {error}");
+        let sidecar = match version_of(bytes)? {
+            // Version 1: the cheats without the zeni gained, read as x1; the file is written as version 2.
+            1 => {
+                let (old, _): (SidecarV1, usize) =
+                    bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
+                let saves = old
+                    .1
+                    .into_iter()
+                    .map(|(slot, checksum, marked, cheats)| SavedCheats {
+                        slot,
+                        checksum,
+                        marked,
+                        cheats: cheats.into(),
+                    })
+                    .collect();
+                Self { version: SIDECAR_VERSION, saves }
+            }
+            2 => {
+                let (old, _): (SidecarV2, usize) =
+                    bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
+                let saves = old
+                    .1
+                    .into_iter()
+                    .map(|(slot, checksum, marked, cheats)| SavedCheats {
+                        slot,
+                        checksum,
+                        marked,
+                        cheats: cheats.into(),
+                    })
+                    .collect();
+                Self { version: SIDECAR_VERSION, saves }
+            }
+            SIDECAR_VERSION => {
+                let (sidecar, _): (Self, usize) =
+                    bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
+                sidecar
+            }
+            other => {
+                return Err(format!("cheats file version {other}, expected {SIDECAR_VERSION}"));
+            }
+        };
         let saves =
             sidecar.saves.into_iter().filter(|saved| saved.cheats.check().is_ok()).collect();
         Ok(Self { saves, ..sidecar })
@@ -857,9 +1066,16 @@ impl CheatSidecar {
     /// a cheat is on.
     pub fn store(&mut self, slot: u8, checksum: u16, cheats: Cheats) {
         self.saves.retain(|saved| saved.slot != slot);
-        let marked = !cheats.is_neutral();
+        let marked = !cheats.is_neutral() || cheats.spawned;
         self.saves.push(SavedCheats { slot, checksum, marked, cheats });
     }
+}
+
+/// The version word a cheats file starts with (both [`Cheats::to_bytes`] and [`CheatSidecar::to_bytes`]).
+fn version_of(bytes: &[u8]) -> Result<u32, String> {
+    bincode::serde::decode_from_slice::<u32, _>(bytes, config())
+        .map(|(version, _)| version)
+        .map_err(|error| format!("not a cheats file: {error}"))
 }
 
 /// The encoding of [`Cheats::to_bytes`]: bincode, little-endian, varint integers, as the bag's.
@@ -874,6 +1090,54 @@ fn config() -> bincode::config::Configuration<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_version_1_file_reads_with_the_zeni_gained_at_x1_and_is_written_as_version_2() {
+        // A sidecar a player's game wrote with version 1: slot 0, its checksum, marked, damage x1/2, EXP x5, power x2,
+        // Z cards on both corners.
+        let v1 = [
+            0x01, 0x01, 0x00, 0xFB, 0x04, 0xA2, 0x01, 0x00, 0x01, 0x03, 0x02, 0x01, 0x02, 0x00,
+            0x03, 0x00, 0x00, 0x00,
+        ];
+        let sidecar = CheatSidecar::from_bytes(&v1).unwrap();
+        assert_eq!(sidecar.version, SIDECAR_VERSION);
+        let saved = sidecar.entry_for(0, 0xA204).unwrap();
+        assert!(saved.marked);
+        assert_eq!(saved.cheats.multiplier(Setting::Exp), times(5));
+        assert_eq!(saved.cheats.z_mode(), ZMode::Both);
+        assert_eq!(saved.cheats.gain(), times(1));
+        let again = CheatSidecar::from_bytes(&sidecar.to_bytes()).unwrap();
+        assert_eq!(again, sidecar, "version 2 reads back the same");
+        let mut cheats = saved.cheats;
+        cheats.set_gain_index(4);
+        assert_eq!(Cheats::from_bytes(&cheats.to_bytes()).unwrap().gain(), times(10));
+    }
+
+    #[test]
+    fn the_spawners_mark_puts_the_badge_on_the_save_and_reads_back() {
+        let mut cheats = Cheats::neutral();
+        cheats.set_spawned(true);
+        assert!(cheats.is_neutral(), "the mark is not a choice: On stays 0");
+        let mut sidecar = CheatSidecar::empty();
+        sidecar.store(1, 0x1234, cheats);
+        assert!(sidecar.marked(1, 0x1234), "a game the spawner was used in carries the badge");
+        let again = CheatSidecar::from_bytes(&sidecar.to_bytes()).unwrap();
+        assert!(again.entry_for(1, 0x1234).unwrap().cheats.spawned());
+        assert!(Cheats::from_bytes(&cheats.to_bytes()).unwrap().spawned());
+    }
+
+    #[test]
+    fn the_zeni_gained_is_a_row_a_line_and_a_pair_of_the_block() {
+        let mut cheats = Cheats::neutral();
+        assert_eq!(cheats.to_block()[GAIN..GAIN + 2], [1, 1], "x1 by default");
+        Row::ZeniGained.step(&mut cheats, 1);
+        assert_eq!(cheats.gain(), times(2));
+        assert_eq!(cheats.on_count(), 1);
+        assert_eq!(cheats.lines(&[]), vec![("Zeni gained", "×2".to_owned())]);
+        Row::ZeniGained.step(&mut cheats, -2);
+        assert_eq!(cheats.gain(), times(10), "Left from x2 wraps past x1 to x10");
+        assert_eq!(cheats.to_block()[GAIN..GAIN + 2], [10, 1]);
+    }
 
     fn at(setting: Setting, index: usize) -> Cheats {
         let mut cheats = Cheats::neutral();

@@ -12,7 +12,8 @@ use crate::layout::{
 use crate::nav::{Entry, MENU_ROWS, command_rows};
 use crate::options::{Category, Kind};
 use crate::view::{
-    BagView, CheatsView, MenuView, OptionsView, Picture, Screen, Selected, Sheet, Tab, VideoAsk,
+    BagView, CheatsView, MenuView, OptionsView, Picture, Screen, Selected, Sheet, SpawnerView, Tab,
+    VideoAsk,
 };
 
 /// The items shown on one page of the item list.
@@ -550,6 +551,9 @@ const RESET_HEIGHT: f32 = 44.0;
 /// under the cursor has the orange cursor. Everything lies inside the space.
 #[must_use]
 pub fn cheats_screen(view: &CheatsView) -> DrawList {
+    if let Some(spawner) = &view.spawner {
+        return spawner_screen(spawner);
+    }
     let mut list = DrawList::new();
     backdrop(&mut list);
     let bottom = HEIGHT - CHEATS_EDGE - CHEATS_HELP - CHEATS_GAP;
@@ -575,13 +579,157 @@ pub fn cheats_screen(view: &CheatsView) -> DrawList {
         view,
         middle,
         &[
-            &[Row::MaxZeni, Row::EndlessItems],
+            &[Row::MaxZeni, Row::ZeniGained, Row::EndlessItems, Row::ItemSpawner],
             &[Row::RandomBattles, Row::HowOften, Row::Enemies, Row::EnemyPower],
         ],
     );
     next_card(&mut list, view, card);
     on_window(&mut list, view, on);
     help_strip(&mut list, view.row);
+    list
+}
+
+/// The width of the item spawner's list.
+const SPAWNER_LIST: f32 = 600.0;
+/// The height of the item spawner's object window (the warning's window is under it).
+const SPAWNER_OBJECT: f32 = 330.0;
+
+/// The item spawner: the page of objects (story objects in red, with their tag), the object under the cursor with its
+/// help and how many to add, the story warning while it asks, and the keys.
+fn spawner_screen(view: &SpawnerView) -> DrawList {
+    let mut list = DrawList::new();
+    backdrop(&mut list);
+    let bottom = HEIGHT - CHEATS_EDGE - CHEATS_HELP - CHEATS_GAP;
+    let left = Rect::new(MARGIN, CHEATS_EDGE, SPAWNER_LIST, bottom - CHEATS_EDGE);
+    list.push(Op::Window { rect: left });
+    let x = left.x + FRAME + PANEL_SIDE;
+    let right = left.right() - FRAME - PANEL_SIDE;
+    let title = left.y + FRAME + PANEL_TOP + GROUP_TITLE_TOP + GROUP_TITLE_HEIGHT / 2.0;
+    list.text(x + 26.0, title, "-- Item spawner --", GROUP_TEXT, palette::DARK_RED, Align::Left);
+    list.text(right, title, "In bag", GROUP_TEXT, palette::GREY, Align::Right);
+    let mut y = title + GROUP_TITLE_HEIGHT / 2.0 + GROUP_TITLE_BELOW + LINE_GAP;
+    for row in &view.rows {
+        let middle = y + ROW_HEIGHT / 2.0;
+        if row.object == view.object {
+            list.fill(
+                Rect::new(x + 22.0, y + 3.0, right - x - 22.0, ROW_HEIGHT - 6.0),
+                palette::CAP,
+            );
+            list.push(Op::Cursor { x, y: middle - CURSOR_HEIGHT / 2.0 });
+        }
+        let colour = if row.story { palette::STORY } else { palette::BLACK };
+        list.text(x + 34.0, middle, &row.name, ROW_TEXT, colour, Align::Left);
+        if row.story {
+            let tag = Rect::new(x + 230.0, middle - 12.0, 80.0, 24.0);
+            list.fill(tag, palette::STORY);
+            list.text(
+                tag.x + tag.w / 2.0,
+                middle,
+                "STORY",
+                SMALL_TEXT,
+                palette::WHITE,
+                Align::Centre,
+            );
+        }
+        list.text(
+            right - 20.0,
+            middle,
+            &row.in_bag.to_string(),
+            ROW_TEXT,
+            palette::GREY,
+            Align::Right,
+        );
+        y += ROW_HEIGHT;
+    }
+    // The object under the cursor.
+    let side_x = left.right() + CHEATS_GAP;
+    let side_w = WIDTH - MARGIN - side_x;
+    let object = Rect::new(side_x, CHEATS_EDGE, side_w, SPAWNER_OBJECT);
+    list.push(Op::Window { rect: object });
+    let ox = object.x + FRAME + PANEL_SIDE;
+    let oright = object.right() - FRAME - PANEL_SIDE;
+    let mut oy = object.y + FRAME + PANEL_TOP + GROUP_TITLE_TOP + GROUP_TITLE_HEIGHT / 2.0;
+    list.text(ox + 8.0, oy, "-- Add to the bag --", GROUP_TEXT, palette::DARK_RED, Align::Left);
+    oy += 40.0;
+    let colour = if view.story { palette::STORY } else { palette::BLACK };
+    list.text(ox + 8.0, oy, &view.name, LARGE_TEXT, colour, Align::Left);
+    oy += 42.0;
+    for line in view.help.iter().take(3) {
+        list.text(ox + 8.0, oy, line, ROW_TEXT, palette::BLACK, Align::Left);
+        oy += 28.0;
+    }
+    let count_y = object.bottom() - FRAME - 50.0;
+    list.text(ox + 8.0, count_y, "How many", ROW_TEXT, palette::BLACK, Align::Left);
+    let limit = if view.story { "one at a time" } else { "max 99" };
+    list.text(oright, count_y, limit, SMALL_TEXT, palette::GREY, Align::Right);
+    cycler(&mut list, &view.count.to_string(), oright - 150.0, count_y, 60.0);
+    // The story warning, or the note.
+    let note = Rect::new(
+        side_x,
+        object.bottom() + CHEATS_GAP,
+        side_w,
+        bottom - object.bottom() - CHEATS_GAP,
+    );
+    list.push(Op::Window { rect: note });
+    let nx = note.x + FRAME + PANEL_SIDE;
+    let nright = note.right() - FRAME - PANEL_SIDE;
+    let mut ny = note.y + FRAME + PANEL_TOP + GROUP_TITLE_TOP + GROUP_TITLE_HEIGHT / 2.0;
+    if let Some(choice) = view.confirm {
+        let inner = Rect::new(
+            note.x + FRAME + 6.0,
+            note.y + FRAME + 6.0,
+            note.w - 2.0 * FRAME - 12.0,
+            note.h - 2.0 * FRAME - 12.0,
+        );
+        list.fill(inner, palette::WARNING);
+        list.text(nx + 8.0, ny + 6.0, "! STORY ITEM", LARGE_TEXT, palette::STORY, Align::Left);
+        ny += 44.0;
+        for line in [
+            "Spawning it can break the story completely:",
+            "an event may never happen, or happen twice.",
+            "Save the game first.",
+        ] {
+            list.text(nx + 8.0, ny, line, SMALL_TEXT, palette::BLACK, Align::Left);
+            ny += 24.0;
+        }
+        let texts = ["Add anyway".to_owned(), "Cancel".to_owned()];
+        choices(
+            &mut list,
+            &texts,
+            usize::from(choice),
+            nright,
+            note.bottom() - FRAME - 34.0,
+            palette::WHITE,
+        );
+    } else {
+        list.text(nx + 8.0, ny, "-- Note --", GROUP_TEXT, palette::DARK_RED, Align::Left);
+        ny += 34.0;
+        for line in
+            ["A game that uses the spawner gets", "the CHEATS badge, as the other", "cheats do."]
+        {
+            list.text(nx + 8.0, ny, line, SMALL_TEXT, palette::BLACK, Align::Left);
+            ny += 24.0;
+        }
+    }
+    // The keys.
+    let strip =
+        Rect::new(MARGIN, HEIGHT - CHEATS_EDGE - CHEATS_HELP, WIDTH - 2.0 * MARGIN, CHEATS_HELP);
+    list.push(Op::Window { rect: strip });
+    let keys = if view.confirm.is_some() {
+        "A  choose   Left Right  Add anyway or Cancel"
+    } else {
+        "A  add   Left Right  how many   L R  page   Y  back to 1"
+    };
+    list.text(
+        strip.x + FRAME + 20.0,
+        strip.middle_y(),
+        keys,
+        ROW_TEXT,
+        palette::BLACK,
+        Align::Left,
+    );
+    let back = strip.right() - FRAME - 20.0;
+    list.text(back, strip.middle_y(), "B  Back", SMALL_TEXT, palette::DARK_RED, Align::Right);
     list
 }
 
@@ -1382,7 +1530,7 @@ mod tests {
     use super::*;
     use crate::cheats::{Cheats, Setting, ZMode, ZTarget};
     use crate::options::Category;
-    use crate::view::{Member, Slot};
+    use crate::view::{Member, Slot, SpawnerRow};
 
     fn field_view(cursor: u8) -> MenuView {
         MenuView {
@@ -1618,7 +1766,12 @@ mod tests {
     }
 
     fn cheats_view(row: Row, cheats: Cheats) -> CheatsView {
-        CheatsView { cheats, row, names: (0..12).map(|id| format!("Fighter {id}")).collect() }
+        CheatsView {
+            cheats,
+            row,
+            names: (0..12).map(|id| format!("Fighter {id}")).collect(),
+            spawner: None,
+        }
     }
 
     fn has_text(list: &DrawList, text: &str, colour: Color) -> bool {
@@ -2071,6 +2224,54 @@ mod tests {
         assert!(texts(&closed).iter().all(|t| *t != "Yes"));
     }
     #[test]
+    fn every_row_of_the_cheats_screen_is_drawn_and_the_cursor_shows_on_each() {
+        for row in Row::ALL {
+            let list = cheats_screen(&cheats_view(row, Cheats::neutral()));
+            assert!(texts(&list).contains(&row.label()), "{row:?} is drawn");
+            // Reset all is the On window's button, highlighted instead of pointed at.
+            if row != Row::ResetAll {
+                assert_eq!(cursors(&list).len(), 1, "the cursor shows on {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_item_spawner_shows_its_page_the_story_tag_and_the_warning() {
+        let rows = (0..11)
+            .map(|object| SpawnerRow {
+                object,
+                name: format!("Object {object}"),
+                story: object == 4,
+                in_bag: u32::from(object),
+            })
+            .collect();
+        let mut spawner = SpawnerView {
+            rows,
+            object: 4,
+            name: "Object 4".to_owned(),
+            help: vec!["What it does.".to_owned()],
+            story: true,
+            count: 1,
+            confirm: None,
+        };
+        let mut view = cheats_view(Row::ItemSpawner, Cheats::neutral());
+        view.spawner = Some(spawner.clone());
+        let list = cheats_screen(&view);
+        let text = texts(&list);
+        assert!(text.contains(&"-- Item spawner --") && text.contains(&"In bag"));
+        assert!(has_text(&list, "Object 4", palette::STORY), "a story object is red");
+        assert!(has_text(&list, "STORY", palette::WHITE));
+        assert!(text.contains(&"one at a time") && text.contains(&"What it does."));
+        assert!(!text.contains(&"! STORY ITEM"), "no warning before A");
+        spawner.confirm = Some(1);
+        view.spawner = Some(spawner);
+        let asking = cheats_screen(&view);
+        let text = texts(&asking);
+        assert!(text.contains(&"! STORY ITEM") && text.contains(&"Save the game first."));
+        assert!(has_text(&asking, "Cancel", palette::WHITE), "the cursor is on Cancel");
+    }
+
+    #[test]
     fn the_chosen_choice_is_orange_with_white_text_and_the_others_are_black() {
         let mut cheats = Cheats::neutral();
         cheats.set_index(Setting::Damage, 2);
@@ -2082,7 +2283,7 @@ mod tests {
             .iter()
             .filter(|op| matches!(op, Op::Fill { rect, color } if *color == palette::ORANGE && rect.x < 960.0))
             .count();
-        assert_eq!(highlights, 10, "one highlight in each row of choices, the For cycler has none");
+        assert_eq!(highlights, 12, "one highlight in each row of choices, the For cycler has none");
     }
 
     #[test]

@@ -125,6 +125,8 @@ pub enum PanelAction {
     LoadState,
     /// Saves the picture of the window as a PNG (no debug panel in it).
     Screenshot,
+    /// Opens the Cheats screen over a battle (Enhanced; the host checks the battle).
+    BattleCheats,
     /// Saves the PPU's own frame, unscaled, as a PNG.
     ScreenshotFrame,
     SetHooks(HooksArg),
@@ -186,6 +188,7 @@ impl PanelAction {
             Hotkey::Pause => Self::TogglePause,
             Hotkey::Screenshot => Self::Screenshot,
             Hotkey::TogglePanel => Self::TogglePanel,
+            Hotkey::BattleCheats => Self::BattleCheats,
             Hotkey::Quit => return None,
         })
     }
@@ -225,6 +228,8 @@ pub enum Effect {
     Screenshot(Kind),
     /// Run one frame now.
     StepFrame,
+    /// Open the Cheats screen over the battle, if the game is in one.
+    BattleCheats,
     SetHooks(HooksArg),
     SetRoutineMode {
         key: u32,
@@ -305,6 +310,7 @@ impl Controls {
             PanelAction::SaveState => return Some(Effect::Save(self.slot)),
             PanelAction::LoadState if self.load_allowed => return Some(Effect::Load(self.slot)),
             PanelAction::Screenshot => return Some(Effect::Screenshot(Kind::Window)),
+            PanelAction::BattleCheats => return Some(Effect::BattleCheats),
             PanelAction::ScreenshotFrame => return Some(Effect::Screenshot(Kind::Frame)),
             // Setting every routine to the mode they have is nothing, unless they differ.
             PanelAction::SetHooks(mode)

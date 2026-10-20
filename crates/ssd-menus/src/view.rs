@@ -84,6 +84,37 @@ pub struct CheatsView {
     /// The row under the cursor.
     pub row: Row,
     pub names: Vec<String>,
+    /// The item spawner, while it is open.
+    pub spawner: Option<SpawnerView>,
+}
+
+/// The item spawner as it shows: the page of objects, the one under the cursor with its help, how many to add, and the
+/// story warning while it asks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SpawnerView {
+    /// The rows of the page the cursor is on.
+    pub rows: Vec<SpawnerRow>,
+    /// The object under the cursor.
+    pub object: u8,
+    /// Its name and the first page of its help text.
+    pub name: String,
+    pub help: Vec<String>,
+    /// Whether the story checks it (the warning, and one unit at a time).
+    pub story: bool,
+    /// How many units the next add puts in the bag.
+    pub count: u8,
+    /// The story warning's choice while it asks: 0 Add anyway, 1 Cancel.
+    pub confirm: Option<u8>,
+}
+
+/// One object of the item spawner's list.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SpawnerRow {
+    pub object: u8,
+    pub name: String,
+    pub story: bool,
+    /// The units the bag holds.
+    pub in_bag: u32,
 }
 
 /// The Options screen as it shows: the category and the row under the cursor, the value of each row of the

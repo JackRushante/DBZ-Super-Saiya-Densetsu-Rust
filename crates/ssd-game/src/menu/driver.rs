@@ -11,21 +11,24 @@
 //! A use or a drop of the bag stages its stack in the original's list and then presses the original's
 //! own keys, one unit at a time, so the original takes the unit and the bag follows the list.
 
-use super::keeper::{BIND_TAG, Keeper, good_checksum};
+use super::keeper::{BIND_TAG, Keeper, SPAWN_TAG, good_checksum};
 use super::presses::{Button, Next, Outcome, Player, Step, Until};
 use super::{MenuProbe, PORUNGA, SAVE_DONE_STEP, SAVE_LIST_STEP, SAVE_SCREEN};
-use crate::cheats::{CHEATS_TAG, block_events, frame_events, hand_events};
+use crate::cheats::{CHEATS_TAG, block_events, frame_events, hand_events, settings_events};
 use crate::data as d;
 use crate::gameplay::{self, AutoRun};
 use ssd_menus::bag::{Bag, Rules, SavedBag, Sidecar};
 use ssd_menus::cheats::{CHARACTERS, CheatSidecar, Cheats, SavedCheats};
-use ssd_menus::nav::{Action, Entry, ItemRow, Key, Nav, ORIGINAL_MENU_ROWS, command_rows};
+use ssd_menus::nav::{
+    Action, Entry, ItemRow, Key, Nav, ORIGINAL_MENU_ROWS, SPAWNER_OBJECTS, SPAWNER_PAGE, Spawner,
+    command_rows,
+};
 use ssd_menus::options::{
     Category, Effect, Opens, Options, SlotOptions, Values, controls, difficulty, video,
 };
 use ssd_menus::view::{
     BagView, CheatsView, ControlsView, Labels, MenuView, ObjectLabel, OptionsView, RefusedKey,
-    Screen, Selected, StackView,
+    Screen, Selected, SpawnerRow, SpawnerView, StackView,
 };
 use ssd_menus::{DrawList, screens};
 use ssd_oracle::{HostEvent, Joypad};
@@ -124,6 +127,9 @@ struct State {
     save_slot: Option<u8>,
     /// Whether the Save was at its completion step at the last frame (a completion is seen once).
     save_done: bool,
+    /// The Cheats screen is open over a battle ([`Driver::open_battle_cheats`]): Back closes it, and a change
+    /// writes the settings only, so the runtime bytes the wrappers keep through the battle stay.
+    battle_cheats: bool,
     /// The options of the run: the values saved with the game (the bound save's) and the ones of this PC.
     options: Options,
     /// The options of the save slots (`saves/ssd.options`).
@@ -182,6 +188,7 @@ impl Driver {
                 cheat_events: Vec::new(),
                 save_slot: None,
                 save_done: false,
+                battle_cheats: false,
                 options: Options::default(),
                 option_slots: SlotOptions::empty(),
                 settings_changed: false,
@@ -277,6 +284,7 @@ impl Driver {
             cheat_events: Vec::new(),
             save_slot: None,
             save_done: false,
+            battle_cheats: false,
             options: Options { game: Values::new(), pc },
             option_slots: self.state.option_slots.clone(),
             settings_changed: reverted,
@@ -334,6 +342,27 @@ impl Driver {
     #[must_use]
     pub fn curtain(&self) -> Curtain {
         self.state.curtain
+    }
+
+    /// Opens the Cheats screen over a battle (the host asks for it only while the game is in one): the
+    /// curtain comes up on the screen, the game gets no buttons until Back closes it. Refused while a menu or a
+    /// plan has the curtain, or when the run has no cheats.
+    pub fn open_battle_cheats(&mut self) -> bool {
+        let state = &mut self.state;
+        if state.curtain != Curtain::Down || state.running.is_some() || !state.cheats_installed {
+            return false;
+        }
+        state.nav = Nav::default();
+        state.nav.enter(Screen::Cheats);
+        state.curtain = Curtain::Up;
+        state.battle_cheats = true;
+        true
+    }
+
+    /// Whether the Cheats screen is open over a battle.
+    #[must_use]
+    pub fn battle_cheats(&self) -> bool {
+        self.state.battle_cheats
     }
 
     /// The HD cursors.
@@ -412,6 +441,12 @@ impl Driver {
             CHEATS_TAG => {
                 self.state.cheats = Cheats::from_bytes(payload)?;
                 Ok(Vec::new())
+            }
+            SPAWN_TAG => {
+                let &[object, count] = payload else {
+                    return Err(format!("a spawn event of {} bytes", payload.len()));
+                };
+                Ok(self.state.keeper.spawn(wram, &self.labels, object, count).1)
             }
             _ => Ok(Vec::new()),
         }
@@ -511,6 +546,9 @@ impl State {
                 let rows = self.rows(labels);
                 self.nav.key_bag(key, &rows)
             }
+            Screen::Cheats if self.nav.spawner().is_some() => {
+                self.nav.key_spawner(key, &|object| Keeper::story(labels, object))
+            }
             _ => self.nav.key(key, flying, town, probe.item_count()),
         };
         match action {
@@ -556,8 +594,23 @@ impl State {
             }
             Action::OptionsVideo { keep } => self.video_answer(keep),
             Action::ResetAll => {
+                // The spawner's mark is history, not a choice: Reset all keeps it.
+                let spawned = self.cheats.spawned();
                 self.cheats = Cheats::neutral();
+                self.cheats.set_spawned(spawned);
                 self.cheats_changed(wram);
+            }
+            Action::Spawn { object, count } => {
+                let (added, writes) = self.keeper.spawn(wram, labels, object, count);
+                if added > 0 {
+                    self.cheat_events.extend(writes);
+                    self.cheat_events
+                        .push(HostEvent::App { tag: SPAWN_TAG, payload: vec![object, added] });
+                    if !self.cheats.spawned() {
+                        self.cheats.set_spawned(true);
+                        self.cheats_changed(wram);
+                    }
+                }
             }
             Action::Use { stack } => {
                 let object = self.keeper.bag().and_then(|bag| bag.stack(stack)).map(|s| s.object);
@@ -587,6 +640,12 @@ impl State {
                     vec![Step::Press { button: Button::B, until: Until::Command }],
                     Arrival::Show(Screen::Command),
                 ),
+                // Over a battle there is no menu under it: Back gives the battle its keys again.
+                Screen::Cheats if self.battle_cheats => {
+                    self.battle_cheats = false;
+                    self.nav = Nav::default();
+                    self.curtain = Curtain::Down;
+                }
                 // Back to the Menu list, which the original never left: its cursor stays on Cheats.
                 Screen::Cheats => self.nav.resume(self.nav.cheats_back()),
                 Screen::Options => self.nav.resume(Screen::Menu),
@@ -680,7 +739,13 @@ impl State {
     /// runtime bytes, which are zero on the map), and the cards of the hand get the Z corners the choice
     /// asks for. The writes are made before the next frame, with the application event that carries the
     /// choices to a replay.
+    /// Over a battle only the settings are written: the runtime bytes (the scripted-loss gate) are the battle's.
     fn cheats_changed(&mut self, wram: &[u8]) {
+        if self.battle_cheats {
+            self.cheat_events.extend(settings_events(&self.cheats, wram));
+            self.cheat_events.push(self.cheats_app_event());
+            return;
+        }
         self.cheat_events.extend(block_events(&self.cheats));
         self.cheat_events.extend(hand_events(&self.cheats, wram));
         self.cheat_events.push(self.cheats_app_event());
@@ -918,6 +983,41 @@ impl State {
                 .take(usize::from(CHARACTERS))
                 .map(|character| character.name.clone())
                 .collect(),
+            spawner: self.nav.spawner().map(|spawner| self.spawner_view(spawner, labels)),
+        }
+    }
+
+    /// The item spawner's page as it shows: the objects of the page the cursor is on, with the units the bag holds.
+    fn spawner_view(&self, spawner: Spawner, labels: &Labels) -> SpawnerView {
+        let name = |object: u8| {
+            labels
+                .objects
+                .get(usize::from(object))
+                .map_or_else(|| format!("#{object}"), |l| l.name.clone())
+        };
+        let in_bag = |object: u8| self.keeper.bag().map_or(0, |bag| bag.units_of(object));
+        let first = spawner.object() / SPAWNER_PAGE * SPAWNER_PAGE;
+        let rows = (first..(first + SPAWNER_PAGE).min(SPAWNER_OBJECTS))
+            .map(|object| SpawnerRow {
+                object,
+                name: name(object),
+                story: Keeper::story(labels, object),
+                in_bag: in_bag(object),
+            })
+            .collect();
+        let object = spawner.object();
+        SpawnerView {
+            rows,
+            object,
+            name: name(object),
+            help: labels
+                .objects
+                .get(usize::from(object))
+                .map(|l| l.help.clone())
+                .unwrap_or_default(),
+            story: Keeper::story(labels, object),
+            count: spawner.count(),
+            confirm: spawner.confirm(),
         }
     }
 
@@ -1027,6 +1127,10 @@ impl State {
             }
             Curtain::Up | Curtain::Lifted => self.curtain,
         };
+        // The battle the Cheats were open over has ended: the next change is the field's again.
+        if self.curtain == Curtain::Down {
+            self.battle_cheats = false;
+        }
     }
 
     /// Where a plan that ended leaves the curtain.
@@ -1043,6 +1147,7 @@ impl State {
         };
         if self.curtain == Curtain::Down {
             self.nav = Nav::default();
+            self.battle_cheats = false;
         }
     }
 }
@@ -1542,6 +1647,86 @@ mod tests {
         menu.step = SAVE_DONE_STEP;
         menu.cursor = 0;
         driver.frame(&menu.wram(), Some(sram), Joypad::default())
+    }
+
+    #[test]
+    fn the_cheats_open_over_a_battle_write_the_settings_only_and_back_gives_the_battle_its_keys() {
+        let sram = saved_slots(&[0]);
+        let mut driver = Driver::new(Labels::default()).with_cheats(CheatSidecar::empty());
+        // A battle: the field is not free (`field_state` 3, as the game sets it for one).
+        let mut menu = FakeMenu::default();
+        menu.field = 3;
+        driver.frame(&menu.wram(), Some(&sram), Joypad::default());
+        assert!(driver.open_battle_cheats());
+        assert_eq!((driver.curtain(), driver.nav().screen()), (Curtain::Up, Screen::Cheats));
+        assert!(!driver.open_battle_cheats(), "once is enough");
+        driver.key(Key::Right, &menu.wram());
+        let frame = driver.frame(&menu.wram(), Some(&sram), Joypad::default());
+        let block: Vec<usize> = frame
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                HostEvent::Wram { address, bytes } if *address == crate::cheats::BLOCK => {
+                    Some(bytes.len())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(block, [ssd_menus::cheats::SETTINGS_LEN], "the runtime bytes are the battle's");
+        driver.key(Key::Cancel, &menu.wram());
+        assert_eq!(driver.curtain(), Curtain::Down);
+        assert!(!driver.battle_cheats());
+        // Open again, and the battle ends under it (the field is free): the curtain and the flag go.
+        assert!(driver.open_battle_cheats());
+        menu.field = 0;
+        driver.frame(&menu.wram(), Some(&sram), Joypad::default());
+        assert_eq!(driver.curtain(), Curtain::Down);
+        assert!(!driver.battle_cheats(), "a change on the map writes the whole block again");
+    }
+
+    #[test]
+    fn the_item_spawner_puts_units_in_the_bag_marks_the_game_and_replays() {
+        let sram = saved_slots(&[0]);
+        let (mut driver, menu) = driver_on_cheats(&sram);
+        assert!(driver.state.keeper.bag().is_some(), "the bag is bound");
+        while driver.nav().cheats_row() != ssd_menus::cheats::Row::ItemSpawner {
+            driver.key(Key::Down, &menu.wram());
+        }
+        driver.key(Key::Confirm, &menu.wram());
+        assert!(driver.nav().spawner().is_some());
+        // Object 3, two units.
+        for _ in 0..3 {
+            driver.key(Key::Down, &menu.wram());
+        }
+        driver.key(Key::Right, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        let units = |driver: &Driver| driver.state.keeper.bag().unwrap().units_of(3);
+        assert_eq!(units(&driver), 2);
+        assert!(driver.cheats().spawned(), "the game is marked");
+        let frame = driver.frame(&menu.wram(), Some(&sram), Joypad::default());
+        let spawn = frame.events.iter().find_map(|event| match event {
+            HostEvent::App { tag, payload } if *tag == SPAWN_TAG => Some(payload.clone()),
+            _ => None,
+        });
+        assert_eq!(spawn, Some(vec![3, 2]), "the replay gets the object and the count");
+        // Reset all keeps the mark.
+        driver.key(Key::Cancel, &menu.wram());
+        while driver.nav().cheats_row() != ssd_menus::cheats::Row::ResetAll {
+            driver.key(Key::Down, &menu.wram());
+        }
+        driver.key(Key::Confirm, &menu.wram());
+        assert!(driver.cheats().is_neutral() && driver.cheats().spawned());
+        // A replay of the event adds the same units.
+        let before = units(&driver);
+        driver.replay_event(SPAWN_TAG, &[3, 2], &menu.wram()).unwrap();
+        assert_eq!(units(&driver), before + 2);
+    }
+
+    #[test]
+    fn the_cheats_do_not_open_over_a_battle_without_the_cheats_installed() {
+        let mut driver = Driver::new(Labels::default());
+        assert!(!driver.open_battle_cheats());
+        assert_eq!(driver.curtain(), Curtain::Down);
     }
 
     /// A driver with the cheats installed, on the Cheats screen of an open menu (the bag and the cheats are bound

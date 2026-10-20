@@ -531,6 +531,13 @@ fn apply_controls(
         }
         None => {}
         Some(Effect::StepFrame) => state.step_once = true,
+        Some(Effect::BattleCheats) => {
+            let opened = ssd_game::gameplay::in_battle(machine.wram())
+                && state.hd.as_mut().is_some_and(crate::hd::Hd::open_battle_cheats);
+            if !opened {
+                log::info!("the Cheats open over a battle in Enhanced, while the game is in one");
+            }
+        }
         Some(Effect::Screenshot(kind)) => {
             // A screenshot is not a save, but only a window has a picture to take: a headless, snapshot or
             // replay run (which does not persist) writes nothing.
@@ -1865,6 +1872,8 @@ fn windowed_loop(
                     touch::Out::Speed => actions.push(PanelAction::CycleSpeed),
                     touch::Out::Save => actions.push(PanelAction::SaveState),
                     touch::Out::Load => actions.push(PanelAction::LoadState),
+                    touch::Out::Slot(slot) => actions.push(PanelAction::SelectSlot(slot)),
+                    touch::Out::Cheats => actions.push(PanelAction::BattleCheats),
                     touch::Out::Pause(true) => {
                         if !state.controls.paused && !touch_paused {
                             actions.push(PanelAction::TogglePause);
@@ -2341,6 +2350,15 @@ fn run_script_line(
                         line.number
                     );
                     hd.capture(capture);
+                }
+                MenuCommand::BattleCheats => {
+                    let battle = ssd_game::gameplay::in_battle(machine.wram());
+                    let hd = state.hd.as_mut().context("menu lines need --mode enhanced")?;
+                    anyhow::ensure!(
+                        battle && hd.open_battle_cheats(),
+                        "line {}: the Cheats open over a battle only (in a battle: {battle})",
+                        line.number
+                    );
                 }
                 MenuCommand::Show(show) => {
                     let wanted = match show {

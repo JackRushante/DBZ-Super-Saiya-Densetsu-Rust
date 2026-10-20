@@ -156,7 +156,10 @@ the original's look.
 
 **Cheats.** Up and Down choose a row, Left and Right (or X) cycle its choices, X on *Reset all* turns everything
 off. Rows: damage dealt x1/2 to x10, defence x1/2 to x10, EXP x1 to x10, Z cards (off, attack, defence, both; for
-the whole party or one character), maximum zeni, endless items, random battles on or off, how often they come
+the whole party or one character), maximum zeni, zeni gained (x1 to x10, from selling and from the story; a battle
+pays no zeni in this game), endless items, an **item spawner** (any object into the bag, with its description and how many;
+story objects such as the Dragon Balls and the Dragon Radar are red and ask before they are added, since they can break
+the story: save first), random battles on or off, how often they come
 (x1/4 to x4), enemies per battle (x1/2 to x3) and enemy power (x1/2 to x5). An "On: N" box counts what is active.
 Fights that the story expects you to lose (today Nail against Frieza) **suspend the battle cheats**: the screen says
 "Cheats off for this fight" for about two seconds and "Cheats back on" on the map. Each save slot keeps its own
@@ -393,6 +396,8 @@ goes from polish to new content. Dates are not promised; each milestone ships wh
 - Documentation and an example pack, which is also **the first mod**, not canon: **Super Saiyan Kaioken**. Goku can
   use the Kaioken while he is a Super Saiyan, up to x10, and every move made in both costs 10% of his HP; with new
   sprites for the mix of the two auras.
+- A second mod, **Free progression**: the story moves on events, never on levels or BP, and the enemies scale to
+  your party, with a difficulty setting.
 - A **review of all the HD art**, character by character, before the new chapters.
 
 ### M11: The Androids and Cell arc

@@ -14,14 +14,18 @@ pub enum Hotkey {
     Pause,
     /// Shows or hides the debug panel.
     TogglePanel,
+    /// Opens the Cheats screen over a battle (Enhanced).
+    BattleCheats,
     Quit,
 }
 
-/// The keys that belong to the window and cannot be remapped: the panel, the four state slots and Esc. The
+/// The keys that belong to the window and cannot be remapped: the panel, the Cheats over a battle, the four
+/// state slots and Esc. The
 /// other shortcuts (speed, pause, save and load state) are the Controls page's (`Bindings::key_hotkey`).
 pub(crate) fn fixed_hotkey(sc: Scancode) -> Option<Hotkey> {
     Some(match sc {
         Scancode::F1 => Hotkey::TogglePanel,
+        Scancode::F3 => Hotkey::BattleCheats,
         Scancode::_1 => Hotkey::Slot(1),
         Scancode::_2 => Hotkey::Slot(2),
         Scancode::_3 => Hotkey::Slot(3),
@@ -92,6 +96,7 @@ mod tests {
         use sdl3::keyboard::Scancode;
         assert_eq!(fixed_hotkey(Scancode::_2), Some(Hotkey::Slot(2)));
         assert_eq!(fixed_hotkey(Scancode::F1), Some(Hotkey::TogglePanel));
+        assert_eq!(fixed_hotkey(Scancode::F3), Some(Hotkey::BattleCheats));
         assert_eq!(fixed_hotkey(Scancode::Escape), Some(Hotkey::Quit));
         assert_eq!(fixed_hotkey(Scancode::F2), None, "the slots moved to the digit keys");
         for remappable in [Scancode::F5, Scancode::F9, Scancode::Tab, Scancode::P, Scancode::X] {

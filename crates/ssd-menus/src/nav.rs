@@ -167,6 +167,8 @@ pub enum Action {
     Adjust { row: Row, by: i8 },
     /// On the cheats screen, Reset all: every cheat is off.
     ResetAll,
+    /// On the item spawner, `count` units of `object` go into the bag.
+    Spawn { object: u8, count: u8 },
     /// On the options screen, the row `row` of `category` moves by `by` steps (-1 Left, 1 Right or A).
     OptionChange { category: Category, row: usize, by: i8 },
     /// On the options screen, Reset this page: every row of `category` goes back to its default.
@@ -187,6 +189,8 @@ pub struct Nav {
     menu: usize,
     bag: Bag,
     cheats: usize,
+    /// The item spawner of the cheats screen.
+    spawner: Spawner,
     options: OptionsNav,
     /// The Cheats screen was opened from the options, and goes back there.
     cheats_from_options: bool,
@@ -203,6 +207,43 @@ pub struct Refusal {
 
 /// The frames the refused row flashes (a second).
 pub const REFUSAL_FLASH: u16 = 60;
+
+/// The objects of the game the item spawner lists (ids 0 to 39).
+pub const SPAWNER_OBJECTS: u8 = 40;
+/// The rows of a page of the item spawner's list.
+pub const SPAWNER_PAGE: u8 = 11;
+/// The most units the spawner adds at once (a stack of the bag); a story object is added one at a time.
+pub const SPAWN_MAX: u8 = 99;
+
+/// The item spawner of the cheats screen: open or not, the object under the cursor, how many to add, and the story
+/// warning's choice while it asks (0 Add anyway, 1 Cancel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Spawner {
+    open: bool,
+    object: u8,
+    count: u8,
+    confirm: Option<u8>,
+}
+
+impl Spawner {
+    /// The object under the cursor.
+    #[must_use]
+    pub const fn object(&self) -> u8 {
+        self.object
+    }
+
+    /// How many units the next add puts in the bag (at least 1).
+    #[must_use]
+    pub fn count(&self) -> u8 {
+        self.count.max(1)
+    }
+
+    /// The story warning's choice while it asks: 0 Add anyway, 1 Cancel.
+    #[must_use]
+    pub const fn confirm(&self) -> Option<u8> {
+        self.confirm
+    }
+}
 
 /// The cursors of the options screen: the category, the row in it, and Reset all's question while it is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -260,6 +301,66 @@ impl Nav {
             Screen::Items => u8::try_from(self.bag.cursor / PAGE_SIZE).unwrap_or(0),
             Screen::Command | Screen::Menu | Screen::Cheats | Screen::Options => 0,
         }
+    }
+
+    /// The item spawner, while the cheats screen shows it.
+    #[must_use]
+    pub fn spawner(&self) -> Option<Spawner> {
+        (self.screen == Screen::Cheats && self.spawner.open).then_some(self.spawner)
+    }
+
+    /// What `key` does on the item spawner: Up and Down move through the objects, L and R by a page, Left and Right
+    /// change how many (a story object stays at 1), Y puts it back to 1, A adds (a story object asks first, with the
+    /// cursor on Cancel), B closes the spawner. `story` says whether an object is one the story checks.
+    pub fn key_spawner(&mut self, key: Key, story: &dyn Fn(u8) -> bool) -> Action {
+        let spawner = &mut self.spawner;
+        if let Some(choice) = spawner.confirm {
+            return match key {
+                Key::Up | Key::Down | Key::Left | Key::Right | Key::Tab | Key::TabBack => {
+                    spawner.confirm = Some(choice ^ 1);
+                    Action::None
+                }
+                Key::Confirm if choice == 0 => {
+                    spawner.confirm = None;
+                    Action::Spawn { object: spawner.object, count: 1 }
+                }
+                Key::Confirm | Key::Cancel => {
+                    spawner.confirm = None;
+                    Action::None
+                }
+                Key::ResetPage | Key::ResetAll => Action::None,
+            };
+        }
+        let objects = u16::from(SPAWNER_OBJECTS);
+        let page = u16::from(SPAWNER_PAGE);
+        let at = u16::from(spawner.object);
+        let max = |object: u8| if story(object) { 1 } else { SPAWN_MAX };
+        match key {
+            Key::Up => spawner.object = ((at + objects - 1) % objects) as u8,
+            Key::Down => spawner.object = ((at + 1) % objects) as u8,
+            Key::TabBack => spawner.object = at.saturating_sub(page) as u8,
+            Key::Tab => spawner.object = (at + page).min(objects - 1) as u8,
+            Key::Left => {
+                let count = spawner.count.max(1);
+                spawner.count = if count <= 1 { max(spawner.object) } else { count - 1 };
+            }
+            Key::Right => {
+                let count = spawner.count.max(1);
+                spawner.count = if count >= max(spawner.object) { 1 } else { count + 1 };
+            }
+            Key::ResetPage => spawner.count = 1,
+            Key::Confirm if story(spawner.object) => spawner.confirm = Some(1),
+            Key::Confirm => {
+                return Action::Spawn { object: spawner.object, count: spawner.count.max(1) };
+            }
+            Key::Cancel => {
+                spawner.open = false;
+                spawner.confirm = None;
+            }
+            Key::ResetAll => {}
+        }
+        spawner.count = spawner.count.max(1).min(max(spawner.object));
+        Action::None
     }
 
     /// The row of the cheats screen under the cursor.
@@ -507,6 +608,12 @@ impl Nav {
                 Key::Left => return adjust(self.cheats_row(), -1),
                 // A moves the choice on, and on Reset all it resets.
                 Key::Confirm if self.cheats_row() == Row::ResetAll => return Action::ResetAll,
+                // A or Right on the item spawner opens it, on the object it was last on, with a count of 1.
+                Key::Right | Key::Confirm if self.cheats_row() == Row::ItemSpawner => {
+                    self.spawner.open = true;
+                    self.spawner.count = 1;
+                    self.spawner.confirm = None;
+                }
                 Key::Right | Key::Confirm => return adjust(self.cheats_row(), 1),
                 Key::Cancel => return Action::Back,
                 Key::Tab | Key::TabBack | Key::ResetPage | Key::ResetAll => {}
@@ -1243,6 +1350,50 @@ mod tests {
     }
 
     #[test]
+    fn the_item_spawner_moves_counts_and_asks_before_a_story_object() {
+        let story = |object: u8| (33..=39).contains(&object);
+        let mut nav = Nav::default();
+        nav.enter(Screen::Cheats);
+        while nav.cheats_row() != Row::ItemSpawner {
+            nav.key(Key::Down, false, false, 0);
+        }
+        nav.key(Key::Confirm, false, false, 0);
+        let at = |nav: &Nav| nav.spawner().unwrap();
+        assert_eq!((at(&nav).object(), at(&nav).count()), (0, 1));
+        nav.key_spawner(Key::Right, &story);
+        nav.key_spawner(Key::Right, &story);
+        assert_eq!(nav.key_spawner(Key::Confirm, &story), Action::Spawn { object: 0, count: 3 });
+        nav.key_spawner(Key::Left, &story);
+        nav.key_spawner(Key::Left, &story);
+        nav.key_spawner(Key::Left, &story);
+        assert_eq!(at(&nav).count(), SPAWN_MAX, "Left from 1 wraps to the most");
+        nav.key_spawner(Key::ResetPage, &story);
+        assert_eq!(at(&nav).count(), 1, "Y puts it back to 1");
+        nav.key_spawner(Key::Up, &story);
+        assert_eq!(at(&nav).object(), SPAWNER_OBJECTS - 1, "Up from the first wraps to the last");
+        nav.key_spawner(Key::TabBack, &story);
+        assert_eq!(at(&nav).object(), SPAWNER_OBJECTS - 1 - SPAWNER_PAGE, "L goes a page up");
+        nav.key_spawner(Key::Tab, &story);
+        nav.key_spawner(Key::Tab, &story);
+        assert_eq!(at(&nav).object(), SPAWNER_OBJECTS - 1, "R stops at the last");
+        // A Dragon Ball: one at a time, and A asks first with the cursor on Cancel.
+        nav.key_spawner(Key::Right, &story);
+        assert_eq!(at(&nav).count(), 1, "a story object stays at 1");
+        assert_eq!(nav.key_spawner(Key::Confirm, &story), Action::None);
+        assert_eq!(at(&nav).confirm(), Some(1));
+        assert_eq!(nav.key_spawner(Key::Confirm, &story), Action::None, "Cancel adds nothing");
+        assert_eq!(at(&nav).confirm(), None);
+        nav.key_spawner(Key::Confirm, &story);
+        nav.key_spawner(Key::Left, &story);
+        assert_eq!(
+            nav.key_spawner(Key::Confirm, &story),
+            Action::Spawn { object: SPAWNER_OBJECTS - 1, count: 1 },
+            "Add anyway adds one"
+        );
+        assert!(nav.spawner().is_some(), "the spawner stays open for the next object");
+    }
+
+    #[test]
     fn every_a_and_b_does_something_or_is_a_documented_no_op() {
         // The command window of the field, of a town and of the flying party: A chooses the row, B goes back.
         for (flying, town) in [(false, false), (false, true), (true, false)] {
@@ -1273,12 +1424,21 @@ mod tests {
             }
             assert_eq!(nav.key(Key::Cancel, false, false, 0), Action::Back);
         }
-        // The cheats screen: every row answers A (a choice, or Reset all), and B goes back to the Menu list.
+        // The cheats screen: every row answers A (a choice, or Reset all; the item spawner opens its page, and B
+        // there closes it), and B goes back to the Menu list.
         for row in 0..Row::ALL.len() {
             let mut nav = Nav::default();
             nav.enter(Screen::Cheats);
             for _ in 0..row {
                 nav.key(Key::Down, false, false, 0);
+            }
+            if nav.cheats_row() == Row::ItemSpawner {
+                assert_eq!(nav.key(Key::Confirm, false, false, 0), Action::None);
+                assert!(nav.spawner().is_some(), "A opens the item spawner");
+                assert_eq!(nav.key_spawner(Key::Cancel, &|_| false), Action::None);
+                assert!(nav.spawner().is_none(), "B closes it");
+                assert_eq!(nav.key(Key::Cancel, false, false, 0), Action::Back);
+                continue;
             }
             assert_ne!(
                 nav.key(Key::Confirm, false, false, 0),

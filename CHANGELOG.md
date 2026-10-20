@@ -13,7 +13,19 @@
   - Touch options: **Picture** (Standard, Large, or Full screen with the controls floating over it) and **Show FPS**
     (the frame rate and the sound's health at the top).
   - The touch MENU has a GAME page: **Restart game** and **Quit**, each on a second tap.
+  - The touch MENU's **State slot** picks the slot of Save state and Load state (1 to 4).
   - An HD picture fills the area it is given at any size.
+- **Item spawner** (Cheats): any object into the bag, with its description and how many (up to 99). Story objects
+  (the Dragon Balls, the Dragon Radar, Gohan...) are red, come one at a time and ask first, since they can break the
+  story. A game that uses it carries the CHEATS badge.
+- **Zeni gained** (Cheats): x1 to x10 on the zeni from selling and from the story's events (the game pays none for a
+  battle), at most 999 as ever.
+- **Cheats in battle**: F3, or the touch MENU's Cheats in a battle, opens the Cheats screen over the fight; a change
+  applies at once and the story fights' own rules stay as they are.
+- **Story fix (Remastered)**: in the Saiyans' chapter, Piccolo reaching level 9 (Gohan level 10 without him) no longer
+  kills Krillin, Yamcha, Tien and Chiaotzu before they are recruited, nor stops the random battles: with more EXP or
+  long training the story no longer runs ahead. Walking into the Saiyans before recruiting them still costs them, as
+  in the original. Classic is unchanged.
 - The Windows launchers find the game's data under `SSD_DATA_DIR` when it is set, as the game does.
 - **Translations** supplied by the player: with a translation's files in the data folder (the game's text keyed by
   `xtask text-dump`, the HD menus' words and a font), Enhanced draws the story, the battle messages, the names and the

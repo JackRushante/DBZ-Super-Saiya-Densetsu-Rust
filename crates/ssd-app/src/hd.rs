@@ -291,6 +291,11 @@ impl Hd {
         self.driver.busy()
     }
 
+    /// Opens the Cheats screen over a battle (see [`Driver::open_battle_cheats`]).
+    pub fn open_battle_cheats(&mut self) -> bool {
+        self.driver.open_battle_cheats()
+    }
+
     /// A navigation key of the HD on the menu of `wram` (see [`Driver::key`]).
     pub fn key(&mut self, key: Key, wram: &[u8]) {
         self.driver.key(key, wram);
@@ -1167,7 +1172,12 @@ mod tests {
         busy.set_endless(true);
         for row in Row::ALL {
             for cheats in [Cheats::neutral(), busy] {
-                let view = ssd_menus::view::CheatsView { cheats, row, names: names.clone() };
+                let view = ssd_menus::view::CheatsView {
+                    cheats,
+                    row,
+                    names: names.clone(),
+                    spawner: None,
+                };
                 screens.push(ssd_menus::screens::cheats_screen(&view));
             }
         }

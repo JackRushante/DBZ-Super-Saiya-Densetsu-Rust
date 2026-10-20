@@ -14,6 +14,7 @@
 //! menu open
 //! menu key up|down|left|right|a|b|l|r|y|select
 //! menu show field|menu|items|cheats|options
+//! menu battle-cheats
 //! menu press <key>|esc|backspace|pad <button>
 //! menu tab all|allies|tools
 //! touch menu|options|edit|hidden|play|minimal|full|stick|dpad|gamepad|nogamepad|select <group>|press <buttons>|release
@@ -71,6 +72,8 @@ pub enum MenuCommand {
     Tab(BagTab),
     /// A raw key (or, with `pad`, button) press while the Controls page waits for one.
     Press(Capture),
+    /// The Cheats screen over the battle the game is in (F3, the touch MENU's Cheats).
+    BattleCheats,
 }
 
 /// The HD screen a `menu show` line asks for.
@@ -159,6 +162,7 @@ fn parse_command(text: &str) -> Result<Command, String> {
         }
         ("mode", _) => Err("mode takes a routine and one of original, rust, verify".to_owned()),
         ("menu", ["open"]) => Ok(Command::Menu(MenuCommand::Open)),
+        ("menu", ["battle-cheats"]) => Ok(Command::Menu(MenuCommand::BattleCheats)),
         ("menu", ["key", key]) => {
             menu_key_named(key).map(|key| Command::Menu(MenuCommand::Key(key)))
         }
@@ -337,6 +341,7 @@ mod tests {
         assert!(error("menu").message.contains("menu takes open"));
         assert!(error("menu show submenu").message.contains("unknown menu screen `submenu`"));
         assert_eq!(command("menu show cheats"), Command::Menu(MenuCommand::Show(MenuShow::Cheats)));
+        assert_eq!(command("menu battle-cheats"), Command::Menu(MenuCommand::BattleCheats));
         assert!(error("menu key x").message.contains("unknown menu key `x`"));
     }
 

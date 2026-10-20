@@ -78,6 +78,10 @@ pub mod palette {
     pub const KI: Color = Color::rgb(0x52, 0x4A, 0xFF);
     /// The text of the entries that are greyed out (their label and their "coming soon").
     pub const GREY: Color = Color::rgb(0x8E, 0x82, 0x72);
+    /// The story objects of the item spawner and its warning.
+    pub const STORY: Color = Color::rgb(0xD0, 0x10, 0x10);
+    /// The warning's background.
+    pub const WARNING: Color = Color::rgb(0xFF, 0xE0, 0xE0);
 }
 
 /// The width in pixels of `text` set in `size` pixels of Share Tech Mono.

@@ -22,6 +22,10 @@ pub enum Out {
     /// MENU: Save state, Load state.
     Save,
     Load,
+    /// MENU: the state slot to use from now on (1 to 4).
+    Slot(u8),
+    /// MENU, in a battle: the Cheats screen over the battle.
+    Cheats,
     /// Pause (true) or let the game go (false); the host pauses only if the player had not.
     Pause(bool),
     /// A light tick under the finger.
@@ -52,6 +56,8 @@ pub enum Mode {
 pub enum PBtn {
     Save,
     Load,
+    Slot,
+    Cheats,
     Options,
     Edit,
     HideControls,
@@ -344,11 +350,18 @@ impl Touch {
                     false,
                 );
                 cell(&mut p, PBtn::Options, "Options".into(), 0.0, 1.0, false);
-                cell(&mut p, PBtn::Edit, "Edit layout".into(), 1.0, 1.0, false);
+                // In a battle the layout waits, and the Cheats are what the player may want.
+                if self.in_battle {
+                    cell(&mut p, PBtn::Cheats, "Cheats".into(), 1.0, 1.0, false);
+                } else {
+                    cell(&mut p, PBtn::Edit, "Edit layout".into(), 1.0, 1.0, false);
+                }
                 cell(&mut p, PBtn::HideControls, "Hide controls".into(), 0.0, 2.0, false);
                 cell(&mut p, PBtn::Game, "Game: restart, quit".into(), 1.0, 2.0, false);
+                cell(&mut p, PBtn::Slot, format!("State slot: {}", self.slot), 0.0, 3.0, false);
                 cell(&mut p, PBtn::Resume, "Resume".into(), 1.0, 3.0, true);
-                p.note = "Menu pauses the game. Slots 1 to 4 as on the PC (F5, F9).";
+                p.note =
+                    "Menu pauses the game. State slot picks the slot of Save and Load (1 to 4).";
                 Some(p)
             }
             Mode::Game => {
@@ -704,6 +717,15 @@ impl Touch {
                 self.emit(Out::Load);
                 self.close_menu();
             }
+            PBtn::Cheats => {
+                self.emit(Out::Cheats);
+                self.close_menu();
+            }
+            PBtn::Slot => {
+                // The next slot, shown at once; the host takes it from the message.
+                self.slot = self.slot % 4 + 1;
+                self.emit(Out::Slot(self.slot));
+            }
             PBtn::Options => self.mode = Mode::Options,
             PBtn::Edit => {
                 self.minimal = false;
@@ -1035,6 +1057,27 @@ mod tests {
     }
 
     #[test]
+    fn in_a_battle_the_menu_offers_the_cheats_where_edit_layout_is() {
+        let mut t = touch();
+        t.set_status("x1", 1, false, true);
+        t.mode = Mode::Menu;
+        let ids: Vec<PBtn> = t.panel().unwrap().buttons.iter().map(|b| b.id).collect();
+        assert!(ids.contains(&PBtn::Cheats) && !ids.contains(&PBtn::Edit));
+        let cheats =
+            t.panel().unwrap().buttons.iter().find(|b| b.id == PBtn::Cheats).unwrap().rect.center();
+        t.finger_down(1, cheats);
+        t.finger_up(1, false);
+        assert!(t.take_out().contains(&Out::Cheats));
+        t.set_status("x1", 1, false, false);
+        t.mode = Mode::Menu;
+        let ids: Vec<PBtn> = t.panel().unwrap().buttons.iter().map(|b| b.id).collect();
+        assert!(
+            ids.contains(&PBtn::Edit) && !ids.contains(&PBtn::Cheats),
+            "on the map: Edit layout"
+        );
+    }
+
+    #[test]
     fn menu_pauses_and_resume_lets_go_and_the_speed_button_cycles() {
         let mut t = touch();
         t.finger_down(1, centre(&t, Btn::Speed));
@@ -1048,6 +1091,14 @@ mod tests {
         t.finger_down(2, centre(&t, Btn::A));
         assert_eq!(t.pressed(), [false; 12]);
         t.finger_up(2, false);
+        let slot =
+            t.panel().unwrap().buttons.iter().find(|b| b.id == PBtn::Slot).unwrap().rect.center();
+        for next in [2, 3, 4, 1] {
+            t.finger_down(4, slot);
+            t.finger_up(4, false);
+            assert!(t.take_out().contains(&Out::Slot(next)), "State slot goes to {next}");
+            assert_eq!(t.mode, Mode::Menu, "the menu stays open");
+        }
         let resume =
             t.panel().unwrap().buttons.iter().find(|b| b.id == PBtn::Resume).unwrap().rect.center();
         t.finger_down(3, resume);

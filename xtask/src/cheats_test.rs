@@ -4,7 +4,7 @@
 //! The scenarios (`menu-test cheats`, all, or the names given) play the reference replays of `--replays` (default
 //! `.work/replays`) with the cheats on and check the numbers against Classic: the battle numbers (`battle`), the
 //! Z cards of the whole party and of one fighter (`z-party`, `z-fighter`, `z-fighter-defence`), the Z cards switched
-//! on mid-game (`z-mid-game`), the max zeni (`zeni`), random battles off and the encounter rate (`random-off`,
+//! on mid-game (`z-mid-game`), the max zeni (`zeni`), the zeni gained by a story event and by a sale (`gain`, `sale`), the level deadline of the Saiyans' chapter that the Remastered story fix removes (`deadline`), random battles off and the encounter rate (`random-off`,
 //! `encounter-rate`), and two recorded sessions that replay to the same hash (`recorded`). `--save <file.sav>`
 //! adds the scripted loss of Nail against Frieza (`scripted-loss`): the extreme battle cheats against Classic,
 //! frame by frame outside the cheat block.
@@ -484,6 +484,110 @@ fn run_frames(
     Ok(trace)
 }
 
+/// Plays `replay` for 600 frames with `plan`, then sells `object` from `zeni` zeni through the shop's own sale (`03:A790`):
+/// a `jsl` to it is written in the upper work RAM (`$7F:FE00`, which the reference replays never write) and run, with A
+/// 8-bit and the index 16-bit, as the shop calls it, and the run stops where it returns. Returns the zeni after.
+fn sale_event(
+    rom: &[u8],
+    replay: &Replay,
+    plan: &Plan,
+    object: u8,
+    zeni: u16,
+) -> anyhow::Result<u16> {
+    const AT: u64 = 600;
+    const CALL: u32 = 0x7F_FE00;
+    const BACK: u32 = CALL + 4;
+    let mut machine = replay.power_on(rom.to_vec())?;
+    if plan.start.is_some() {
+        let mut table = HookTable::new();
+        cheats::install(&mut table);
+        machine.set_hook_table(Some(table));
+    }
+    run_frames(&mut machine, plan, |frame| replay.input(frame), AT)?;
+    let input = &mut |frame| replay.input(frame);
+    let stops = ssd_oracle::Stops { instructions: Some(1), ..ssd_oracle::Stops::default() };
+    let stopped = machine.run(&stops, input, &mut NullAudio, 4)?;
+    anyhow::ensure!(
+        matches!(stopped, ssd_oracle::Stopped::Instructions),
+        "no instruction boundary in four frames: {stopped:?}"
+    );
+    let stage = [
+        HostEvent::Wram { address: 0x7E_01B4, bytes: zeni.to_le_bytes().to_vec() },
+        HostEvent::Wram { address: 0x7E_0D7C, bytes: vec![object] },
+        HostEvent::Wram { address: 0x7E_0C3F, bytes: vec![0] },
+        // jsl $03:A790
+        HostEvent::Wram { address: CALL, bytes: vec![0x22, 0x90, 0xA7, 0x03] },
+    ];
+    apply_events(&mut machine, &stage)?;
+    let mut registers = machine.cpu_registers();
+    registers.pbr = (CALL >> 16) as u8;
+    registers.pc = (CALL & 0xFFFF) as u16;
+    registers.dbr = 0;
+    registers.d = 0;
+    registers.p = ssd_oracle::StatusRegister::from(0x24);
+    machine.set_cpu_registers(registers);
+    machine.set_breakpoint(BACK);
+    let stops =
+        ssd_oracle::Stops { frame_end: true, breakpoint: true, ..ssd_oracle::Stops::default() };
+    let stopped = machine.run(&stops, input, &mut NullAudio, 1)?;
+    machine.clear_breakpoint(BACK);
+    anyhow::ensure!(
+        matches!(stopped, ssd_oracle::Stopped::Breakpoint { .. }),
+        "the sale did not return: {stopped:?}"
+    );
+    Ok(read16(machine.wram(), ZENI))
+}
+
+/// Plays `replay` for 600 frames with `plan`, then runs the level check of map 5 (`03:F300`) with Piccolo at `level` in the first
+/// party record, through a `jsl` written at `$7F:FE00` as in [`sale_event`]. Returns the story flag byte `$0173` after (bit 5 is
+/// flag `0x1D`, the deadline's).
+fn deadline_event(rom: &[u8], replay: &Replay, plan: &Plan, level: u8) -> anyhow::Result<u8> {
+    const AT: u64 = 600;
+    const CALL: u32 = 0x7F_FE00;
+    const BACK: u32 = CALL + 4;
+    let mut machine = replay.power_on(rom.to_vec())?;
+    if plan.start.is_some() {
+        let mut table = HookTable::new();
+        cheats::install(&mut table);
+        machine.set_hook_table(Some(table));
+    }
+    run_frames(&mut machine, plan, |frame| replay.input(frame), AT)?;
+    let input = &mut |frame| replay.input(frame);
+    let stops = ssd_oracle::Stops { instructions: Some(1), ..ssd_oracle::Stops::default() };
+    let stopped = machine.run(&stops, input, &mut NullAudio, 4)?;
+    anyhow::ensure!(
+        matches!(stopped, ssd_oracle::Stopped::Instructions),
+        "no instruction boundary in four frames: {stopped:?}"
+    );
+    let stage = [
+        // The first record in the party (`$C0`), Piccolo (id 2) at `level`; the flags clear.
+        HostEvent::Wram { address: 0x7E_0B00, bytes: vec![0xC0] },
+        HostEvent::Wram { address: 0x7E_0B02, bytes: vec![level] },
+        HostEvent::Wram { address: 0x7E_0B1C, bytes: vec![2] },
+        HostEvent::Wram { address: 0x7E_0172, bytes: vec![0, 0, 0] },
+        // jsl $03:F300
+        HostEvent::Wram { address: CALL, bytes: vec![0x22, 0x00, 0xF3, 0x03] },
+    ];
+    apply_events(&mut machine, &stage)?;
+    let mut registers = machine.cpu_registers();
+    registers.pbr = (CALL >> 16) as u8;
+    registers.pc = (CALL & 0xFFFF) as u16;
+    registers.dbr = 0;
+    registers.d = 0;
+    registers.p = ssd_oracle::StatusRegister::from(0x24);
+    machine.set_cpu_registers(registers);
+    machine.set_breakpoint(BACK);
+    let stops =
+        ssd_oracle::Stops { frame_end: true, breakpoint: true, ..ssd_oracle::Stops::default() };
+    let stopped = machine.run(&stops, input, &mut NullAudio, 1)?;
+    machine.clear_breakpoint(BACK);
+    anyhow::ensure!(
+        matches!(stopped, ssd_oracle::Stopped::Breakpoint { .. }),
+        "the level check did not return: {stopped:?}"
+    );
+    Ok(machine.wram()[0x0173])
+}
+
 /// Plays `replay` for 600 frames with `plan`, then stages the story event that gives zeni (the amount `$0D53` is 40, the
 /// zeni 100) by running the game's event dispatcher on it (`01:D433`, to `01:D7F9`), and runs one frame. Returns the zeni and the amount after.
 fn money_event(
@@ -821,7 +925,8 @@ fn screen_keys(rom: &[u8], sram: &[u8], slot: usize, out: &mut String) -> anyhow
         block_settings(&h) == Cheats::neutral().settings_bytes(),
         "the block is neutral after Continue: a save with no entry has all off".to_owned(),
     );
-    for row in Row::ALL.into_iter().filter(|row| row.choices() > 0) {
+    // The item spawner is an action row, as Reset all is: A or Right opens its page (`spawner` covers it).
+    for row in Row::ALL.into_iter().filter(|row| row.choices() > 0 && *row != Row::ItemSpawner) {
         goto(&mut h, row)?;
         let count = row.choices();
         let start = row.index(h.driver.cheats());
@@ -1945,6 +2050,77 @@ fn scenarios(
             checks.check(
                 zeni == want,
                 format!("{label}, staged: 40 added to 100 zeni gives {want}: {zeni} (the amount reads {amount})"),
+            );
+        }
+    }
+    if wanted("gain") {
+        checks.note(
+            "gain: the zeni a story event gives, scaled by the zeni gained and by the money multiplier".to_owned(),
+        );
+        // The event staged on the battle replay's machine (the original code): 40 added to 100 zeni.
+        let replay = read_replay(rom, &dir.join(battle))?;
+        for (label, gain, money, want) in [
+            ("x1", 0_usize, 1_usize, 140_u16),
+            ("x5", 3, 1, 300),
+            ("x5 with money x2", 3, 2, 500),
+            ("x10 with money x1/2", 4, 0, 300),
+            ("x10 with money x2: the cap", 4, 2, 900),
+        ] {
+            let mut cheats = Cheats::neutral();
+            cheats.set_gain_index(gain);
+            cheats.set_money_index(money);
+            let plan = Plan { start: Some(cheats), ..Plan::default() };
+            let (zeni, _) = money_event(rom, &replay, &plan, None)?;
+            checks
+                .check(zeni == want, format!("{label}: 40 added to 100 zeni gives {want}: {zeni}"));
+        }
+    }
+    if wanted("sale") {
+        checks.note(
+            "sale: the shop's sale adds the price times the zeni gained, capped at 999".to_owned(),
+        );
+        // MrPopo (object 3) sells for 10 Pt.
+        let replay = read_replay(rom, &dir.join(battle))?;
+        let classic = sale_event(rom, &replay, &Plan::default(), 3, 100)?;
+        checks.check(
+            classic == 110,
+            format!("Classic: selling MrPopo from 100 zeni gives 110: {classic}"),
+        );
+        for (label, gain, from, want) in [
+            ("x1", 0_usize, 100_u16, 110_u16),
+            ("x5", 3, 100, 150),
+            ("x10", 4, 100, 200),
+            ("x10, the cap", 4, 950, 999),
+        ] {
+            let mut cheats = Cheats::neutral();
+            cheats.set_gain_index(gain);
+            let plan = Plan { start: Some(cheats), ..Plan::default() };
+            let zeni = sale_event(rom, &replay, &plan, 3, from)?;
+            checks.check(
+                zeni == want,
+                format!("{label}: selling MrPopo from {from} zeni gives {want}: {zeni}"),
+            );
+        }
+    }
+    if wanted("deadline") {
+        checks.note(
+            "deadline: Piccolo at level 9 on map 5 kills the recruits in Classic, not in Remastered".to_owned(),
+        );
+        let replay = read_replay(rom, &dir.join(battle))?;
+        let enhanced = Plan { start: Some(Cheats::neutral()), ..Plan::default() };
+        for (label, plan, level, set) in [
+            ("Classic, level 8", Plan::default(), 8_u8, false),
+            ("Classic, level 9", Plan::default(), 9, true),
+            ("Remastered, level 9", enhanced.clone(), 9, false),
+            ("Remastered, level 30", enhanced, 30, false),
+        ] {
+            let flags = deadline_event(rom, &replay, &plan, level)?;
+            checks.check(
+                (flags & 0x20 != 0) == set,
+                format!(
+                    "{label}: the deadline's flag 0x1D is {}: $0173 = {flags:02X}",
+                    if set { "set" } else { "clear" }
+                ),
             );
         }
     }
