@@ -20,7 +20,7 @@ use ssd_menus::bag::Sidecar;
 use ssd_menus::cheats::{CheatSidecar, MARKER, MARKER_BYTES, SUSPENDED};
 use ssd_menus::layout::{self, palette};
 use ssd_menus::screens::SlotList;
-use ssd_menus::{Color, DrawList, Key, Op, Picture, Rect};
+use ssd_menus::{Color, DrawList, Key, Language, Op, Picture, Rect};
 use ssd_oracle::{Frame, FrameLog, Joypad};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -99,6 +99,15 @@ pub struct Hd {
     wide: WideRun,
     /// The cheats' notices on the field.
     notice: CheatNotice,
+    /// The names and texts of the menus in English, as the catalogue has them: a translation is made from them.
+    labels: ssd_menus::Labels,
+    /// The language the PC file held when it was last seen: a change of the Options' row is measured from it, so
+    /// another row's change does not undo `--lang`.
+    language_saved: Option<Language>,
+    /// The menus' words in the language of the text (`None`: English).
+    ui_text: Option<std::sync::Arc<ssd_menus::ui_text::UiText>>,
+    /// The canonical ROM: the names a translation draws over the tile maps are read from it.
+    rom: std::sync::Arc<[u8]>,
 }
 
 impl Hd {
@@ -113,13 +122,15 @@ impl Hd {
     pub fn new(rom: &[u8], ruleset: Ruleset) -> anyhow::Result<Self> {
         let catalogue = Catalogue::from_rom(rom)?;
         let sidecar = read_sidecar()?;
-        let driver =
-            Driver::with_bag(ssd_catalogue::menu_labels(&catalogue), ruleset.bag(), sidecar);
+        let labels = ssd_catalogue::menu_labels(&catalogue);
+        let driver = Driver::with_bag(labels.clone(), ruleset.bag(), sidecar);
         let driver =
             if ruleset.cheats() { driver.with_cheats(read_cheats_sidecar()?) } else { driver };
         let driver =
             driver.with_options(crate::options::read_slots()?, crate::options::read_settings()?);
-        Ok(Self {
+        let language_saved = Language::from_values(&driver.options().pc);
+        let language = crate::lang::effective(&driver.options().pc);
+        let mut hd = Self {
             driver,
             art: Art {
                 rom: rom.to_vec(),
@@ -145,7 +156,34 @@ impl Hd {
                 wide
             },
             notice: CheatNotice::default(),
-        })
+            labels,
+            language_saved,
+            ui_text: None,
+            rom: std::sync::Arc::from(rom),
+        };
+        hd.set_language(language);
+        Ok(hd)
+    }
+
+    /// Draws the game's text in `language` from the next frame on.
+    pub fn set_language(&mut self, language: Language) {
+        let table = crate::lang::translation(language);
+        self.driver.set_labels(match &table {
+            Some(table) => ssd_catalogue::translated_labels(&self.labels, table),
+            None => self.labels.clone(),
+        });
+        self.wide.set_overlay(crate::lang::overlay(language, &self.rom));
+        self.ui_text = crate::lang::ui_text(language);
+    }
+
+    /// The PC file now holds `values` (the Options changed a row): a new choice of the Language row takes effect at
+    /// once, and wins over `--lang` from then on.
+    pub fn follow_language(&mut self, values: &ssd_menus::options::Values) {
+        let saved = Language::from_values(values);
+        if saved != self.language_saved {
+            self.language_saved = saved;
+            self.set_language(saved.unwrap_or_default());
+        }
     }
 
     /// The machine's state was replaced (a state loaded): see [`Driver::reset`].
@@ -201,8 +239,19 @@ impl Hd {
         if let (Some(which), Some(sram)) = (slot_list(wram), sram) {
             list.append(ssd_menus::screens::slot_badges(which, self.driver.marked_slots(sram)));
         }
-        (!list.ops().is_empty())
-            .then(|| crate::options::access::restyle(&self.driver.options().pc, list))
+        (!list.ops().is_empty()).then(|| {
+            crate::options::access::restyle(&self.driver.options().pc, self.translated(list, None))
+        })
+    }
+
+    /// `list` with the menus' words in the language of the text, on the screen `context` (see [`UiText::get_in`]).
+    ///
+    /// [`UiText::get_in`]: ssd_menus::ui_text::UiText::get_in
+    fn translated(&self, mut list: DrawList, context: Option<&str>) -> DrawList {
+        if let Some(table) = &self.ui_text {
+            list.map_text(|text| table.get_in(context, text));
+        }
+        list
     }
 
     /// The Item screen shows `tab` of the bag.
@@ -272,7 +321,11 @@ impl Hd {
     /// The HD's picture of the menu now, if the curtain is up.
     #[must_use]
     pub fn scene(&self, wram: &[u8]) -> Option<DrawList> {
-        self.driver.scene(wram)
+        let context = match self.driver.screen() {
+            Some(ssd_menus::view::Screen::Options) => Some("options"),
+            _ => None,
+        };
+        self.driver.scene(wram).map(|list| self.translated(list, context))
     }
 
     /// The 16:9 view of the frame that just ran (see [`WideRun::note`]); `None` when the frame has no
@@ -369,7 +422,6 @@ pub struct Art {
 }
 
 impl Art {
-    #[cfg(any(target_os = "android", test))]
     /// An art with no ROM and no pack: it paints what needs no picture (the first-launch screens).
     #[must_use]
     pub fn empty() -> Self {

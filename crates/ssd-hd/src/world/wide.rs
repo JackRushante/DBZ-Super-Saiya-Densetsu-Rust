@@ -36,8 +36,10 @@ use crate::bgart::Probe;
 use crate::enhanced::picture;
 use crate::font::{Font, TextCapture};
 use crate::pack::Pack;
+use crate::translate::{Overlay, Target, Translator};
 use crate::{Binder, Frame, HdFrame, HdOptions, Memories, Pixel, Renderer, Unsupported, WIDTH};
 use rayon::prelude::*;
+use ssd_catalogue::engine::OnScreen;
 use ssd_oracle::{CgramWrite, Color, FrameLog, LineEntry, LineRegs, OamWrite, VramWrite};
 use std::sync::Arc;
 
@@ -258,6 +260,8 @@ pub struct WideRenderer {
     /// map on BG2 (a menu, a scripted scene, a town's room): its map layer is found by the world
     /// position like the field's.
     mapped: bool,
+    /// The translation drawn over the original's message windows, when the run has one.
+    translator: Option<Translator>,
 }
 
 /// A part of an object the original drops, as a wide frame draws it.
@@ -356,6 +360,7 @@ impl WideRenderer {
             trust_field: false,
             extras: Vec::new(),
             mapped: false,
+            translator: None,
         }
     }
 
@@ -363,6 +368,20 @@ impl WideRenderer {
     /// more (`None`: from the look alone); see [`crate::font`].
     pub fn set_font(&mut self, font: Option<Arc<Font>>) {
         self.font = font;
+    }
+
+    /// Makes [`WideRenderer::render_hd`] draw the translation of `overlay` over the original's message windows, at
+    /// a scale of 2 or more with the HD text on (`None`: the original's text); see [`crate::translate`].
+    pub fn set_overlay(&mut self, overlay: Option<Arc<Overlay>>) {
+        self.translator = overlay.map(Translator::new);
+    }
+
+    /// The page the message engine named at the start of the next frame drawn ([`ssd_catalogue::engine`]), for
+    /// the translation.
+    pub fn set_text_screen(&mut self, screen: Option<OnScreen>) {
+        if let Some(translator) = self.translator.as_mut() {
+            translator.screen = screen;
+        }
     }
 
     /// Draws every frame in one piece on one thread (`true`) instead of in segments of lines that
@@ -618,6 +637,12 @@ impl WideRenderer {
                 wide.frame.width,
                 beneath_pixels,
             );
+            if let Some(translator) = self.translator.as_mut() {
+                let width = picture.width as usize;
+                let mut target = Target { rgba: &mut picture.rgba, width, scale };
+                let character = |glyph| font.character(glyph);
+                translator.draw(&mut target, self.text.cells(), &wide.frame, logical.x, &character);
+            }
         }
         Ok(WideHd {
             picture,
@@ -1130,6 +1155,17 @@ pub struct WideRun {
     /// What the last frame skipped ([`WideRun::skip`]) started from, until it is drawn after all
     /// ([`WideRun::redraw`]) or another frame is noted.
     skipped: Option<(u8, Option<FieldState>)>,
+    /// With a translation ([`WideRun::set_overlay`]): the page the message engine named at the end of the last
+    /// frame noted, and the one the frame being drawn started from.
+    text: Option<TextRun>,
+}
+
+/// The pages the message engine named, for the translation: at the end of the last frame noted, and at the start
+/// of the frame noted (or skipped) last.
+#[derive(Debug, Default)]
+struct TextRun {
+    ended: Option<OnScreen>,
+    started: Option<OnScreen>,
 }
 
 impl WideRun {
@@ -1142,6 +1178,22 @@ impl WideRun {
             drawing: None,
             ended: None,
             skipped: None,
+            text: None,
+        }
+    }
+
+    /// Draws the translation of `overlay` over the original's message windows in the Enhanced pictures (`None`:
+    /// the original's text); see [`crate::translate`].
+    pub fn set_overlay(&mut self, overlay: Option<Arc<Overlay>>) {
+        self.text = overlay.is_some().then(TextRun::default);
+        self.renderer().set_overlay(overlay);
+    }
+
+    /// Tells the renderer the page the frame about to be drawn started from.
+    fn hand_text(&mut self) {
+        let started = self.text.as_ref().and_then(|text| text.started.clone());
+        if self.text.is_some() {
+            self.renderer().set_text_screen(started);
         }
     }
 
@@ -1190,6 +1242,7 @@ impl WideRun {
         let log = log?;
         let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
         let rom = Arc::clone(&self.rom);
+        self.hand_text();
         self.renderer().render_hd(Rom(&rom), game_mode, field.as_ref(), log, options, hd).ok()
     }
 
@@ -1216,6 +1269,7 @@ impl WideRun {
         let (game_mode, field) = self.skipped.take()?;
         let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
         let rom = Arc::clone(&self.rom);
+        self.hand_text();
         self.renderer().render_hd(Rom(&rom), game_mode, field.as_ref(), log?, options, hd).ok()
     }
 
@@ -1248,6 +1302,7 @@ impl WideRun {
         let Some((game_mode, field, log)) = started else { return previous.flatten() };
         let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
         let rom = Arc::clone(&self.rom);
+        self.hand_text();
         let mut renderer =
             self.renderer.take().expect("the renderer is back once the drawing is done");
         let handle = std::thread::Builder::new()
@@ -1327,6 +1382,11 @@ impl WideRun {
 
     /// Notes the work RAM at the end of a frame: the state the frame just run started from.
     fn advance(&mut self, wram: &[u8]) -> (u8, Option<FieldState>) {
+        if let Some(text) = self.text.as_mut() {
+            let hint = text.ended.as_ref().map(|screen| screen.page);
+            let now = ssd_catalogue::engine::on_screen(&self.rom, wram, hint);
+            text.started = std::mem::replace(&mut text.ended, now);
+        }
         let rom = Rom(&self.rom);
         let current =
             (wram[GAME_MODE], FieldState::from_wram(wram).map(|state| state.in_room(rom)));

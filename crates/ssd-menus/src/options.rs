@@ -37,6 +37,7 @@ pub enum Category {
 pub(crate) static GAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 static GAME_PAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LANGUAGE_ROW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GAME_INFO: std::sync::Mutex<(String, String)> =
     std::sync::Mutex::new((String::new(), String::new()));
 
@@ -44,6 +45,18 @@ static GAME_INFO: std::sync::Mutex<(String, String)> =
 /// (Android). Off by default, and the desktop never turns it on.
 pub fn show_game_page(on: bool) {
     GAME_PAGE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Shows (or hides) the Accessibility page's Language row: the app turns it on where the player has a translation
+/// (its files in the data folder). Off by default, so without one the page is as it was.
+pub fn show_language_row(on: bool) {
+    LANGUAGE_ROW.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the player has a translation: the Language row shows, and the language can be chosen.
+#[must_use]
+pub fn language_row_shown() -> bool {
+    LANGUAGE_ROW.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The texts of the Game page's two read-only rows: the current mode, and the HD pack's state.
@@ -108,13 +121,14 @@ impl Category {
 
     /// The rows of the category, in the order they show.
     #[must_use]
-    pub const fn rows(self) -> &'static [RowDef] {
+    pub fn rows(self) -> &'static [RowDef] {
         match self {
             Self::Difficulty => difficulty::ROWS,
             Self::Gameplay => gameplay::ROWS,
             Self::Video => video::ROWS,
             Self::Audio => audio::ROWS,
             Self::Controls => controls::ROWS,
+            Self::Accessibility if language_row_shown() => accessibility::ROWS_WITH_LANGUAGE,
             Self::Accessibility => accessibility::ROWS,
             Self::Game => game::ROWS,
         }

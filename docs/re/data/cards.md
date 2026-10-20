@@ -94,8 +94,8 @@ blinks off.
 
 While the pick cursor is on a card whose symbol is the fighter's class (the card that adds 25 percent), the original opens
 its message window beside the card: "Attack everyone!" (seen in the `battle` replay at frames 4772 to 4780, Goku's turn with
-the 神 card under the cursor; the text is entry 78 of the battle message table that starts at `07:92F8`, after the
-object help pages, next to "You ran!" and "You were unable to escape!"; the table also holds a longer wording for the same
+the 神 card under the cursor; the text is string 6 of string table 7, `system_string_pointers` at `07:938E` (message `$30`,
+see `text-engine.md`), next to "You ran!" and "You were unable to escape!"; the table also holds a longer wording for the same
 event, which says the card is a favourite and attacks every enemy). The window is the command screen's message window: it starts at the right
 edge of the card under the cursor (x 112 for the first card), its top edge is at y 167 (7 pixels above the cursor's tile row)
 and it runs to the bottom of the screen, covering the cards after the one under the cursor. The Enhanced tooltip never

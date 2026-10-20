@@ -38,7 +38,7 @@ pub enum Forced {
     Mode,
     /// The HD pack install (Options > Game > Install the HD pack).
     Pack,
-    /// No page: the game starts again (the touch MENU's GAME page: Restart).
+    /// No page: the game starts again (the touch MENU's GAME page: Restart, Change language).
     Relaunch,
 }
 
@@ -363,6 +363,8 @@ fn screens(flow: &mut Flow, dir: &Path, first: Page, note: Option<String>) -> an
                         None => starting = true,
                     }
                 }
+                // The language is the game window's own first page (`crate::language_pick`), never one of these.
+                Command::Language(_) => {}
                 Command::Skip => {
                     // Without the pack, Enhanced has no art: Classic it is, and Options (Classic: Select + Start) can
                     // bring the choice back. A pack that is already installed stays as it is.
@@ -429,7 +431,7 @@ fn start_work(
                 let _ = sender.send(Msg::Pack(install_pack_from(&uri, &dir, &sender)));
             });
         }
-        Page::Mode => {}
+        Page::Mode | Page::Language => {}
     }
 }
 

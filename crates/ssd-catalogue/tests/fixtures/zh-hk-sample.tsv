@@ -1,0 +1,8 @@
+key	zh	note
+str3:0x00	這是一段測試文字，\n用來檢查換行。	made up for the tests: not the game's text
+str3:0x00/p2	第二頁。
+battle:0	{name:1}向{name:2}\n發出{num:1}點攻擊！{auto}
+str2:0x001	{portrait:05}「你好！」
+str3:0x01	{same:str3:0x00}
+unit:0x00	測試者
+help:0		an empty text: the game's own stays

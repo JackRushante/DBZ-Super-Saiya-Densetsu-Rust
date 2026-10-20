@@ -71,9 +71,13 @@ mod tests {
         let Ok(mut offscreen) = Offscreen::new(1864, 860) else { return };
         let dir = std::env::var_os("SSD_SETUP_PREVIEW_DIR").map(std::path::PathBuf::from);
         let mut pages: Vec<(String, Setup)> = Vec::new();
-        for (name, page) in
-            [("rom", Page::Rom), ("patch", Page::Patch), ("mode", Page::Mode), ("pack", Page::Pack)]
-        {
+        for (name, page) in [
+            ("rom", Page::Rom),
+            ("patch", Page::Patch),
+            ("mode", Page::Mode),
+            ("pack", Page::Pack),
+            ("language", Page::Language),
+        ] {
             pages.push((name.to_owned(), Setup::new(page)));
         }
         let mut error = Setup::new(Page::Rom);

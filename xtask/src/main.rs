@@ -42,6 +42,7 @@ mod scenes;
 mod shared;
 mod shots;
 mod standalone_diff;
+mod text_dump;
 mod tour;
 mod tour_account;
 mod tour_audit;
@@ -1102,6 +1103,20 @@ fn catalogue(args: &[&str]) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Writes the text tables of the cached ROM as a TSV outside the repository (see [`text_dump`]).
+fn text_dump(args: &[&str]) -> anyhow::Result<ExitCode> {
+    let args = match text_dump::parse_args(args) {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("text-dump: {message}");
+            return Ok(usage());
+        }
+    };
+    let rom = cached_rom()?;
+    text_dump::run(&rom, &args, &mut std::io::stdout())?;
+    Ok(ExitCode::SUCCESS)
+}
+
 /// The exit code of a command line the commands do not take (`EX_USAGE`): apart from the codes
 /// the commands give their results (`verify-replays`: 2 = unverified; `repro`: 3 = cannot be
 /// reproduced).
@@ -1221,6 +1236,7 @@ fn usage() -> ExitCode {
     eprintln!(
         "       cargo run --release -p xtask -- catalogue [--kind characters|cards|enemies|items|attacks|encounters]"
     );
+    eprintln!("       cargo run --release -p xtask -- text-dump [out.tsv]");
     eprintln!(
         "       cargo run --release -p xtask -- save-edit <in.sav> <out.sav> [--slot N] [--to-slot N] [--set field=value ...]"
     );
@@ -1293,6 +1309,14 @@ fn usage() -> ExitCode {
         "catalogue prints the typed game data (characters, cards, enemies, items, attacks,          encounters) read from the cached ROM as text tables, all kinds or the one of --kind.          Stdout only."
     );
     eprintln!(
+        "text-dump writes every string of the text tables of the cached ROM (dialogue, help, \
+         battle messages, names, menu blocks, the ending) decoded, one row per page keyed by its \
+         ROM coordinates, to out.tsv (default {}) and the messages' lists to messages.tsv beside \
+         it, and prints a summary per table. The files are ROM-derived: keep them outside the \
+         repository (docs/re/data/text-engine.md).",
+        text_dump::DEFAULT_OUT
+    );
+    eprintln!(
         "save-edit copies a battery save, changes the fields named by --set in slot N (default 1;          --to-slot writes the result to another slot) and rewrites its checksum and backup; save-dump prints what the slots hold;          replay-from-save writes a replay that powers on with the save in the cartridge, goes          through the title screen and Continue and then plays the script (a timeline file). The          fields and the format are described in docs/re/data/save-format.md."
     );
     eprintln!("A command line not listed here exits {EXIT_USAGE}.");
@@ -1333,6 +1357,7 @@ fn main() -> anyhow::Result<ExitCode> {
         ["probe", rest @ ..] => probe(rest),
         ["shots", rest @ ..] => shots(rest),
         ["catalogue", rest @ ..] => catalogue(rest),
+        ["text-dump", rest @ ..] => text_dump(rest),
         ["save-edit", rest @ ..] => save_edit(rest),
         ["save-dump", path] => {
             let game = cached_rom().ok().and_then(|rom| save::Game::from_rom(&rom).ok());

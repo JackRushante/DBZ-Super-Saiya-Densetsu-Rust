@@ -11,15 +11,18 @@ pub mod bag;
 pub mod cheats;
 mod controls_page;
 pub mod draw;
+pub mod language;
 pub mod layout;
 pub mod nav;
 pub mod options;
 pub mod screens;
 pub mod setup;
 pub mod style;
+pub mod ui_text;
 pub mod view;
 
 pub use draw::{Align, Color, DrawList, Op, Rect};
+pub use language::Language;
 pub use nav::{Action, Entry, Key, Nav};
 pub use style::Style;
 pub use view::{

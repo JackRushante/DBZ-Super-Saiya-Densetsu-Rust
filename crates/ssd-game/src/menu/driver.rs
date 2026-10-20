@@ -212,6 +212,12 @@ impl Driver {
         self
     }
 
+    /// The names and texts the menus show from now on (those of another language): only the words may differ, the
+    /// ids and flags of `labels` are those of the labels the driver was made with.
+    pub fn set_labels(&mut self, labels: Labels) {
+        self.labels = labels;
+    }
+
     /// The options of the run.
     #[must_use]
     pub fn options(&self) -> &Options {
@@ -414,6 +420,12 @@ impl Driver {
     /// The bag's Item screen shows `tab` from its first stack (the shoulder buttons do the same).
     pub fn set_tab(&mut self, tab: ssd_menus::view::Tab) {
         self.state.nav.set_tab(tab);
+    }
+
+    /// The screen the HD shows while the curtain is up (`None`: the game's own picture).
+    #[must_use]
+    pub fn screen(&self) -> Option<Screen> {
+        (self.state.curtain == Curtain::Up).then(|| self.state.nav.screen())
     }
 
     /// What the HD draws now: the screen the HD shows, with its cursors, while the curtain is up.

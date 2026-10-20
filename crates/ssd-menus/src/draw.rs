@@ -148,6 +148,17 @@ impl DrawList {
         self.push(Op::Text { x, y, text: text.to_owned(), size, color, align });
     }
 
+    /// Replaces the text of each run with what `translate` gives for it (a run it gives `None` for keeps its own).
+    pub fn map_text(&mut self, translate: impl Fn(&str) -> Option<String>) {
+        for op in &mut self.ops {
+            if let Op::Text { text, .. } = op
+                && let Some(translated) = translate(text)
+            {
+                *text = translated;
+            }
+        }
+    }
+
     /// The steps that are text runs, in paint order (for tests and for reading a screen back).
     pub fn texts(&self) -> impl Iterator<Item = (f32, f32, &str)> {
         self.ops.iter().filter_map(|op| match op {

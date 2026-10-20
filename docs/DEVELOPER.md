@@ -1213,6 +1213,15 @@ and rewards, the encounter groups, the rules of the card deal, the special attac
 story (the closest the game has to items). Stdout only: what it prints is derived from the game and is never
 written to a tracked file. The layouts of the tables are in `docs/re/data/`.
 
+    cargo run --release -p xtask -- text-dump [out.tsv]
+
+writes every string the game prints (the message engine's eight string tables, the names, the menu blocks of bank 2, the
+ending's texts) decoded, one row per page keyed by its ROM coordinates (`str3:0x3E/p2`, `battle:93`, `unit:0x3B`...), to
+`out.tsv` and the lists of the messages to `messages.tsv` beside it, and prints per table the entries, failures, rows with
+unknown tiles and lines longer than their window. The files are derived from the game: never track them
+(the default is `.work/text/strings-en.tsv`, which git ignores). The tables, the codes and the WRAM bytes that identify the string on
+screen are in `docs/re/data/text-engine.md`.
+
 ### Saves
 
 The battery save (8 KiB, `ssd.sav` in `saves\`) is three slots of party records, items, money, cards, map and

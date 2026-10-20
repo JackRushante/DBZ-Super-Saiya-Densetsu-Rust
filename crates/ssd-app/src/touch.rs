@@ -30,6 +30,8 @@ pub enum Out {
     Persist,
     /// The GAME page: end the game and start it again at the title screen.
     Restart,
+    /// The GAME page: forget the language and start again, where the language is asked.
+    Language,
     /// The GAME page: end the game and close the app.
     Quit,
 }
@@ -40,7 +42,7 @@ pub enum Mode {
     Play,
     Menu,
     Options,
-    /// The GAME page: restart, quit.
+    /// The GAME page: restart, the language (where the player has a translation), quit.
     Game,
     Edit,
 }
@@ -56,6 +58,7 @@ pub enum PBtn {
     Game,
     Resume,
     Restart,
+    ChangeLanguage,
     Quit,
     OptLayout,
     OptOpacity,
@@ -355,16 +358,24 @@ impl Touch {
                 };
                 let restart = armed(PBtn::Restart, "Restart game", "Tap again: restart");
                 cell(&mut p, PBtn::Restart, restart, 0.0, 0.0, false);
-                cell(
-                    &mut p,
-                    PBtn::Quit,
-                    armed(PBtn::Quit, "Quit", "Tap again: quit"),
-                    1.0,
-                    0.0,
-                    false,
-                );
+                // Change language only where the player has a translation: else the page is Restart and Quit.
+                let language = ssd_menus::options::language_row_shown();
+                let quit = armed(PBtn::Quit, "Quit", "Tap again: quit");
+                if language {
+                    let change =
+                        armed(PBtn::ChangeLanguage, "Change language", "Tap again: restart");
+                    cell(&mut p, PBtn::ChangeLanguage, change, 1.0, 0.0, false);
+                    cell(&mut p, PBtn::Quit, quit, 0.0, 1.0, false);
+                } else {
+                    cell(&mut p, PBtn::Quit, quit, 1.0, 0.0, false);
+                }
                 cell(&mut p, PBtn::Back, "Back".into(), 0.0, 3.0, true);
-                p.note = "Restart and Quit lose what was played since the last save.";
+                p.note = if language {
+                    "Restart and Quit lose what was played since the last save. Change language starts the game \
+                     again and asks for the language."
+                } else {
+                    "Restart and Quit lose what was played since the last save."
+                };
                 Some(p)
             }
             Mode::Options => {
@@ -677,8 +688,8 @@ impl Touch {
     }
 
     fn panel_press(&mut self, b: PBtn) {
-        // Restart and Quit lose the play since the last save: the first tap only arms the button.
-        let confirmed = matches!(b, PBtn::Restart | PBtn::Quit);
+        // Restart, the language and Quit lose the play since the last save: the first tap only arms the button.
+        let confirmed = matches!(b, PBtn::Restart | PBtn::ChangeLanguage | PBtn::Quit);
         if confirmed && self.armed != Some(b) {
             self.armed = Some(b);
             return;
@@ -705,9 +716,13 @@ impl Touch {
             }
             PBtn::Resume => self.close_menu(),
             PBtn::Game => self.mode = Mode::Game,
-            PBtn::Restart | PBtn::Quit => {
+            PBtn::Restart | PBtn::ChangeLanguage | PBtn::Quit => {
                 self.close_menu();
-                self.emit(if b == PBtn::Restart { Out::Restart } else { Out::Quit });
+                self.emit(match b {
+                    PBtn::Restart => Out::Restart,
+                    PBtn::ChangeLanguage => Out::Language,
+                    _ => Out::Quit,
+                });
             }
             PBtn::OptFps => {
                 self.settings.show_fps = !self.settings.show_fps;
@@ -1113,6 +1128,19 @@ mod tests {
         assert!(!btns.contains(&Btn::X) && !btns.contains(&Btn::L));
         t.set_status("x1", 1, false, false);
         assert!(!t.minimal);
+    }
+
+    #[test]
+    fn the_game_page_offers_the_language_only_where_there_is_a_translation() {
+        let _lang = crate::lang::LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut t = touch();
+        t.mode = Mode::Game;
+        let ids = |t: &Touch| t.panel().unwrap().buttons.iter().map(|b| b.id).collect::<Vec<_>>();
+        ssd_menus::options::show_language_row(false);
+        assert!(!ids(&t).contains(&PBtn::ChangeLanguage));
+        ssd_menus::options::show_language_row(true);
+        assert!(ids(&t).contains(&PBtn::ChangeLanguage));
+        ssd_menus::options::show_language_row(false);
     }
 
     #[test]

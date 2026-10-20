@@ -361,6 +361,7 @@ fn hd_frame(
         log::warn!("{error:#}");
     }
     if let Some(values) = settings.as_ref() {
+        hd.follow_language(values);
         state.touch.apply_settings(touch::settings::Settings::from_values(values));
         let map = Bindings::from_values(values);
         if map != state.bindings {
@@ -404,6 +405,21 @@ fn persist_touch(state: &mut WindowState) {
     }
     if let Err(error) = crate::options::write_settings(&values) {
         log::warn!("the touch layout was not saved: {error:#}");
+    }
+}
+
+/// Forgets the language in the PC settings file and the HD menus' copy of it, so the next start asks for it again.
+fn forget_language(state: &mut WindowState) {
+    let mut values = match state.hd.as_mut() {
+        Some(hd) => hd.pc_options_mut().clone(),
+        None => crate::options::read_settings().unwrap_or_default(),
+    };
+    values.remove(ssd_menus::Language::KEY);
+    if let Some(hd) = state.hd.as_mut() {
+        *hd.pc_options_mut() = values.clone();
+    }
+    if let Err(error) = crate::options::write_settings(&values) {
+        log::warn!("the language was not forgotten: {error:#}");
     }
 }
 
@@ -1667,6 +1683,24 @@ fn windowed_loop(
         sdl.gamepad().inspect_err(|e| log::warn!("gamepad support unavailable: {e}")).ok();
     let mut gamepads: Vec<Gamepad> = Vec::new();
 
+    // The first Enhanced launch asks for the language of the text, in this window, before the first frame.
+    if let Some(hd) = state.hd.as_mut()
+        && crate::language_pick::needed(true, &settings_file)
+    {
+        let pads = (gamepad_subsystem.as_ref(), &mut gamepads);
+        let Some(language) =
+            crate::language_pick::run(&mut video, &mut events, &mut ui_input, pads)?
+        else {
+            return Ok(());
+        };
+        let values = hd.pc_options_mut();
+        language.store(values);
+        let values = values.clone();
+        hd.follow_language(&values);
+        if let Err(error) = crate::options::write_settings(&values) {
+            log::warn!("the language was not saved: {error:#}");
+        }
+    }
     let mut pacer = Pacer::new(Duration::from_secs_f64(1.0 / machine.target_fps()));
     let mut stats_start = pacer.next;
     let mut stats_frames = 0_u32;
@@ -1848,9 +1882,12 @@ fn windowed_loop(
                     touch::Out::Haptic => touch::haptic(),
                     touch::Out::Persist => persist_touch(&mut state),
                     touch::Out::Quit => break 'main,
-                    touch::Out::Restart => {
+                    touch::Out::Language | touch::Out::Restart => {
+                        if out == touch::Out::Language {
+                            forget_language(&mut state);
+                        }
                         // The launch loop starts the game again (Android); a desktop run has none, and Restart
-                        // there waits for the next start.
+                        // and Change language there wait for the next start.
                         #[cfg(target_os = "android")]
                         {
                             crate::android_setup::request(crate::android_setup::Forced::Relaunch);

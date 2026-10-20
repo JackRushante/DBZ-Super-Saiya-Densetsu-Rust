@@ -683,12 +683,12 @@ entry_m8 = true
 cycles = 150                       # constant: measured in Verify
 
 [[variable]]
-name = "counter_071d"              # byte counter incremented by advance_x_and_count (provisional name)
+name = "counter_071d"              # the message engine's byte offset in the string being written (incremented by advance_x_and_count; docs/re/data/text-engine.md)
 address = 0x7E071D
 size = 1
 
 [[variable]]
-name = "counter_071f"              # byte counter incremented by advance_x_and_count (provisional name)
+name = "counter_071f"              # the message engine's cell column in the line being written (incremented by advance_x_and_count; docs/re/data/text-engine.md)
 address = 0x7E071F
 size = 1
 
@@ -1578,3 +1578,140 @@ size = 192
 name = "encounter_group_pointers"  # 48 words (bank $02): per map, rows of 8 encounter group numbers per zone (one picked by $51 & 7 at 02:D34A)
 address = 0x02D6EA
 size = 96
+
+# Text engine (docs/re/data/text-engine.md): what the message engine (01:CBE0) prints and where.
+
+[[variable]]
+name = "message_line"              # $071E: the line of the page being written (0 first); the tile-map row is $0721 + $80 per line
+address = 0x7E071E
+size = 1
+
+[[variable]]
+name = "message_text_base"         # $0721: word, tile-map byte offset (in tilemap_buffer $7E:3000) of the first cell of the window's text: message_window_offsets[message_table], or system_string_offsets[message_string] for table 7
+address = 0x7E0721
+size = 2
+
+[[variable]]
+name = "message_string"            # $0723: word, the index of the string being written in its string table (message_table); the object id for an item help
+address = 0x7E0723
+size = 2
+
+[[variable]]
+name = "message_page_end"          # $0728: word, the tile-map offset where the last page stopped (saved at FE, FF FF and FD)
+address = 0x7E0728
+size = 2
+
+[[variable]]
+name = "message_word"              # $072A: word, the index of the next word of the message's list (the string being written is the word before it)
+address = 0x7E072A
+size = 2
+
+[[variable]]
+name = "message_number"            # $072C: word, the message: its index in the list table message_lists points at (07:8000 dialogue, 07:D79E battle)
+address = 0x7E072C
+size = 2
+
+[[variable]]
+name = "message_handler"           # $072E: $80 + nn while the handler nn of an E0nn word runs (01:D433, table at 01:D43B)
+address = 0x7E072E
+size = 1
+
+[[variable]]
+name = "message_indent"            # $0731: word added to the cell offset of the line (bit 15: subtracted); $8002 after a portrait (F4), cleared at each line end
+address = 0x7E0731
+size = 2
+
+[[variable]]
+name = "message_table"             # $0733: the string table of the message (the low byte of its D0nn word): 0 help, 1 battle, 2 talk, 3 story, 4 to 6 wishes, 7 system
+address = 0x7E0733
+size = 1
+
+[[variable]]
+name = "message_lists"             # $0738: 24-bit pointer to the table of message lists: 07:8000 (message_pointers) or 07:D79E, which leads to battle_message_list
+address = 0x7E0738
+size = 3
+
+[[variable]]
+name = "message_saved_speed"       # $01D1: the player's text_speed while the engine forces another speed (restored at each page end)
+address = 0x7E01D1
+size = 1
+
+[[variable]]
+name = "battle_message_list"       # $14E2: the battle's one-string message list in WRAM: D001, the string index (word at $14E4), FFFF; built by 05:9391
+address = 0x7E14E2
+size = 6
+
+[[variable]]
+name = "message_name_buffer"       # $1600: the name or number a slot code (F6-FB) is copied into before it is written, $FF-ended
+address = 0x7E1600
+size = 16
+
+[[variable]]
+name = "message_number_slots"      # $1610, $1620, $1630: three $FF-ended tile strings (numbers) for the slot codes F8, F7, F6
+address = 0x7E1610
+size = 0x30
+
+[[variable]]
+name = "message_name_slots"        # $1640: three words (index, type) for the slot codes FB, FA, F9; type bit 7 unit, 6 object, 5 attack, 4 the table at 02:B204
+address = 0x7E1640
+size = 6
+
+[[table]]
+name = "message_pointers"          # 368 words (bank $07): the list of each message, words: D0nn picks string table nn, E0nn runs handler nn, FFFF ends, others are string indexes
+address = 0x078000
+size = 736
+
+[[table]]
+name = "message_window_offsets"    # 8 words, one per string table: the tile-map offset of the text (message_text_base)
+address = 0x01CCB4
+size = 16
+
+[[table]]
+name = "system_string_offsets"     # 8 words, one per string of table 7: the tile-map offset of its text (the windows are placed per string)
+address = 0x078F06
+size = 16
+
+[[table]]
+name = "string_table_pointers"     # 8 x 3 bytes: the 24-bit address of each string table (word, then bank), read at 3 * message_table
+address = 0x078F16
+size = 24
+
+[[table]]
+name = "battle_message_pointers"   # 338 words (bank $07), string table 1: item_help_pointers from index 42 on, the battle's messages
+address = 0x078F82
+size = 676
+
+[[table]]
+name = "story_string_pointers"     # 167 words (bank $07), string table 3: narration and townspeople
+address = 0x079226
+size = 334
+
+[[table]]
+name = "wish_string_pointers"      # 9 words (bank $07), string table 4: the dragon scenes
+address = 0x079374
+size = 18
+
+[[table]]
+name = "wish_string_pointers_5"    # 2 words (bank $07), string table 5
+address = 0x079386
+size = 4
+
+[[table]]
+name = "wish_string_pointers_6"    # 2 words (bank $07), string table 6
+address = 0x07938A
+size = 4
+
+[[table]]
+name = "system_string_pointers"    # 8 words (bank $07), string table 7: short lines placed per string by system_string_offsets
+address = 0x07938E
+size = 16
+
+[[table]]
+name = "inline_phrase_pointers"    # 8 words (bank $07): the phrase a string code E0-E7 writes in place (01:D18E)
+address = 0x07939E
+size = 16
+
+[[table]]
+name = "talk_string_pointers"      # 366 words (bank $06), string table 2: the dialogue with portraits (F4 nn)
+address = 0x068000
+size = 732

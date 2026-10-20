@@ -10,6 +10,8 @@ mod hd_install;
 mod hook_setup;
 mod hotkeys;
 mod input;
+mod lang;
+mod language_pick;
 mod layout;
 mod options;
 mod panel;
@@ -19,7 +21,6 @@ mod replays;
 mod rom_setup;
 mod saves;
 mod screenshot;
-#[cfg(any(target_os = "android", test))]
 mod setup_ui;
 mod snapshot;
 mod tab_debugger;
@@ -160,6 +161,28 @@ struct Cli {
     /// --ui-snapshot the script's `touch` lines set what they show.
     #[arg(long)]
     touch_ui: bool,
+    /// The language of the game's text in Enhanced mode: `en`, or `zh-hk` (Traditional Chinese for Hong Kong, drawn
+    /// from `zh-hk.tsv` and a Noto Sans HK font in the data folder) [default: the Options' choice, else English]. For
+    /// this run only: the Options' choice is not changed.
+    #[arg(long, value_enum)]
+    lang: Option<LangArg>,
+}
+
+/// `--lang`: the languages of the game's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum LangArg {
+    En,
+    #[value(name = "zh-hk")]
+    ZhHk,
+}
+
+impl From<LangArg> for ssd_menus::Language {
+    fn from(lang: LangArg) -> Self {
+        match lang {
+            LangArg::En => Self::English,
+            LangArg::ZhHk => Self::ZhHk,
+        }
+    }
 }
 
 /// `--mode`: the two modes of the game (spec §5.8).
@@ -261,6 +284,7 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
         off: cli.no_hd_art,
         font_off: cli.no_hd_font,
     });
+    lang::configure(cli.lang.map(ssd_menus::Language::from));
     // Only a windowed run writes the player's files (see `persists`): set before the first read.
     paths::set_persistent(persists(&cli));
     touch::force(cli.touch_ui);

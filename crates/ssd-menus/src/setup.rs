@@ -1,8 +1,10 @@
 //! The first-launch screens of the Android build: choose the ROM (and the patch of a Japanese ROM), choose the
-//! mode, install the HD pack. They follow the approved boards: a cream window in an orange frame over a dark
+//! mode, install the HD pack; and, on every platform, the language of the text before the first Enhanced launch's
+//! first frame. They follow the approved boards: a cream window in an orange frame over a dark
 //! ground, one orange button, the quiet ones in dark red. Pure Rust: the page and its status in, a draw list and
 //! the buttons (with their rectangles, for touch) out. The app drives it and does the work (picker, copy, install).
 use crate::draw::{Align, Color, DrawList, Op, Rect};
+use crate::language::Language;
 use crate::layout::{ADVANCE, palette};
 use crate::nav::Key;
 use crate::screens::wrap;
@@ -36,6 +38,9 @@ pub enum Page {
     Mode,
     /// Choose hd-pack.zip, or skip.
     Pack,
+    /// The language of the game's text (Enhanced): English or Traditional Chinese (Hong Kong). Shown by the game's
+    /// own window before the first frame, on every platform, while no language is saved.
+    Language,
 }
 
 /// What the line under the buttons says.
@@ -64,6 +69,8 @@ pub enum Command {
     Skip,
     /// The mode chosen: `true` is Enhanced.
     Mode { enhanced: bool },
+    /// The language chosen.
+    Language(Language),
 }
 
 /// How a button looks.
@@ -237,6 +244,22 @@ impl Setup {
                     done,
                 ),
             ],
+            Page::Language => Language::ALL
+                .iter()
+                .enumerate()
+                .map(|(n, &language)| {
+                    button(
+                        24.0,
+                        112.0 + 76.0 * n as f32,
+                        330.0,
+                        56.0,
+                        language.native_name(),
+                        Command::Language(language),
+                        Look::Primary,
+                        true,
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -296,6 +319,7 @@ impl Setup {
             Page::Patch => ("CHOOSE THE PATCH", Some("STEP 1 OF 2")),
             Page::Mode => ("CHOOSE A MODE", None),
             Page::Pack => ("INSTALL THE HD PACK", Some("STEP 2 OF 2")),
+            Page::Language => ("CHOOSE A LANGUAGE", Some("語言")),
         };
         text(&mut list, 24.0, 18.0, 24.0, title, INK, Align::Left);
         if let Some(step) = step {
@@ -306,6 +330,7 @@ impl Setup {
             Page::Patch => self.patch_page(&mut list),
             Page::Mode => mode_page(&mut list),
             Page::Pack => self.pack_page(&mut list),
+            Page::Language => language_page(&mut list),
         }
         for (index, button) in self.buttons().iter().enumerate() {
             draw_button(&mut list, button, index == self.focus);
@@ -447,6 +472,23 @@ fn mode_page(list: &mut DrawList) {
     }
 }
 
+fn language_page(list: &mut DrawList) {
+    paragraph(list, 24.0, 62.0, 640.0, 15.0, "The language of the story's text. 故事文字的語言。");
+    for (top, lines) in [
+        (112.0, ["The game's own English text.", ""]),
+        (188.0, ["Traditional Chinese (Hong Kong),", "in the HD windows of Enhanced."]),
+    ] {
+        for (n, line) in lines.iter().enumerate() {
+            text(list, 372.0, top + 14.0 + 20.0 * n as f32, 14.0, line, QUIET, Align::Left);
+        }
+    }
+    let note = "Change it later: Options > Accessibility > Language. 之後可在「選項」中更改。";
+    let chars = (650.0 / (ADVANCE * 13.0)) as usize;
+    for (n, line) in wrap(note, chars).iter().enumerate() {
+        text(list, 24.0, 280.0 + 19.0 * n as f32, 13.0, line, QUIET, Align::Left);
+    }
+}
+
 /// A rectangle given in window coordinates, as a rectangle of the space.
 fn inner(x: f32, y: f32, w: f32, h: f32) -> Rect {
     Rect::new(WINDOW.x + 4.0 + x, WINDOW.y + 4.0 + y, w, h)
@@ -543,7 +585,7 @@ mod tests {
 
     #[test]
     fn every_button_is_a_touch_target_inside_the_window() {
-        for page in [Page::Rom, Page::Patch, Page::Mode, Page::Pack] {
+        for page in [Page::Rom, Page::Patch, Page::Mode, Page::Pack, Page::Language] {
             for button in Setup::new(page).buttons() {
                 assert!(button.rect.h >= 48.0, "{} is {} high", button.label, button.rect.h);
                 assert!(button.rect.w >= 48.0);
@@ -597,6 +639,25 @@ mod tests {
     }
 
     #[test]
+    fn the_language_page_offers_each_language_by_keys_and_by_touch() {
+        let mut setup = Setup::new(Page::Language);
+        let shown = texts(&setup.scene());
+        assert!(shown.iter().any(|t| t == "English"));
+        assert!(shown.iter().any(|t| t == "繁體中文（香港）"));
+        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(Language::English)));
+        assert_eq!(setup.key(Key::Down), None);
+        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(Language::ZhHk)));
+        assert_eq!(setup.key(Key::Down), None, "wraps to the first");
+        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(Language::English)));
+        assert_eq!(setup.key(Key::Cancel), None, "there is no going back: a language is needed");
+        let second = setup.buttons()[1].rect;
+        assert_eq!(
+            setup.hit(second.x + 10.0, second.y + 10.0),
+            Some(Command::Language(Language::ZhHk))
+        );
+    }
+
+    #[test]
     fn the_patch_page_goes_back_with_cancel() {
         let mut setup = Setup::new(Page::Patch);
         assert_eq!(setup.key(Key::Cancel), Some(Command::Back));
@@ -607,7 +668,7 @@ mod tests {
     #[test]
     fn every_text_lies_inside_the_window() {
         let mut setups = Vec::new();
-        for page in [Page::Rom, Page::Patch, Page::Mode, Page::Pack] {
+        for page in [Page::Rom, Page::Patch, Page::Mode, Page::Pack, Page::Language] {
             let mut setup = Setup::new(page);
             setups.push(setup.clone());
             setup.set_status(Status::Error(

@@ -78,10 +78,31 @@ pub fn fit_text(painter: &egui::Painter, text: &str, font: &FontId, max_width: f
 
 /// Installs the fonts (IBM Plex Sans for the interface, `JetBrains Mono` for numbers and addresses,
 /// Share Tech Mono and `DotGothic16` for the HD menus; all under the SIL OFL, licences next to them in
-/// `assets/fonts/`) and the style.
+/// `assets/fonts/`), the player's Traditional Chinese font when there is one ([`with_chinese`]), and the style.
 pub fn install(ctx: &egui::Context) {
-    ctx.set_fonts(fonts());
+    let mut fonts = fonts();
+    if let Some(bytes) = crate::lang::cjk_font() {
+        with_chinese(&mut fonts, &bytes);
+    }
+    ctx.set_fonts(fonts);
     ctx.set_global_style(style());
+}
+
+/// The name of the Traditional Chinese font among the fonts, when the player has one (`crate::lang::cjk_font`).
+pub const CHINESE: &str = "noto-sans-hk";
+
+/// Adds the Traditional Chinese font `bytes` (loaded at run time, never built in) to the HD menus' family, right
+/// after Share Tech Mono: the translation's names and texts take its glyphs (before `DotGothic16`, whose kanji are
+/// Japanese forms in pixels), and the debug panel's families take it last.
+fn with_chinese(fonts: &mut FontDefinitions, bytes: &[u8]) {
+    fonts.font_data.insert(CHINESE.to_owned(), Arc::new(FontData::from_owned(bytes.to_vec())));
+    for (family, names) in &mut fonts.families {
+        if *family == FontFamily::Name(GAME.into()) {
+            names.insert(1.min(names.len()), CHINESE.to_owned());
+        } else {
+            names.push(CHINESE.to_owned());
+        }
+    }
 }
 
 fn fonts() -> FontDefinitions {
@@ -204,6 +225,21 @@ mod tests {
             let names = &fonts.families[&family];
             assert!(names.iter().all(|n| fonts.font_data.contains_key(n)), "{family:?}");
         }
+    }
+
+    #[test]
+    fn a_chinese_font_follows_share_tech_mono_in_the_menus_and_ends_the_other_families() {
+        let mut fonts = fonts();
+        with_chinese(&mut fonts, b"not checked here");
+        assert_eq!(
+            fonts.families[&FontFamily::Name(GAME.into())],
+            ["share-tech-mono", CHINESE, "dotgothic16", "plex"]
+        );
+        assert_eq!(
+            fonts.families[&FontFamily::Monospace].last().map(String::as_str),
+            Some(CHINESE)
+        );
+        assert!(fonts.font_data.contains_key(CHINESE));
     }
 
     #[test]

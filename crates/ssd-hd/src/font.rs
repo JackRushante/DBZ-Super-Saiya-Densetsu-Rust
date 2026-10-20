@@ -381,6 +381,13 @@ impl Font {
         Ok(font)
     }
 
+    /// The character a glyph index of a [`TextCell`] draws (' ' for a blank cell); `None` for a card's tile or an
+    /// index the font never gave.
+    #[must_use]
+    pub fn character(&self, glyph: u8) -> Option<char> {
+        self.shapes.get(usize::from(glyph)).map(|&(character, _)| character)
+    }
+
     /// The index of the glyph of `character` at `tall` tiles high, made when it is new.
     fn shape(&mut self, character: char, tall: u8) -> u8 {
         if let Some(at) = self.shapes.iter().position(|&shape| shape == (character, tall)) {

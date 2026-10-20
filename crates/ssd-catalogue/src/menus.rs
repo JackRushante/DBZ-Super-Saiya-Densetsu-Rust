@@ -2,6 +2,7 @@
 //! character id and by object id. The menus' faces and prices come with them.
 
 use crate::Catalogue;
+use crate::translation::{self, Translation};
 use ssd_menus::{CharacterLabel, Labels, ObjectLabel};
 
 /// The face index of each character, in the order of the catalogue's characters (the second byte of its party
@@ -56,6 +57,32 @@ pub fn labels(catalogue: &Catalogue) -> Labels {
     Labels { characters, objects }
 }
 
+/// `labels` in the words of `table` (a translation, see [`crate::translation`]): a character's name is its
+/// `string:N` text, an object's name and help are its `object:N` and `help:N` texts (the help's lines at its line
+/// breaks). What the table does not translate keeps its English words; the ids, faces, prices and flags never change.
+/// A slot the game fills in while it runs (a card's value) becomes an ellipsis, as in [`plain`].
+#[must_use]
+pub fn translated(labels: &Labels, table: &Translation) -> Labels {
+    let words = |key: String| {
+        table.text(&key).map(|text| translation::render(text, |_| "\u{2026}".to_owned()))
+    };
+    let mut out = labels.clone();
+    for (index, character) in out.characters.iter_mut().enumerate() {
+        if let Some(name) = words(format!("string:{index}")) {
+            character.name = name.replace('\n', "");
+        }
+    }
+    for (index, object) in out.objects.iter_mut().enumerate() {
+        if let Some(name) = words(format!("object:{index}")) {
+            object.name = name.replace('\n', "");
+        }
+        if let Some(help) = words(format!("help:{index}")) {
+            object.help = help.lines().map(str::to_owned).collect();
+        }
+    }
+    out
+}
+
 /// Text as the HD shows it: the codes the catalogue cannot spell (the game fills them in while it
 /// runs, as a card's value) become an ellipsis.
 #[must_use]
@@ -90,6 +117,34 @@ mod tests {
         assert_eq!(plain("<FA>!<FD>"), "\u{2026}!\u{2026}");
         assert_eq!(plain("Restores 25"), "Restores 25");
         assert_eq!(plain("open <FC"), "open <FC", "an unclosed code is kept as it is");
+    }
+
+    #[test]
+    fn a_translation_changes_the_words_and_nothing_else() {
+        let labels = Labels {
+            characters: vec![
+                CharacterLabel { name: "Ann".into(), face: Some(3) },
+                CharacterLabel { name: "Bob".into(), face: None },
+            ],
+            objects: vec![ObjectLabel {
+                name: "Stone".into(),
+                price: Some(9),
+                help: vec!["Line one".into(), "two".into()],
+                battle: true,
+                ..ObjectLabel::default()
+            }],
+        };
+        let table = Translation::parse(
+            "key\tzh\nstring:0\t甲\nobject:0\t石頭\nhelp:0\t第一行\\n第二行{FC}\n",
+        )
+        .unwrap();
+        let shown = translated(&labels, &table);
+        assert_eq!(shown.characters[0].name, "甲");
+        assert_eq!(shown.characters[0].face, Some(3));
+        assert_eq!(shown.characters[1].name, "Bob", "not translated: English stays");
+        assert_eq!(shown.objects[0].name, "石頭");
+        assert_eq!(shown.objects[0].help, ["第一行", "第二行"]);
+        assert_eq!((shown.objects[0].price, shown.objects[0].battle), (Some(9), true));
     }
 
     #[test]
