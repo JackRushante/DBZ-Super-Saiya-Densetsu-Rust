@@ -37,9 +37,12 @@ overrides the folder). Put a pack there as a folder or as a `.ssdpack` file:
     %LOCALAPPDATA%\dbz-ssd-recompiled\mods\super-kaioken.ssdpack
 
 A `.ssdpack` with HD art (faces, map tiles, pose variants) is unpacked once into `cache\mods\` of the data folder, where
-the Enhanced picture reads it. On Android the mods folder is private to the app: pick the `.ssdpack` on the HD pack's page
-(Options > Game > Install the HD pack), and the game puts a file that is a data pack in the mods folder instead of installing
-it as the HD pack.
+the Enhanced picture reads it.
+
+The Data packs screen's **Install a pack...** line installs a pack without opening the folder: A opens the system's file
+picker (on Android the Storage Access Framework, where the mods folder is private to the app), and a file that is a pack is
+copied into the mods folder as `<id>.ssdpack` (a file of the same id is replaced). The pack joins the list, off; a file that
+is not a pack is refused and the screen says so.
 
 Then, in Enhanced mode (`ssd-recompiled --mode enhanced`), open Options, then Gameplay, then Data packs. The screen lists
 every pack of the folder:

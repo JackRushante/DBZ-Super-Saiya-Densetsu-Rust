@@ -5,13 +5,12 @@
 
 use crate::{hd, paths};
 use ssd_menus::packs::{Catalog, ChapterInfo, PackInfo, Request};
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 #[cfg(not(target_os = "android"))]
-use std::{
-    ffi::OsString,
-    sync::{Mutex, PoisonError},
-};
+use std::ffi::OsString;
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::sync::{OnceLock, mpsc};
 
 /// The catalog of this run, the list of the Data packs screen (set once by `main` in an Enhanced run).
 static CATALOG: OnceLock<Catalog> = OnceLock::new();
@@ -396,6 +395,8 @@ pub fn carry_out(request: Request) -> Result<(), String> {
             ask_next_run(run_args(None));
             Ok(())
         }
+        // The window opens the picker itself (see `pick_install`): nothing restarts.
+        Request::Install => Err(String::new()),
     }
 }
 
@@ -418,7 +419,140 @@ pub fn carry_out(request: Request) -> Result<(), String> {
         Request::Chapter(_) | Request::Main => {
             Err("Chapters do not start on Android yet.".to_owned())
         }
+        // The window opens the picker itself (see `pick_install`): nothing restarts.
+        Request::Install => Err(String::new()),
     }
+}
+
+/// The file picker of "Install a pack...", while it is open: the address of the file chosen arrives here (`None`: cancelled).
+static PICKING: Mutex<Option<mpsc::Receiver<Option<String>>>> = Mutex::new(None);
+/// The copy of the pack chosen, while it runs.
+static INSTALLING: Mutex<Option<mpsc::Receiver<Result<PackInfo, String>>>> = Mutex::new(None);
+/// The largest file "Install a pack..." copies.
+const MAX_PACK_BYTES: i64 = 256 << 20;
+
+/// "Install a pack...": opens the system file picker (on Android the Storage Access Framework, elsewhere the desktop's
+/// dialog), unless a pick or a copy is under way. [`poll_install`] gives the outcome.
+pub fn pick_install() {
+    let mut picking = PICKING.lock().unwrap_or_else(PoisonError::into_inner);
+    let busy = INSTALLING.lock().unwrap_or_else(PoisonError::into_inner).is_some();
+    if picking.is_some() || busy {
+        return;
+    }
+    let (sender, receiver) = mpsc::channel();
+    *picking = Some(receiver);
+    let userdata = Box::into_raw(Box::new(sender)).cast::<c_void>();
+    // SAFETY: the callback takes the box back (see `picked`).
+    unsafe {
+        sdl3::sys::dialog::SDL_ShowOpenFileDialog(
+            Some(picked),
+            userdata,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            false,
+        );
+    }
+}
+
+unsafe extern "C" fn picked(userdata: *mut c_void, files: *const *const c_char, _filter: c_int) {
+    // SAFETY: `userdata` is the box `pick_install` gave away; this callback owns it and frees it after the send.
+    let sender = unsafe { Box::from_raw(userdata.cast::<mpsc::Sender<Option<String>>>()) };
+    let first = if files.is_null() {
+        None
+    } else {
+        // SAFETY: SDL passes a NULL-terminated list of NUL-terminated strings.
+        let first = unsafe { *files };
+        (!first.is_null()).then(|| unsafe { CStr::from_ptr(first) }.to_string_lossy().into_owned())
+    };
+    let _ = sender.send(first);
+}
+
+/// The outcome of "Install a pack...", once: the pack's line for the Data packs screen, or why the file was not installed. A
+/// file chosen in the picker is copied on a thread of its own; a cancelled pick gives nothing.
+pub fn poll_install() -> Option<Result<PackInfo, String>> {
+    let mut picking = PICKING.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut installing = INSTALLING.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(receiver) = picking.as_ref() {
+        match receiver.try_recv() {
+            Ok(Some(address)) => {
+                *picking = None;
+                let (sender, answer) = mpsc::channel();
+                *installing = Some(answer);
+                let rom = ROM.get().cloned().unwrap_or_default();
+                std::thread::spawn(move || {
+                    let _ = sender.send(install_from(&address, &rom));
+                });
+            }
+            Ok(None) | Err(mpsc::TryRecvError::Disconnected) => *picking = None,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+    let answer = installing.as_ref()?.try_recv();
+    match answer {
+        Ok(result) => {
+            *installing = None;
+            Some(result)
+        }
+        Err(mpsc::TryRecvError::Disconnected) => {
+            *installing = None;
+            None
+        }
+        Err(mpsc::TryRecvError::Empty) => None,
+    }
+}
+
+/// Copies the file at `address` (a path, or an Android `content://` address) into the mods folder as `<id>.ssdpack` when it
+/// is a pack, and gives its line for the Data packs screen (checked against `rom`).
+///
+/// # Errors
+///
+/// The file cannot be read or is not a pack, or the mods folder cannot be written; the text is for the screen.
+fn install_from(address: &str, rom: &[u8]) -> Result<PackInfo, String> {
+    let mods = mods_dir();
+    std::fs::create_dir_all(&mods).map_err(|e| format!("The mods folder cannot be made: {e}"))?;
+    let copy = mods.join("install.tmp");
+    let result = copy_file(address, &copy).and_then(|()| {
+        let pack = ssd_mod::Pack::from_zip(&copy)
+            .map_err(|_| "This file is not a data pack (a .ssdpack file).".to_owned())?;
+        let dest = mods.join(format!("{}.ssdpack", pack.manifest.pack.id));
+        std::fs::rename(&copy, &dest).map_err(|e| format!("The pack was not installed: {e}"))?;
+        Ok(pack_info(rom, &dest, &pack))
+    });
+    let _ = std::fs::remove_file(&copy);
+    result
+}
+
+/// Copies the file at `address` to `dest` through SDL's streams, which open a path and an Android `content://` address alike.
+fn copy_file(address: &str, dest: &Path) -> Result<(), String> {
+    use sdl3::sys::iostream::{SDL_CloseIO, SDL_GetIOSize, SDL_IOFromFile, SDL_ReadIO};
+    let name = CString::new(address).map_err(|e| e.to_string())?;
+    // SAFETY: plain SDL calls on a stream this function opens and closes.
+    let stream = unsafe { SDL_IOFromFile(name.as_ptr(), c"rb".as_ptr()) };
+    if stream.is_null() {
+        return Err(format!("The file cannot be opened: {}", sdl3::get_error()));
+    }
+    let result = (|| {
+        // SAFETY: `stream` is open.
+        if unsafe { SDL_GetIOSize(stream) } > MAX_PACK_BYTES {
+            return Err("This file is too big to be a data pack.".to_owned());
+        }
+        let mut out = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+        let mut block = vec![0_u8; 1 << 20];
+        loop {
+            // SAFETY: `block` is valid for its length.
+            let read = unsafe { SDL_ReadIO(stream, block.as_mut_ptr().cast(), block.len()) };
+            if read == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut out, &block[..read]).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    // SAFETY: the stream is open and not used again.
+    unsafe { SDL_CloseIO(stream) };
+    result
 }
 
 #[cfg(test)]
@@ -446,6 +580,29 @@ mod tests {
              author = \"A player\"\ndescription = \"Does nothing.\"\n"
         );
         std::fs::write(dir.join("pack.toml"), manifest).unwrap();
+    }
+
+    #[test]
+    fn install_a_pack_copies_a_pack_file_into_the_mods_folder_and_refuses_other_files() {
+        let _guard = paths::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: serialised by ENV_LOCK.
+        unsafe { std::env::set_var("SSD_DATA_DIR", data.path()) };
+        let source = data.path().join("source");
+        write_pack(&source, "kk", "kk.pack", "00000000");
+        let pack = ssd_mod::Pack::from_dir(&source.join("kk")).unwrap();
+        let file = data.path().join("Download").join("kk.ssdpack");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        pack.write_zip(&file).unwrap();
+        let info = install_from(&file.to_string_lossy(), &[]).unwrap();
+        assert_eq!((info.id.as_str(), info.on), ("kk.pack", false));
+        assert!(mods_dir().join("kk.pack.ssdpack").is_file(), "copied under the pack's id");
+        assert!(!mods_dir().join("install.tmp").exists(), "no copy is left over");
+        let other = data.path().join("Download").join("photo.jpg");
+        std::fs::write(&other, b"not a zip").unwrap();
+        let refused = install_from(&other.to_string_lossy(), &[]).unwrap_err();
+        assert!(refused.contains("not a data pack"), "{refused}");
+        assert!(!mods_dir().join("install.tmp").exists());
     }
 
     #[test]

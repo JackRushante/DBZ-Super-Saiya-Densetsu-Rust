@@ -409,8 +409,7 @@ impl Setup {
             15.0,
             &format!(
                 "Enhanced mode uses the HD art pack. Pick the file hd-pack.zip. It takes about \
-                 {PACK_SIZE_NOTE} of free space once installed. A mod (a .ssdpack file) picked here goes \
-                 to the mods."
+                 {PACK_SIZE_NOTE} of free space once installed."
             ),
         );
         match &self.status {

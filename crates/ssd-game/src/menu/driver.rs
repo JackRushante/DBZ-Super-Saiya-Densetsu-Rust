@@ -28,7 +28,7 @@ use ssd_menus::nav::{
 use ssd_menus::options::{
     Category, Effect, Opens, Options, SlotOptions, Values, controls, difficulty, video,
 };
-use ssd_menus::packs::{Catalog, Listed, Request};
+use ssd_menus::packs::{Catalog, Listed, PackInfo, Request};
 use ssd_menus::view::{
     BagView, ChapterLine, CheatsView, ControlsView, Labels, MenuView, ModsView, ObjectLabel,
     OptionsView, PackLine, PackState, RefusedKey, Screen, Selected, SpawnerRow, SpawnerView,
@@ -299,6 +299,18 @@ impl Driver {
     /// A line the Data packs screen shows until the next key: why the host could not do what the screen asked.
     pub fn set_mods_alert(&mut self, text: String) {
         self.state.mods_alert = Some(text);
+    }
+
+    /// A pack the host installed while the run goes on ("Install a pack..."): it joins the list, off, or takes the place of
+    /// the pack with its id (a new version; its line keeps its place and whether it is on).
+    pub fn add_pack(&mut self, info: PackInfo) {
+        let state = &mut self.state;
+        if let Some(known) = state.packs.packs.iter_mut().find(|known| known.id == info.id) {
+            *known = PackInfo { on: known.on, ..info };
+            return;
+        }
+        state.packs.packs.push(PackInfo { on: false, ..info });
+        state.packs_edit.push(Listed { pack: state.packs.packs.len() - 1, on: false });
     }
 
     /// The options of this PC, to change from outside the menus: the touch controls write their layout here, so the
@@ -692,6 +704,7 @@ impl State {
                 }
             }
             Action::PacksApply => self.apply_packs(),
+            Action::PacksInstall => self.mods_request = Some(Request::Install),
             Action::ChapterStart(line) => self.start_chapter(line),
             Action::ChapterMain => self.main_game(),
             Action::ResetAll => {
@@ -1305,7 +1318,8 @@ impl State {
         offered
     }
 
-    /// The lines of the Data packs screen's list: the packs in their order, then the chapters offered (see [`State::offered`]).
+    /// The lines of the Data packs screen's list: the packs in their order, "Install a pack...", then the chapters offered (see
+    /// [`State::offered`]).
     fn mods_lines(&self) -> Vec<ModsLine> {
         let mut lines: Vec<ModsLine> = self
             .packs_edit
@@ -1314,6 +1328,7 @@ impl State {
                 refused: self.packs.packs[listed.pack].refusal.is_some(),
             })
             .collect();
+        lines.push(ModsLine::Install);
         lines.extend(self.offered().iter().map(|(_, chapter)| {
             if chapter.main { ModsLine::Main } else { ModsLine::Chapter { locked: chapter.locked } }
         }));
@@ -1352,7 +1367,8 @@ impl State {
 
     /// Start a chapter (the line `line` of the list): the game restarts into its saves, when the list is the set the run uses.
     fn start_chapter(&mut self, line: usize) {
-        let Some(index) = line.checked_sub(self.packs_edit.len()) else { return };
+        // The packs, then "Install a pack...", then the chapters
+        let Some(index) = line.checked_sub(self.packs_edit.len() + 1) else { return };
         let offered = self.offered();
         let Some((Some(id), _)) = offered.get(index) else { return };
         if self.edit_differs() {
@@ -2923,21 +2939,23 @@ mod tests {
     #[test]
     fn a_chapter_starts_only_when_it_is_open_and_the_list_is_the_set_in_use() {
         let (mut driver, menu) = driver_on_packs(two_packs());
-        // The lines: Alpha, Beta, Gamma, then the chapters of Alpha: Open (3) and Waits (4, locked).
-        for _ in 0..3 {
+        // The lines: Alpha, Beta, Gamma, "Install a pack...", then the chapters of Alpha: Open (4) and Waits (5, locked).
+        for _ in 0..4 {
             driver.key(Key::Down, &menu.wram());
         }
         driver.key(Key::Confirm, &menu.wram());
-        assert_eq!(driver.nav().mods_ask(), Some((ssd_menus::nav::ModsAsk::Chapter(3), 1)));
+        assert_eq!(driver.nav().mods_ask(), Some((ssd_menus::nav::ModsAsk::Chapter(4), 1)));
         driver.key(Key::Left, &menu.wram());
         driver.key(Key::Confirm, &menu.wram());
         assert_eq!(driver.take_mods_request(), Some(Request::Chapter("Open-id".to_owned())));
         // The list is changed and not applied yet: Beta goes on, and the chapter does not start; the screen says why.
-        driver.key(Key::Up, &menu.wram());
-        driver.key(Key::Up, &menu.wram());
+        for _ in 0..3 {
+            driver.key(Key::Up, &menu.wram());
+        }
         driver.key(Key::Confirm, &menu.wram());
-        driver.key(Key::Down, &menu.wram());
-        driver.key(Key::Down, &menu.wram());
+        for _ in 0..3 {
+            driver.key(Key::Down, &menu.wram());
+        }
         driver.key(Key::Confirm, &menu.wram());
         driver.key(Key::Left, &menu.wram());
         driver.key(Key::Confirm, &menu.wram());
@@ -2950,7 +2968,7 @@ mod tests {
     #[test]
     fn a_locked_chapter_says_so_until_the_game_is_completed_or_the_cheat_unlocks_it() {
         let (mut driver, menu) = driver_on_packs(two_packs());
-        for _ in 0..4 {
+        for _ in 0..5 {
             driver.key(Key::Down, &menu.wram());
         }
         driver.key(Key::Confirm, &menu.wram());
@@ -2959,7 +2977,7 @@ mod tests {
         // The cheat "Unlock chapters" offers it: the chapter asks now.
         driver.state.cheats.set_chapters(true);
         driver.key(Key::Confirm, &menu.wram());
-        assert_eq!(driver.nav().mods_ask(), Some((ssd_menus::nav::ModsAsk::Chapter(4), 1)));
+        assert_eq!(driver.nav().mods_ask(), Some((ssd_menus::nav::ModsAsk::Chapter(5), 1)));
         driver.key(Key::Cancel, &menu.wram());
         // B goes back to the Options, on the button.
         driver.key(Key::Cancel, &menu.wram());
@@ -2972,7 +2990,7 @@ mod tests {
         let mut catalog = two_packs();
         catalog.playing = Some("Open".to_owned());
         let (mut driver, menu) = driver_on_packs(catalog);
-        for _ in 0..3 {
+        for _ in 0..4 {
             driver.key(Key::Down, &menu.wram());
         }
         assert!(mods_texts(&driver, &menu).iter().any(|text| text == "Main game"));
@@ -2980,6 +2998,32 @@ mod tests {
         driver.key(Key::Left, &menu.wram());
         driver.key(Key::Confirm, &menu.wram());
         assert_eq!(driver.take_mods_request(), Some(Request::Main));
+    }
+
+    #[test]
+    fn install_a_pack_asks_the_host_and_the_pack_it_installs_joins_the_list_off() {
+        let (mut driver, menu) = driver_on_packs(two_packs());
+        for _ in 0..3 {
+            driver.key(Key::Down, &menu.wram());
+        }
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.take_mods_request(), Some(Request::Install));
+        let delta = PackInfo {
+            id: "delta.pack".to_owned(),
+            name: "delta".to_owned(),
+            on: true,
+            ..PackInfo::default()
+        };
+        driver.add_pack(delta.clone());
+        assert!(mods_texts(&driver, &menu).iter().any(|text| text == "delta"), "listed");
+        assert!(!driver.state.packs_edit.last().unwrap().on, "and off");
+        // A new version of a pack takes its place
+        driver.add_pack(PackInfo { name: "delta 2".to_owned(), ..delta });
+        let shown = mods_texts(&driver, &menu);
+        assert!(
+            shown.iter().any(|text| text == "delta 2") && !shown.iter().any(|text| text == "delta")
+        );
+        assert_eq!(driver.state.packs.packs.len(), driver.state.packs_edit.len());
     }
 
     #[test]

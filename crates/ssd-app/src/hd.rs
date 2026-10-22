@@ -345,6 +345,11 @@ impl Hd {
         self.driver.set_moving(held);
     }
 
+    /// A pack installed while the run goes on joins the Data packs screen's list (see [`Driver::add_pack`]).
+    pub fn add_pack(&mut self, info: ssd_menus::packs::PackInfo) {
+        self.driver.add_pack(info);
+    }
+
     /// A line the Data packs screen shows until the next key (see [`Driver::set_mods_alert`]).
     pub fn set_mods_alert(&mut self, text: String) {
         self.driver.set_mods_alert(text);

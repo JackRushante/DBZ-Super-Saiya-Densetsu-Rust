@@ -788,8 +788,9 @@ pub fn mods_screen(view: &ModsView) -> DrawList {
     list
 }
 
-/// The list window: the packs (a box, the name, the version; a refused pack in red with a cross), then the chapters under
-/// their header, each a name, grey when it is locked; the cursor on the line under it; and the note and Apply at the foot.
+/// The list window: the packs (a box, the name, the version; a refused pack in red with a cross), "Install a pack...", then
+/// the chapters under their header, each a name, grey when it is locked; the cursor on the line under it; and the note and
+/// Apply at the foot.
 fn mods_list(list: &mut DrawList, view: &ModsView, window: Rect) {
     list.push(Op::Window { rect: window });
     let x = window.x + FRAME + 16.0;
@@ -850,6 +851,17 @@ fn mods_list(list: &mut DrawList, view: &ModsView, window: Rect) {
         );
         line += 1;
     }
+    let middle = window.y + MODS_ROWS_TOP + MODS_ROW * line as f32 + 13.0;
+    mods_row_band(list, view, view.install_line(), window, middle);
+    list.text(
+        window.x + 50.0,
+        middle,
+        "+ Install a pack...",
+        MODS_NAME_TEXT,
+        palette::DARK_RED,
+        Align::Left,
+    );
+    line += 1;
     let mut chapter_top = window.y + MODS_ROWS_TOP + MODS_ROW * line as f32;
     if !view.chapters.is_empty() {
         list.text(
@@ -863,7 +875,7 @@ fn mods_list(list: &mut DrawList, view: &ModsView, window: Rect) {
         chapter_top += 34.0;
     }
     for (at, chapter) in view.chapters.iter().enumerate() {
-        let index = view.packs.len() + at;
+        let index = view.install_line() + 1 + at;
         let middle = chapter_top + MODS_ROW * at as f32 + 13.0;
         mods_row_band(list, view, index, window, middle);
         let colour = if chapter.locked { palette::GREY } else { palette::BLACK };
@@ -960,7 +972,16 @@ fn mods_details(list: &mut DrawList, view: &ModsView, window: Rect) {
                 lines.push((line, MODS_LINE_TEXT, palette::BLACK));
             }
         }
-    } else if let Some(chapter) = view.chapters.get(view.cursor.saturating_sub(view.packs.len())) {
+    } else if view.cursor == view.install_line() {
+        lines.push(("Install a pack".to_owned(), MODS_NAME_TEXT, palette::BLACK));
+        lines.push((String::new(), MODS_LINE_TEXT, palette::BLACK));
+        for line in wrap(
+            "A picks a pack file (.ssdpack) and copies it into the mods folder. It is listed off: switch it on and apply.",
+            MODS_DETAIL_CHARS,
+        ) {
+            lines.push((line, MODS_LINE_TEXT, palette::BLACK));
+        }
+    } else if let Some(chapter) = view.chapter_at_cursor() {
         lines.push((fit(&chapter.name, MODS_NAME_TEXT, 500.0), MODS_NAME_TEXT, palette::BLACK));
         lines.push((String::new(), MODS_LINE_TEXT, palette::BLACK));
         for line in wrap(&chapter.description, MODS_DETAIL_CHARS) {
@@ -2839,11 +2860,16 @@ mod tests {
         assert!(refused.contains(&"REFUSED:"), "{refused:?}");
         assert!(refused.iter().any(|line| line.starts_with("This pack was made for another ROM")));
         assert!(refused.iter().any(|line| line.starts_with("It stays off.")));
-        let chapter_list = mods_screen(&mods_view(3, None));
+        let install_list = mods_screen(&mods_view(2, None));
+        let install = texts(&install_list);
+        assert!(install.contains(&"+ Install a pack..."), "{install:?}");
+        assert!(install.contains(&"Install a pack"), "the details of the install line");
+        assert!(!install.contains(&"Start"));
+        let chapter_list = mods_screen(&mods_view(4, None));
         let chapter = texts(&chapter_list);
         assert!(chapter.contains(&"A room with a Kaioken master."), "{chapter:?}");
         assert!(chapter.contains(&"Start"), "an open chapter's details have the Start button");
-        let locked_list = mods_screen(&mods_view(2, None));
+        let locked_list = mods_screen(&mods_view(3, None));
         let locked = texts(&locked_list);
         assert!(locked.contains(&"Locked: the game must be finished first."), "{locked:?}");
         assert!(!locked.contains(&"Start"));

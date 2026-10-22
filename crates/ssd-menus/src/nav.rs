@@ -187,6 +187,8 @@ pub enum Action {
     PackMove { at: usize, by: i8 },
     /// On the Data packs screen, Apply was confirmed: the set is applied.
     PacksApply,
+    /// On the Data packs screen, "Install a pack..." was chosen: the host opens the file picker.
+    PacksInstall,
     /// On the Data packs screen, the chapter on the line `line` of the list is started (the question was confirmed).
     ChapterStart(usize),
     /// On the Data packs screen, "Main game" was confirmed: the main saves are back.
@@ -204,12 +206,14 @@ pub enum ModsAsk {
     Main,
 }
 
-/// A line of the Data packs screen's list, as the cursor moves through it: the packs first, then "Main game" (in a chapter
-/// session) and the chapters of the packs that are on.
+/// A line of the Data packs screen's list, as the cursor moves through it: the packs first, then "Install a pack...", then
+/// "Main game" (in a chapter session) and the chapters of the packs that are on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModsLine {
     /// An installed pack. A refused pack cannot be switched on.
     Pack { refused: bool },
+    /// "Install a pack...": the file picker, for a pack to copy into the mods folder.
+    Install,
     /// "Main game": the main saves, from a chapter session.
     Main,
     /// A chapter: locked until its condition holds.
@@ -705,9 +709,10 @@ impl Nav {
         Action::None
     }
 
-    /// What `key` does on the Data packs screen, whose list has the lines `lines` (the packs, then "Main game" and the
-    /// chapters). Up and Down move the cursor (wrapping); with Y held they move the pack under the cursor in the order.
-    /// Left and Right do nothing. A switches a pack on or off (a refused pack says why it stays off), asks to start a
+    /// What `key` does on the Data packs screen, whose list has the lines `lines` (the packs, "Install a pack...", then "Main
+    /// game" and the chapters). Up and Down move the cursor (wrapping); with Y held they move the pack under the cursor in the
+    /// order. Left and Right do nothing. A switches a pack on or off (a refused pack says why it stays off), asks for the file
+    /// picker on "Install a pack...", asks to start a
     /// chapter or to go back to the main game (a locked chapter says why it cannot start), and X asks to apply the set.
     /// B goes back. A question takes the keys: Left, Right, Up and Down change its choice, A chooses (the confirm button,
     /// choice 0, does the question; Cancel, choice 1, only closes it), and B closes it.
@@ -760,6 +765,7 @@ impl Nav {
             Key::Confirm => match lines.get(at) {
                 Some(ModsLine::Pack { refused: true }) => Action::Notice(REFUSED_PACK),
                 Some(ModsLine::Pack { refused: false }) => Action::PackToggle(at),
+                Some(ModsLine::Install) => Action::PacksInstall,
                 Some(ModsLine::Main) => {
                     self.mods.ask = Some((ModsAsk::Main, 1));
                     Action::None
@@ -1688,6 +1694,7 @@ mod tests {
         let lines = [
             ModsLine::Pack { refused: false },
             ModsLine::Pack { refused: true },
+            ModsLine::Install,
             ModsLine::Main,
             ModsLine::Chapter { locked: false },
             ModsLine::Chapter { locked: true },
@@ -1699,7 +1706,9 @@ mod tests {
         nav.key_mods(Key::Down, &lines);
         assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::Notice(REFUSED_PACK), "stays off");
         nav.key_mods(Key::Down, &lines);
-        assert_eq!(nav.mods_cursor(), 2, "the cursor crosses from the packs into the chapters");
+        assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::PacksInstall, "the file picker");
+        nav.key_mods(Key::Down, &lines);
+        assert_eq!(nav.mods_cursor(), 3, "the cursor crosses from the packs into the chapters");
         assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::None);
         assert_eq!(
             nav.mods_ask(),
@@ -1711,7 +1720,7 @@ mod tests {
         assert_eq!(nav.mods_ask(), None, "the question is over");
         nav.key_mods(Key::Down, &lines);
         assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::None);
-        assert_eq!(nav.mods_ask(), Some((ModsAsk::Chapter(3), 1)), "the open chapter asks");
+        assert_eq!(nav.mods_ask(), Some((ModsAsk::Chapter(4), 1)), "the open chapter asks");
         assert_eq!(nav.key_mods(Key::Cancel, &lines), Action::None, "B closes the question only");
         assert_eq!(nav.mods_ask(), None);
         nav.key_mods(Key::Down, &lines);
@@ -1744,6 +1753,7 @@ mod tests {
         let lines = [
             ModsLine::Pack { refused: false },
             ModsLine::Pack { refused: false },
+            ModsLine::Install,
             ModsLine::Chapter { locked: false },
         ];
         let mut nav = Nav::default();

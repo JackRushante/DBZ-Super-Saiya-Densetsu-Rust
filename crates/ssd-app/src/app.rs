@@ -1962,12 +1962,31 @@ fn windowed_loop(
         hd_previous = pad;
         // A request of the Data packs screen: the game restarts into the set or the chapter it asks for, and this run ends.
         // A refusal (a set the checks do not take) stays on the screen.
+        // "Install a pack...": the picker's file is copied while the game goes on, and the screen lists it.
+        if let Some(answer) = packs::poll_install()
+            && let Some(hd) = state.hd.as_mut()
+        {
+            match answer {
+                Ok(info) => {
+                    hd.set_mods_alert(format!(
+                        "{} is installed: switch it on and apply.",
+                        info.name
+                    ));
+                    hd.add_pack(info);
+                }
+                Err(message) => hd.set_mods_alert(message),
+            }
+        }
         if let Some(request) = state.hd.as_mut().and_then(hd::Hd::take_mods_request) {
-            match packs::carry_out(request) {
-                Ok(()) => break 'main,
-                Err(message) => {
-                    if let Some(hd) = state.hd.as_mut() {
-                        hd.set_mods_alert(message);
+            if request == ssd_menus::packs::Request::Install {
+                packs::pick_install();
+            } else {
+                match packs::carry_out(request) {
+                    Ok(()) => break 'main,
+                    Err(message) => {
+                        if let Some(hd) = state.hd.as_mut() {
+                            hd.set_mods_alert(message);
+                        }
                     }
                 }
             }

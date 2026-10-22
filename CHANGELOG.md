@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2 (2026-10-22)
+
+### New
+
+- **Install a pack...** on the Data packs screen (Options > Gameplay > Data packs): pick a `.ssdpack` file with the system's
+  file picker (Android) or the file dialog (Windows), and the game copies it into its mods folder and lists it, without a
+  restart. It replaces the HD pack's button as the way to install a mod on Android.
+
 ## 0.3.1 (2026-10-22)
 
 ### Fixes

@@ -64,4 +64,7 @@ pub enum Request {
     Chapter(String),
     /// Back to the main game: the game restarts into the main saves.
     Main,
+    /// Install a pack: the host opens the file picker, copies the pack chosen into the mods folder and gives the screen its
+    /// line (the run goes on).
+    Install,
 }

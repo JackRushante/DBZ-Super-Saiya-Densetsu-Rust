@@ -79,13 +79,14 @@ pub enum Screen {
     Mods,
 }
 
-/// The Data packs screen as it shows: the packs, then the chapters of the packs that are on (with "Main game" first in a
-/// chapter session), the cursor, the question under way and the notice of the foot.
+/// The Data packs screen as it shows: the packs, "Install a pack...", then the chapters of the packs that are on (with "Main
+/// game" first in a chapter session), the cursor, the question under way and the notice of the foot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModsView {
     pub packs: Vec<PackLine>,
     pub chapters: Vec<ChapterLine>,
-    /// The line under the cursor: an index of the packs, then of the chapters.
+    /// The line under the cursor: an index of the packs, then [`ModsView::install_line`] ("Install a pack..."), then the
+    /// chapters.
     pub cursor: usize,
     /// Y is held: the pack under the cursor moves in the order.
     pub moving: bool,
@@ -93,6 +94,20 @@ pub struct ModsView {
     pub ask: Option<(ModsAsk, u8)>,
     /// A line for the foot: why a change was refused, or why the set is not in use.
     pub notice: Option<String>,
+}
+
+impl ModsView {
+    /// The line of "Install a pack...", after the packs.
+    #[must_use]
+    pub fn install_line(&self) -> usize {
+        self.packs.len()
+    }
+
+    /// The chapter under the cursor, if the cursor is on one.
+    #[must_use]
+    pub fn chapter_at_cursor(&self) -> Option<&ChapterLine> {
+        self.cursor.checked_sub(self.install_line() + 1).and_then(|at| self.chapters.get(at))
+    }
 }
 
 /// A pack of the Data packs screen: its name and identity, its details and its state.

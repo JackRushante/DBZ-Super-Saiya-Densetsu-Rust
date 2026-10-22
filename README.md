@@ -266,11 +266,11 @@ Performance on phones can still be improved a lot: see [Known bugs](#known-bugs)
 
 ### Mods
 
-A mod (a *data pack*) changes the Remastered game and never Classic. On Windows, put the `.ssdpack` file in the `mods`
-folder of the game's data folder (`%LOCALAPPDATA%\dbz-ssd-recompiled\mods\`, made if missing). On Android, pick the
-`.ssdpack` file with the HD pack's button (Options > Game > Install the HD pack): the game recognises a mod and puts it in
-its mods folder. Then, in Remastered, open **Options > Gameplay > Data packs**, switch the mod on (A) and apply (X); the
-game restarts at the title. Two mods come with this release:
+A mod (a *data pack*) changes the Remastered game and never Classic. Download its `.ssdpack` file, then in Remastered open
+**Options > Gameplay > Data packs** and choose **Install a pack...**: pick the file (on Android the system's file picker,
+on Windows the file dialog) and the game copies it into its `mods` folder. Switch the mod on (A) and apply (X); the game
+restarts at the title. On Windows you can also put the file in `%LOCALAPPDATA%\dbz-ssd-recompiled\mods\` yourself.
+Two mods come with this release:
 
 - **Super Saiyan Kaioken** (not canon): Goku can use the Kaioken while he is a Super Saiyan, up to x10; each move made in
   both costs 10% of his maximum HP. With his Super Saiyan poses redrawn with both auras.

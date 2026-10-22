@@ -358,7 +358,8 @@ In Enhanced mode, Options > Gameplay > Data packs (A opens it) lists every pack 
 box that is filled when the pack is on. A pack the checks refuse (made for another ROM, a file that does not read) is in
 red with a cross, stays off, and its details say why.
 
-On the Data packs screen, A switches a pack on or off; Y held with Up or Down moves the pack in the order (the packs load in
+On the Data packs screen, A switches a pack on or off, and on "Install a pack..." (the line after the packs) opens the system's
+file picker and copies the pack chosen into the mods folder (`packs::pick_install`; the pack joins the list, off); Y held with Up or Down moves the pack in the order (the packs load in
 that order); X asks to apply the set, and Apply writes it to `mods\mods.toml` and restarts the game to the title: save first,
 unsaved progress is lost. A set the checks refuse is not applied, and the screen says why. B goes back to the Options.
 
