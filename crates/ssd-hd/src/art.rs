@@ -1732,7 +1732,8 @@ impl ArtState {
     /// colours of their own palettes, whatever their colours, and so are the frames of an
     /// animation. While Super Saiyan Goku is in the party, a pose that both his normal and his Super
     /// Saiyan art have is drawn from the Super Saiyan art: the normal art has the same pixels, in the
-    /// normal palette, where his hair is black. `None` when one unit (or none) has art for the pose.
+    /// normal palette, where his hair is black; without him, from the normal art, however many poses
+    /// the Super Saiyan set has. `None` when one unit (or none) has art for the pose.
     fn unit_for(&self, pose: &Pose) -> Option<String> {
         let mut units: Vec<String> =
             self.candidates(pose).into_iter().map(|(at, _)| self.unit_of(at)).collect();
@@ -1741,16 +1742,15 @@ impl ArtState {
         if units.len() < 2 {
             return None;
         }
-        if self.conditions.super_saiyan_goku {
+        let super_saiyan = |unit: &String| unit.contains(SUPER_SAIYAN_GOKU_MARK);
+        let normal = |unit: &String| unit.contains(GOKU_MARK) && !super_saiyan(unit);
+        if units.iter().any(super_saiyan) && units.iter().any(normal) {
             // Any set of Goku's art (the battle poses, the close-ups of the special attacks) that has a Super Saiyan set for
-            // these pixels is drawn from it.
-            let super_saiyan = units.iter().find(|unit| unit.contains(SUPER_SAIYAN_GOKU_MARK));
-            let normal = units
-                .iter()
-                .any(|unit| unit.contains(GOKU_MARK) && !unit.contains(SUPER_SAIYAN_GOKU_MARK));
-            if let (Some(unit), true) = (super_saiyan, normal) {
-                return Some(unit.clone());
+            // these pixels is drawn from it while he is in the party, and from the normal set otherwise.
+            if self.conditions.super_saiyan_goku {
+                return units.into_iter().find(super_saiyan);
             }
+            units.retain(|unit| !super_saiyan(unit));
         }
         let sizes = self.unit_sizes();
         units.into_iter().max_by_key(|unit| {

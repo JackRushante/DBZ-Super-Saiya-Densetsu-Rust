@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 (2026-10-22)
+
+### Fixes
+
+- Remastered: the normal Goku was drawn with the Super Saiyan's art in battle (golden hair from the first fight on), since
+  the Super Saiyan set now has more poses than the normal one. The Super Saiyan art is drawn only while Super Saiyan Goku is
+  in the party.
+
 ## 0.3.0 (2026-10-22)
 
 The first release with data packs (mods), the first two mods and the Android APK.

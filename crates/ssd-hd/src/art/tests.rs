@@ -1950,6 +1950,27 @@ fn super_saiyan_goku_is_drawn_from_his_own_art_for_the_pixels_he_shares_with_the
     renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
     let kept = renderer.render_hd(&frame, options(4)).unwrap();
     assert_eq!(pixel(&kept, x, y), [0, 0, 255], "no Super Saiyan art for the pose: the normal one");
+    // A Super Saiyan set with more poses than the normal one is still not drawn for the normal Goku
+    let bigger = pack_of(
+        dir.path(),
+        Vec::new(),
+        ArtIndex::new(
+            Vec::new(),
+            vec![
+                goku("battle-goku-000", pose.key, "art/normal.png"),
+                goku("battle-goku-ssj-000", pose.key, "art/ssj.png"),
+                goku("battle-goku-ssj-001", pose.key ^ 1, "art/ssj.png"),
+                goku("battle-goku-ssj-002", pose.key ^ 2, "art/ssj.png"),
+            ],
+        ),
+    );
+    renderer.set_art(Some(bigger));
+    renderer.set_conditions(Conditions::default());
+    let normal = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&normal, x, y), [0, 0, 255], "the normal Goku: the normal art");
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
+    let ssj = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&ssj, x, y), [255, 0, 0], "Super Saiyan Goku: his own art");
 }
 
 /// A pack with the picture `art/o.png` of the fighter of [`fighter_log`] (blue) and the pose variant `art/v.png` (red, `size`
