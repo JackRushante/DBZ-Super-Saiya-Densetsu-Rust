@@ -9,7 +9,8 @@ use crate::paths;
 use ssd_oracle::Machine;
 use std::path::PathBuf;
 
-fn path() -> PathBuf {
+/// The state file kept in the background (the HD menus' part of it is beside it, `background.hd`).
+pub fn path() -> PathBuf {
     paths::states_dir().join("background.ssdstate")
 }
 
@@ -27,9 +28,10 @@ pub fn save(machine: &Machine) -> anyhow::Result<()> {
     Ok(written?)
 }
 
-/// Removes the file.
+/// Removes the file, and the HD menus' part beside it.
 pub fn discard() {
     let _ = std::fs::remove_file(path());
+    let _ = std::fs::remove_file(path().with_extension("hd"));
 }
 
 /// Loads the file into `machine` if there is one (a launch after the system killed the app in the background),

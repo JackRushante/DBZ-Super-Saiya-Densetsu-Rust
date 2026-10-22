@@ -299,6 +299,73 @@ impl Driver {
         self.state.mods_alert = Some(text);
     }
 
+    /// What a save state of the window keeps of the HD menus beside the machine's state, which does not hold it: the bag,
+    /// the cheats and the save they belong to. `None` while no bag is bound. [`Driver::restore_session`] reads it back.
+    #[must_use]
+    pub fn session_bytes(&self) -> Option<Vec<u8>> {
+        let state = &self.state;
+        let bag = state.keeper.bag()?;
+        let mut out = SESSION_MAGIC.to_vec();
+        out.push(SESSION_VERSION);
+        match state.keeper.bound_save() {
+            Some((slot, checksum)) => {
+                out.extend([1, slot]);
+                out.extend(checksum.to_le_bytes());
+            }
+            None => out.extend([0; 4]),
+        }
+        for part in [bag.to_bytes(), state.cheats.to_bytes()] {
+            out.extend(u32::try_from(part.len()).ok()?.to_le_bytes());
+            out.extend(part);
+        }
+        Some(out)
+    }
+
+    /// Restores what [`Driver::session_bytes`] kept, after the machine's state is loaded and the driver reset: the bag is
+    /// bound again as it was, to the same save, with the cheats of that moment and the game's options of that save. The
+    /// events write the list and the cheat block into work RAM. Without it a state loaded where no save matches the game
+    /// (a battle, say) had no bag until the field, and the cheats went back to the save's.
+    ///
+    /// # Errors
+    ///
+    /// The bytes are not a session of this version, or its bag or cheats cannot be read.
+    pub fn restore_session(&mut self, bytes: &[u8], wram: &[u8]) -> Result<Vec<HostEvent>, String> {
+        let not = || "not a session of the HD menus".to_owned();
+        let body = bytes.strip_prefix(SESSION_MAGIC.as_slice()).ok_or_else(not)?;
+        let (&version, body) = body.split_first().ok_or_else(not)?;
+        if version != SESSION_VERSION {
+            return Err(format!("a session of version {version}, not {SESSION_VERSION}"));
+        }
+        let (head, mut rest) = body.split_at_checked(4).ok_or_else(not)?;
+        let save = (head[0] == 1).then(|| (head[1], u16::from_le_bytes([head[2], head[3]])));
+        let mut parts = Vec::new();
+        for _ in 0..2 {
+            let (len, tail) = rest.split_at_checked(4).ok_or_else(not)?;
+            let len = u32::from_le_bytes([len[0], len[1], len[2], len[3]]) as usize;
+            let (part, tail) = tail.split_at_checked(len).ok_or_else(not)?;
+            parts.push(part);
+            rest = tail;
+        }
+        let bag = Bag::from_bytes(parts[0])?;
+        let cheats = Cheats::from_bytes(parts[1])?;
+        let state = &mut self.state;
+        let mut events = state.keeper.restore(bag, save, wram, &self.labels);
+        // The cheats and the mod state are the save's already: no bind of them follows on the next frame.
+        state.cheat_save = state.keeper.bound_save();
+        state.mods_save = state.cheat_save;
+        state.options.game = state
+            .cheat_save
+            .and_then(|(slot, checksum)| state.option_slots.entry_for(slot, checksum))
+            .cloned()
+            .unwrap_or_default();
+        state.cheats = cheats;
+        difficulty::restore(&state.options.game, &mut state.cheats);
+        events.extend(block_events(&state.cheats));
+        events.extend(hand_events(&state.cheats, wram));
+        events.push(state.cheats_app_event());
+        Ok(events)
+    }
+
     /// A pack the host installed while the run goes on ("Install a pack..."): it joins the list, off, or takes the place of
     /// the pack with its id (a new version; its line keeps its place and whether it is on).
     pub fn add_pack(&mut self, info: PackInfo) {
@@ -1418,6 +1485,15 @@ impl State {
 
     /// The curtain follows the menu the player opens or closes, when no plan runs.
     fn observe(&mut self, probe: &MenuProbe<'_>) {
+        // A use is over once the original is back on its item list, on the battle's command window or on the field: the
+        // list may follow the bag's order again.
+        if self.keeper.staged()
+            && (probe.field_free()
+                || probe.battle_command()
+                || (probe.screen() == Some(2) && probe.step() == Some(1)))
+        {
+            self.keeper.release();
+        }
         // The Item list of a battle is the HD's Items screen: the screen goes over the battle, and the game gets no
         // buttons until Back or a use. Only the list itself (step 1): the steps of a use (the fighter it is for, its
         // message) are the original's, and the player answers them there.
@@ -1582,6 +1658,10 @@ fn choice(screen: Screen, entry: Entry, flying: bool, town: bool) -> Option<(Vec
     steps.push(Step::Press { button: Button::A, until });
     Some((steps, arrival))
 }
+
+/// The first bytes of [`Driver::session_bytes`], and its layout's version.
+const SESSION_MAGIC: &[u8; 4] = b"SSDH";
+const SESSION_VERSION: u8 = 1;
 
 /// Frames the original runs after a window is drawn or a menu closes, before it takes the next press
 /// (a press in the first frames after a draw is lost).
@@ -2982,6 +3062,24 @@ mod tests {
         driver.key(Key::Left, &menu.wram());
         driver.key(Key::Confirm, &menu.wram());
         assert_eq!(driver.take_mods_request(), Some(Request::Main));
+    }
+
+    #[test]
+    fn a_save_state_keeps_the_bag_and_the_cheats_and_a_load_gets_them_back() {
+        let (mut driver, mut menu) = battle_with_bag();
+        driver.state.cheats.set_chapters(true);
+        let bytes = driver.session_bytes().expect("a bound bag");
+        let units = driver.bag().map(Bag::units);
+        // A load resets the driver: no bag, the cheats off, and the battle matches no save to bind to.
+        driver.reset();
+        assert!(driver.bag().is_none());
+        let events = driver.restore_session(&bytes, &menu.wram()).unwrap();
+        menu.absorb(&events);
+        assert_eq!(driver.bag().map(Bag::units), units, "the bag is back");
+        assert!(driver.state.cheats.chapters(), "and the cheats of that moment");
+        frame(&mut driver, &mut menu, Joypad::default());
+        assert!(driver.state.cheats.chapters(), "a frame keeps them: no bind follows");
+        assert!(driver.restore_session(b"junk", &menu.wram()).is_err());
     }
 
     #[test]

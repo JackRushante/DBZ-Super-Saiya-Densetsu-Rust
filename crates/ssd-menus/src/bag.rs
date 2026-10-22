@@ -27,6 +27,18 @@ const DRAGON_BALLS: std::ops::RangeInclusive<u8> = 33..=39;
 /// only when the stack holds the same word, so a unit whose state changed (a wish used, a choice of a
 /// card changer) leaves its stack and becomes a stack of its own.
 const KEEPS_STATE: [u8; 6] = [9, 10, 11, 12, 13, 15];
+/// Porunga's object id.
+const PORUNGA: u8 = 15;
+/// The state word the original gives Porunga with the object (`04:D37E`): 150 wish points in the high byte (a wish costs
+/// 50, so three wishes), no wish used in the low byte. A word of 0 is never Porunga's own (the original takes the object
+/// away when its points reach 0, `01:E335`): it is a unit that came without its word (the item spawner, a list rebuilt from
+/// an older version), and it gets the original's, or each wish would wrap the points and the wishes would never end.
+const PORUNGA_WORD: u16 = 0x9600;
+
+/// The state word a unit of `object` is kept with: `extra`, or Porunga's own for a Porunga without one.
+fn state_word(object: u8, extra: u16) -> u16 {
+    if object == PORUNGA && extra == 0 { PORUNGA_WORD } else { extra }
+}
 
 /// The rules of a bag: its slots and the units of a stack. Both are options (`Ruleset`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +192,7 @@ impl Bag {
         for stack in &mut self.stacks {
             stack.class =
                 Class::of(stack.object, stack.class.key && !DRAGON_BALLS.contains(&stack.object));
+            stack.extra = state_word(stack.object, stack.extra);
         }
         let limit = self.rules.stack;
         let mut joined: Vec<Stack> = Vec::with_capacity(self.stacks.len());
@@ -213,6 +226,7 @@ impl Bag {
     ///
     /// [`Full`] when the unit needs a new slot and the bag has none; nothing is changed.
     pub fn add(&mut self, object: u8, extra: u16, class: Class) -> Result<u32, Full> {
+        let extra = state_word(object, extra);
         if class.stackable {
             let limit = self.rules.stack;
             let by_state = KEEPS_STATE.contains(&object);
@@ -350,6 +364,33 @@ impl Sidecar {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_porunga_without_its_word_gets_the_originals_three_wishes() {
+        let mut bag = Bag::new(Rules::default());
+        let id = bag.add(PORUNGA, 0, Class::of(PORUNGA, false)).unwrap();
+        assert_eq!(
+            bag.stack(id).map(|stack| stack.extra),
+            Some(PORUNGA_WORD),
+            "150 points, no wish used"
+        );
+        let used = bag.add(PORUNGA, 0x9C40, Class::of(PORUNGA, false)).unwrap();
+        assert_ne!(used, id, "a Porunga with a wish used keeps its own word and stack");
+        assert_eq!(bag.stack(used).map(|stack| stack.extra), Some(0x9C40));
+        // A bag kept with a word of 0 is brought to the original's word, and joins the stack that has it
+        let mut old = Bag::new(Rules::default());
+        old.add(PORUNGA, PORUNGA_WORD, Class::of(PORUNGA, false)).unwrap();
+        old.stacks.push(Stack {
+            id: 99,
+            object: PORUNGA,
+            count: 1,
+            extra: 0,
+            class: Class::of(PORUNGA, false),
+        });
+        old.coalesce();
+        assert_eq!(old.stacks().len(), 1);
+        assert_eq!((old.stacks()[0].count, old.stacks()[0].extra), (2, PORUNGA_WORD));
+    }
+
     fn normal(object: u8) -> Class {
         Class::of(object, false)
     }
@@ -445,8 +486,8 @@ mod tests {
             bag.stacks().iter().map(|s| (s.object, s.count, s.extra)).collect();
         assert_eq!(
             counts,
-            [(15, 3, 0), (15, 1, 7), (33, 1, 0)],
-            "same state joins, another state and a key item stay"
+            [(15, 3, PORUNGA_WORD), (15, 1, 7), (33, 1, 0)],
+            "same state joins (a Porunga without its word has the story's), another state and a key item stay"
         );
         assert!(bag.is_consistent());
     }

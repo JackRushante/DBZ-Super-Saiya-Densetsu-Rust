@@ -57,13 +57,17 @@ pub struct Keeper {
     bag: Option<Bag>,
     save: Option<Save>,
     shown: Vec<Shown>,
+    /// The stack a use staged at the top of the list, kept there until the use is over ([`Keeper::release`]): the
+    /// original's effect finds its entry by its row, so the list does not move under it (a wish of Porunga changes the
+    /// entry's state word, and the list written back in the bag's order would put another object on that row).
+    front: Option<u32>,
 }
 
 impl Keeper {
     /// A keeper with no bag yet: it binds when the game has a save or a list to keep.
     #[must_use]
     pub fn new(rules: Rules) -> Self {
-        Self { rules, bag: None, save: None, shown: Vec::new() }
+        Self { rules, bag: None, save: None, shown: Vec::new(), front: None }
     }
 
     /// Whether the bag is bound.
@@ -148,6 +152,26 @@ impl Keeper {
         Ok(self.project(wram, labels, None))
     }
 
+    /// A bag kept beside a save state of the window ([`super::driver::Driver::session_bytes`]), bound again after the
+    /// state is loaded, with the save it belonged to: the list is written as the bag projects it.
+    pub fn restore(
+        &mut self,
+        mut bag: Bag,
+        save: Option<(u8, u16)>,
+        wram: &[u8],
+        labels: &Labels,
+    ) -> Vec<HostEvent> {
+        bag.set_rules(self.rules);
+        bag.coalesce();
+        let payload = bag.to_bytes();
+        self.bag = Some(bag);
+        self.save = save.map(|(slot, checksum)| Save { slot, checksum });
+        self.front = None;
+        let mut events = vec![HostEvent::App { tag: BIND_TAG, payload }];
+        events.extend(self.project(wram, labels, None));
+        events
+    }
+
     /// The bag as the list's entries of the original: each stack as the list shows it.
     /// The list is compared with the one the keeper last wrote; what the original added or took
     /// is the bag's, and the list is written back as the bag projects it. The writes are the host's.
@@ -193,6 +217,8 @@ impl Keeper {
         }
         let Some(bag) = self.bag.as_mut() else { return Vec::new() };
         let (removed, added) = diff(&self.shown, &listed);
+        // The row of the staged stack: a unit the original changes there (a new state word) stays the front.
+        let front_row = self.shown.iter().position(|shown| Some(shown.id) == self.front);
         for index in removed {
             bag.take(self.shown[index].id, 1);
         }
@@ -200,9 +226,13 @@ impl Keeper {
             let (object, extra) = listed[index];
             let class = class_of(labels, object);
             // A unit the bag cannot take is not kept: the list is written back without it below.
-            let _ = bag.add(object, extra, class);
+            let id = bag.add(object, extra, class);
+            if let (Ok(id), true) = (id, front_row == Some(index)) {
+                self.front = Some(id);
+            }
         }
-        self.project(wram, labels, None)
+        let front = self.front;
+        self.project(wram, labels, front)
     }
 
     /// The item spawner: `count` units of `object` go into the bag (as many as it has room for), and the list is
@@ -233,7 +263,19 @@ impl Keeper {
     /// The list writes that show `front` first, as the HD stages a use: the stack goes to the first
     /// row, where the original's own use takes it.
     pub fn stage(&mut self, wram: &[u8], labels: &Labels, front: u32) -> Vec<HostEvent> {
+        self.front = Some(front);
         self.project(wram, labels, Some(front))
+    }
+
+    /// Whether a use's stack is held at the top of the list.
+    #[must_use]
+    pub fn staged(&self) -> bool {
+        self.front.is_some()
+    }
+
+    /// The use is over: the list follows the bag's order again from its next change.
+    pub fn release(&mut self) {
+        self.front = None;
     }
 
     /// Whether the bag's save changed: `Some` with the slot, the new checksum word and the bag, when

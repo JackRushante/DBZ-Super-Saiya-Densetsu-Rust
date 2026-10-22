@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.6 (2026-10-22)
+
+### Fixes
+
+- **Porunga**:
+  - A Porunga from the item spawner had no wish points (the game gives 150 with the object, 50 a wish): the wishes wrapped
+    and never ended, and the wish window stayed with nothing left to choose. A Porunga without its points gets the game's
+    (yours too).
+  - Using Porunga from the HD Item screen could take another object away (the one after it in the list): the list is now
+    held still while an object is in use, so a wish that changes Porunga's points finds Porunga where it was.
+  - Remastered: the cursor and the marks of the wishes used are on the right lines (the game put them one line low, on
+    the second wish's the third, on the third's an empty line). Classic is unchanged.
+- **Save states keep the bag and the cheats**: a state (F5, the touch MENU's Save state, and the state kept when Android
+  sends the game to the background) writes the HD bag and the cheats beside it (`slotN.hd`), and loading it brings them
+  back. Before, a state loaded in a battle showed the game's old Item list and the cheats went back to the save's.
+
 ## 0.3.5 (2026-10-22)
 
 ### Fixes

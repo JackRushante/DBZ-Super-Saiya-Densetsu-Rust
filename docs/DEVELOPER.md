@@ -208,7 +208,9 @@ menu stays open for the player. Drop asks Yes or No and drops one unit. A tab wi
 on it. The Dragon Balls and the story's objects are pinned at the top and cannot be dropped, and a full bag refuses
 what it is offered, with a notice. The bag lives in `saves/ssd.bag` beside the battery save (one bag per save slot,
 keyed by the slot's checksum: a save changed by Classic play rebuilds its bag from the game's list; a file that cannot
-be read is kept as `ssd.bag.bad` and the bags are rebuilt). Loading a state rebuilds the bag from the game's list.
+be read is kept as `ssd.bag.bad` and the bags are rebuilt). A save state keeps the bag and the cheats beside it
+(`states/slotN.hd`, `Hd::session_bytes`), and loading the state brings them back; a state without that file rebuilds
+the bag from the game's list when the field is free.
 In a battle the Item command opens the same Item screen over the battle: the bag with its counts and pages, the
 stacks a battle can use in full colour and the others greyed out (the original answers "can't use" for those). A use
 stages the chosen stack first on the original's list, which takes it through its own battle item code, and the steps

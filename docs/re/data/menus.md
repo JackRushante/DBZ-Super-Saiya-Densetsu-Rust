@@ -220,7 +220,7 @@ The help texts say what each does; the groups:
 | 8 | restores HP and KI |
 | 9 to 13 | change a card or the whole hand (10 to 13 ask for a card, bit 4; 9 asks for a member by its attribute although its text speaks of a card: not understood; `$7E:2BA0` keeps a mask of the three choices already used) |
 | 14 | restores HP and KI for the whole party |
-| 15 | Porunga's three wishes |
+| 15 | Porunga's three wishes (see "Porunga" below) |
 | 16, 17 | the Scouter: information on the enemy |
 | 18, 19, 26 | call Yajirobe, Vegeta, Gohan to help in a battle |
 | 20 | Oozaru transformation (battle) |
@@ -386,3 +386,25 @@ replay is re-played with the same keeper; the final state (work RAM and the bag)
 
 `--peek` takes the variables of `re/symbols.toml` or hex bus addresses, `--watch` prints the writes of a byte (with the
 program counter after `--watch-from N`), which is how the routine of each write above was found.
+
+### Porunga
+
+Read with `xtask disasm` over the effect (`01:E2A5`, a step table) and `xtask shots` on a battle state, the Use of
+Porunga in a battle as the pure original plays it. The state word of the object (`item_extra`) is the wish points in its
+high byte and a bit per wish used in its low byte (`$80`, `$40`, `$20` for the first, second and third). The story gives
+the object with 150 points (`04:D37E` writes `$96` to the high byte, then the entry), and each wish takes 50 (`01:E302`:
+the high byte minus `$32`, the wish's bit set). After a wish the effect finds the entry again by its row (`01:8BC1`: the
+page `$0D63` times 8 plus `menu_row` `$0C3F`) and asks for the next wish while points are left (`01:E346`); at 0 points it
+removes the entry (`01:E350`) and the use ends. An entry with a word of 0 (the item spawner's, before it set the word)
+wraps at the first wish (0 - 50 = 206) and never reaches 0: the window stays with the three wishes used. The bag gives a
+Porunga with a word of 0 the story's word (`ssd_menus::bag`).
+
+The wish window (window set `$23`: entries `$33`, drawn by `01:B205`, and `$16`) places the cursor through `01:F2E4`, a
+word table at `01:F2F6` of the tile-map offset of each wish (`01:F248`, called by Porunga's effect only), and the marks of
+the wishes used at the same three offsets (`01:B238`, `01:B244`, `01:B24F`). The offsets are the tile rows 4, 8 and 10,
+the layout of a first wish of two lines; the English text has the wishes on the rows 4, 6 and 8, so the cursor on the
+second wish is drawn on the third and the one on the third on the empty row under it. The Remastered fix (`cheats.rs`,
+`story_porunga_wish_*`) moves the cursor and the marks to the rows of the text.
+
+The HD's use stages Porunga at the top of the list; the keeper (`menu::keeper`) holds that entry there until the use is
+over, as the effect finds it by its row while its word changes.

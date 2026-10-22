@@ -184,6 +184,31 @@ fn save_state(machine: &Machine, slot: u8) -> anyhow::Result<PathBuf> {
     written.map(|()| path)
 }
 
+/// The file beside a state file that keeps the HD menus' part of the state (`slot1.hd` beside `slot1.ssdstate`).
+fn session_path(state: &std::path::Path) -> PathBuf {
+    state.with_extension("hd")
+}
+
+/// Writes the HD menus' part of the state at `state` beside it, or removes an older one (a Classic state has none).
+fn save_session(state: &std::path::Path, session: Option<&[u8]>) {
+    let path = session_path(state);
+    let written = match session {
+        Some(bytes) => std::fs::write(&path, bytes),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        },
+    };
+    if let Err(e) = written {
+        log::warn!("the bag and the cheats of the state were not written: {e}");
+    }
+}
+
+/// The HD menus' part of the state at `state`, if it has one.
+fn read_session(state: &std::path::Path) -> Option<Vec<u8>> {
+    std::fs::read(session_path(state)).ok()
+}
+
 /// Loads the slot file; on any error the machine is left untouched.
 fn load_state(machine: &mut Machine, slot: u8) -> anyhow::Result<()> {
     let path = hotkeys::state_path(slot);
@@ -232,6 +257,8 @@ struct WindowState {
     /// The save states a run that does not persist made, by slot: they stay in memory, as no state file is written
     /// (see [`apply_controls`]).
     kept_states: BTreeMap<u8, Vec<u8>>,
+    /// The HD menus' part of each of those states (see [`Hd::session_bytes`]).
+    kept_sessions: BTreeMap<u8, Vec<u8>>,
     /// The keys and buttons of the player's Controls page.
     bindings: Bindings,
     /// The Controls page changed the map: the keys held under the old one are let go.
@@ -280,6 +307,7 @@ impl WindowState {
             video_saved: VideoSettings::default(),
             video_apply: false,
             kept_states: BTreeMap::new(),
+            kept_sessions: BTreeMap::new(),
             bindings: Bindings::default(),
             release_input: false,
             touch: Touch::new(
@@ -569,30 +597,49 @@ fn apply_controls(
             }
         }
         Some(Effect::Save(slot)) => {
+            // The HD menus' part of the state (the bag, the cheats), which the machine's state does not hold.
+            let session = state.hd.as_ref().and_then(Hd::session_bytes);
             if paths::persists() {
                 match save_state(machine, slot) {
-                    Ok(path) => log::info!("state saved to {}", path.display()),
+                    Ok(path) => {
+                        save_session(&path, session.as_deref());
+                        log::info!("state saved to {}", path.display());
+                    }
                     Err(e) => log::warn!("saving state failed: {e:#}"),
                 }
             } else {
                 // A run that does not persist keeps the state in memory: no state file is written.
                 state.kept_states.insert(slot, machine.save_state());
+                match session {
+                    Some(session) => state.kept_sessions.insert(slot, session),
+                    None => state.kept_sessions.remove(&slot),
+                };
                 log::info!("state of slot {slot} kept in memory: this run writes no state file");
             }
         }
         Some(Effect::Load(slot)) => {
             // A state this run kept is loaded from memory; any other is read from the states folder.
-            let loaded = match state.kept_states.get(&slot) {
-                Some(bytes) => machine.load_state(bytes).map_err(anyhow::Error::from),
-                None => load_state(machine, slot),
+            let (loaded, session) = match state.kept_states.get(&slot) {
+                Some(bytes) => (
+                    machine.load_state(bytes).map_err(anyhow::Error::from),
+                    state.kept_sessions.get(&slot).cloned(),
+                ),
+                None => (load_state(machine, slot), read_session(&hotkeys::state_path(slot))),
             };
             match loaded {
                 Ok(()) => {
                     // The stop banner described the position the load has just left.
                     state.panel.debug.clear_banner();
-                    // The HD menu and the bag described the game that was there.
+                    // The HD menu and the bag described the game that was there: the state's own come back with it.
                     if let Some(hd) = state.hd.as_mut() {
                         hd.reset();
+                        if let Some(session) = &session
+                            && let Err(e) = hd.restore_session(session, machine)
+                        {
+                            log::warn!(
+                                "the bag and the cheats of the state were not restored: {e:#}"
+                            );
+                        }
                     }
                     log::info!("state loaded from slot {slot}");
                 }
@@ -1689,9 +1736,19 @@ fn windowed_loop(
     }
     // A launch after the system killed the app in the background continues from the state kept then.
     #[cfg(target_os = "android")]
-    if paths::persists() && !session.is_active() && crate::android_lifecycle::take(machine) {
-        if let Some(hd) = state.hd.as_mut() {
+    if paths::persists() && !session.is_active() {
+        let kept = read_session(&crate::android_lifecycle::path());
+        if crate::android_lifecycle::take(machine)
+            && let Some(hd) = state.hd.as_mut()
+        {
             hd.reset();
+            if let Some(kept) = &kept
+                && let Err(e) = hd.restore_session(kept, machine)
+            {
+                log::warn!(
+                    "the bag and the cheats of the background state were not restored: {e:#}"
+                );
+            }
         }
     }
     refresh_controls(&mut state, session, machine, &env);
@@ -1776,7 +1833,14 @@ fn windowed_loop(
                         save_sram(machine);
                         if paths::persists() && !session.is_active() && env.verify.is_none() {
                             match crate::android_lifecycle::save(machine) {
-                                Ok(()) => log::info!("in the background: SRAM and state saved"),
+                                Ok(()) => {
+                                    let kept = state.hd.as_ref().and_then(Hd::session_bytes);
+                                    save_session(
+                                        &crate::android_lifecycle::path(),
+                                        kept.as_deref(),
+                                    );
+                                    log::info!("in the background: SRAM and state saved");
+                                }
                                 Err(e) => log::warn!("saving the background state failed: {e:#}"),
                             }
                         }

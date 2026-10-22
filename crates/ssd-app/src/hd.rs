@@ -345,6 +345,27 @@ impl Hd {
         self.driver.set_moving(held);
     }
 
+    /// The HD menus' part of a save state (see [`Driver::session_bytes`]).
+    pub fn session_bytes(&self) -> Option<Vec<u8>> {
+        self.driver.session_bytes()
+    }
+
+    /// Puts back the HD menus' part of a state just loaded into `machine` (see [`Driver::restore_session`]).
+    ///
+    /// # Errors
+    ///
+    /// The bytes are not a session, or its writes do not fit in work RAM.
+    pub fn restore_session(
+        &mut self,
+        bytes: &[u8],
+        machine: &mut ssd_oracle::Machine,
+    ) -> anyhow::Result<()> {
+        let events =
+            self.driver.restore_session(bytes, machine.wram()).map_err(anyhow::Error::msg)?;
+        ssd_oracle::apply_events(machine, &events)?;
+        Ok(())
+    }
+
     /// A pack installed while the run goes on joins the Data packs screen's list (see [`Driver::add_pack`]).
     pub fn add_pack(&mut self, info: ssd_menus::packs::PackInfo) {
         self.driver.add_pack(info);

@@ -159,6 +159,21 @@ const SALE_ENTRY: u32 = 0x03_A790;
 /// returns at once, as the routine does for a lower level, so the recruits wait until the party walks into the Saiyans (the
 /// game's other deadline, which stays).
 pub const LEVEL_DEADLINE_ENTRY: u32 = 0x03_F320;
+/// Porunga's wishes in a battle (`docs/re/data/menus.md`, "Porunga"): the window lists the three wishes on the tile rows 4, 6
+/// and 8 of the English text, but the original puts the cursor (`01:F2E4`, a word table at `01:F2F6`) and the marks of the
+/// wishes used (`01:B205`) on the rows 4, 8 and 10, the layout of a first wish of two lines: the cursor on the second wish
+/// is drawn on the third, the one on the third on an empty row. A Remastered fix: the cursor and the marks go on the rows of
+/// the text, each one two tile rows (`$80` bytes of the tile map) below the one before. Only Porunga's effect reaches them.
+/// The `tax` after the table's read: A is the tile-map offset of the wish under the cursor (`map_entry_value`).
+const WISH_CURSOR: u32 = 0x01_F2F2;
+/// The `jsl` that draws the mark of the second wish used: X is its tile-map offset.
+const WISH_MARK_SECOND: u32 = 0x01_B247;
+/// The `jsl` that draws the mark of the third wish used.
+const WISH_MARK_THIRD: u32 = 0x01_B252;
+/// The original's table of the wishes' offsets: its first word is the first wish's, which is right.
+const WISH_ROWS: u32 = 0x01_F2F6;
+/// Two tile rows of the tile map, in bytes: the distance between two lines of the wishes' text.
+const WISH_ROW_STEP: u16 = 0x80;
 /// The object the shop's list is on (`menu_item_id`), which the sale reads.
 const SALE_OBJECT: u32 = 0x7E_0D7C;
 /// The price of each object id (`item_prices`, 40 bytes, `$FF` = none), which the sale adds.
@@ -197,6 +212,28 @@ pub fn hook_entries() -> Vec<HookEntry> {
         // A jump target: nothing returns from it, the wrapper always ends by resuming the original.
         entry("cheat_money", MONEY_ENTRY, money_wrapper, ReturnKind::Rtl),
         entry("cheat_sale", SALE_ENTRY, sale_wrapper, ReturnKind::Rtl),
+        HookEntry {
+            mode: HookMode::Patch,
+            ..entry("story_porunga_wish_cursor", WISH_CURSOR, wish_cursor_wrapper, ReturnKind::Rtl)
+        },
+        HookEntry {
+            mode: HookMode::Patch,
+            ..entry(
+                "story_porunga_wish_mark_2",
+                WISH_MARK_SECOND,
+                wish_mark_second_wrapper,
+                ReturnKind::Rtl,
+            )
+        },
+        HookEntry {
+            mode: HookMode::Patch,
+            ..entry(
+                "story_porunga_wish_mark_3",
+                WISH_MARK_THIRD,
+                wish_mark_third_wrapper,
+                ReturnKind::Rtl,
+            )
+        },
         // A branch target inside `03:F300`: returning here is the routine's own `rtl` for a level below the deadline.
         // A story fix must act on every call: a patch never falls back to the original for timing.
         HookEntry {
@@ -466,6 +503,36 @@ fn money_wrapper(ctx: &mut Ctx<'_>) {
     ctx.write8(MONEY_AMOUNT, (scaled & 0xFF) as u8);
     ctx.write8(MONEY_AMOUNT + 1, (scaled >> 8) as u8);
     ctx.resume_at(MONEY_ENTRY);
+}
+
+/// The tile-map offset of Porunga's wish `row` (0 to 2) on the English text: the first wish's, then one line further each.
+fn wish_row(ctx: &mut Ctx<'_>, row: u16) -> u16 {
+    let first = u16::from(ctx.read8(WISH_ROWS)) | u16::from(ctx.read8(WISH_ROWS + 1)) << 8;
+    first + WISH_ROW_STEP * row
+}
+
+/// [`WISH_CURSOR`]: the offset of the wish under the cursor is the row of its text.
+fn wish_cursor_wrapper(ctx: &mut Ctx<'_>) {
+    let row = u16::from(ctx.read8(d::MAP_ENTRY_VALUE));
+    if row < 3 {
+        let offset = wish_row(ctx, row);
+        ctx.set_a(offset);
+    }
+    ctx.resume_at(WISH_CURSOR);
+}
+
+/// [`WISH_MARK_SECOND`]: the second wish's mark on the second line of the text.
+fn wish_mark_second_wrapper(ctx: &mut Ctx<'_>) {
+    let offset = wish_row(ctx, 1);
+    ctx.set_x(offset);
+    ctx.resume_at(WISH_MARK_SECOND);
+}
+
+/// [`WISH_MARK_THIRD`]: the third wish's mark on the third line of the text.
+fn wish_mark_third_wrapper(ctx: &mut Ctx<'_>) {
+    let offset = wish_row(ctx, 2);
+    ctx.set_x(offset);
+    ctx.resume_at(WISH_MARK_THIRD);
 }
 
 /// [`LEVEL_DEADLINE_ENTRY`]: returns (`rtl`) without the deadline, always (a story fix, not a cheat).
