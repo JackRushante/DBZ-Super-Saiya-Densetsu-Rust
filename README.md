@@ -419,7 +419,8 @@ goes from polish to new content. Dates are not promised; each milestone ships wh
 ### M10: Cheats, mod support and data packs (in progress, most of it in 0.3.0)
 
 Done: the item spawner and the zeni multiplier, the data packs and everything below up to the two mods. Left: the
-documentation and acceptance of the pack tools, and the review of the HD art.
+documentation and acceptance of the pack tools, the review of the HD art, and every menu in HD (Cards, Status, Order, Text
+and Save are still the original screens, made bigger).
 
 - Two more **cheats**: an **item spawner** (every object, with a short description and how many to add; story objects
   such as the Dragon Balls and the Dragon Radar carry a red warning, since spawning them can break the story, so save

@@ -1576,6 +1576,10 @@ fn choice(screen: Screen, entry: Entry, flying: bool, town: bool) -> Option<(Vec
 /// (a press in the first frames after a draw is lost).
 const SETTLE_WINDOW: u32 = 120;
 
+/// Frames the original's Use or Drop window of the Item screen runs once it is drawn and idle, before it takes the press
+/// that chooses Use or Drop.
+const SETTLE_CHOICE: u32 = 8;
+
 /// The object id of the Dragon Radar: its effect is a screen of its own, which only B leaves, and
 /// which does not consume the object (`01:8C9F`, effect 23 at `01:EBE4`; `docs/re/data/menus.md`).
 const DRAGON_RADAR: u8 = 23;
@@ -1601,7 +1605,8 @@ fn use_steps(stack: u32, kind: UseKind, party: usize) -> Vec<Step> {
         Step::Stage { id: stack },
         Step::Press { button: Button::A, until: Until::ItemChoice },
         Step::Lift,
-        Step::Pause { frames: SETTLE_WINDOW },
+        Step::Wait { until: Until::Ready },
+        Step::Pause { frames: SETTLE_CHOICE },
         Step::Row { row: 0, rows: 2 },
     ];
     if kind == UseKind::Card {
@@ -1629,7 +1634,8 @@ fn drop_steps(stack: u32) -> Vec<Step> {
         Step::Stage { id: stack },
         Step::Row { row: 0, rows: 2 },
         Step::Press { button: Button::A, until: Until::ItemChoice },
-        Step::Pause { frames: SETTLE_WINDOW },
+        Step::Wait { until: Until::Ready },
+        Step::Pause { frames: SETTLE_CHOICE },
         Step::Row { row: 1, rows: 2 },
         Step::Press { button: Button::A, until: Until::DropAsk },
         Step::Row { row: 0, rows: 2 },

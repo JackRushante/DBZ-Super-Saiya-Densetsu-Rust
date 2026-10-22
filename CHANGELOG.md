@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3 (2026-10-22)
+
+### Fixes
+
+- Using an object from the HD Item screen (in a battle or on the map) no longer stands still for two seconds after the
+  choice: the press that picks Use or Drop waits for the original's window to be ready, not for a fixed two seconds.
+
 ## 0.3.2 (2026-10-22)
 
 ### New
