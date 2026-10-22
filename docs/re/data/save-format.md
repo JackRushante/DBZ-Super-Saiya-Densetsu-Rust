@@ -138,8 +138,8 @@ There is **no single story-progress flag** in the save. The point the player is 
   (image offset `$2A0`, ids ended by `$FF`) and the enemy's hit points of the last fight (`$7E:2B03` and
   `$7E:2B0A`, image `$303` and `$30A`, words) - the last chapter's scene copies them.
 
-Loading a save runs the chapter set-up of the saved map (it rebuilds the party from the roster) and then the
-map's routine, which starts a scene by itself when the flags and the position fit, so a story point is
+Loading a save rebuilds the party from the roster (the chapter set-up of the map does not run: `title-chapters.md` 5) and
+the map's routine starts a scene by itself when the flags and the position fit, so a story point is
 placed by choosing them: `docs/re/secrets-coverage.md` lists, for each event reached, the fields that put a
 save just before it. What is not known: the meaning of every flag, `$01BC`, `$01BD` and the rest of
 `$01D0`-`$01E7`. Raw access (`--set page:OFFSET=HEX`, `--set image:OFFSET=HEX`) exists for experiments.

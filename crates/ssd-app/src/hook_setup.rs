@@ -125,7 +125,8 @@ impl HooksArg {
     pub fn of(mode: HookMode) -> Self {
         match mode {
             HookMode::Original => Self::Original,
-            HookMode::Rust => Self::Rust,
+            // A patch is Rust code that takes no time (the redirectors of packs, the story fixes).
+            HookMode::Rust | HookMode::Patch => Self::Rust,
             HookMode::Verify => Self::Verify,
         }
     }
@@ -205,6 +206,7 @@ impl HookSwitch {
             table: Some(table),
             sync_keys: self.symbols.sync_points().iter().map(|point| point.address).collect(),
             budget_frames: DEFAULT_BUDGET_FRAMES,
+            b_packs: None,
         })
     }
 

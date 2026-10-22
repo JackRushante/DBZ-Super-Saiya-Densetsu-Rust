@@ -19,6 +19,10 @@
 //! on the map and in every fight, as the settings say.
 
 use crate::data as d;
+use crate::mods::state::{
+    BLOCK as MODS_BLOCK, ENEMY_HIGH as MODS_ENEMY_HIGH, MARKER as MODS_MARKER,
+    MARKER_AT as MODS_MARKER_AT,
+};
 use ssd_menus::cheats::{
     Cheats, ENDLESS, GAIN, GENERATOR, GENERATOR_SEED, MARKER, MARKER_BYTES, MAX_ZENI, MONEY,
     Multiplier, RANDOM_OFF, RANDOM_ONLY, SUSPENDED, Setting, Z_VALUE, ZCARDS, ZCARDS_FIGHTER, ZENI,
@@ -194,12 +198,16 @@ pub fn hook_entries() -> Vec<HookEntry> {
         entry("cheat_money", MONEY_ENTRY, money_wrapper, ReturnKind::Rtl),
         entry("cheat_sale", SALE_ENTRY, sale_wrapper, ReturnKind::Rtl),
         // A branch target inside `03:F300`: returning here is the routine's own `rtl` for a level below the deadline.
-        entry(
-            "story_level_deadline",
-            LEVEL_DEADLINE_ENTRY,
-            level_deadline_wrapper,
-            ReturnKind::Rtl,
-        ),
+        // A story fix must act on every call: a patch never falls back to the original for timing.
+        HookEntry {
+            mode: HookMode::Patch,
+            ..entry(
+                "story_level_deadline",
+                LEVEL_DEADLINE_ENTRY,
+                level_deadline_wrapper,
+                ReturnKind::Rtl,
+            )
+        },
     ]
 }
 
@@ -538,8 +546,38 @@ fn rebuild_group(ctx: &mut Ctx<'_>, group: u8, multiplier: Multiplier) {
     let Ok(()) = ctx.call_original(FORMATION_ENTRY, ReturnKind::Rtl) else { return };
 }
 
+/// The largest BP of a wide record: 40 bits (`mods::state`).
+const MAX40: u64 = (1 << 40) - 1;
+
+/// Whether the mod state block is live (its marker is in place): only then are the high parts of a wide BP valid.
+fn mod_block_live(ctx: &mut Ctx<'_>) -> bool {
+    MODS_MARKER.iter().enumerate().all(|(k, &byte)| ctx.read8(MODS_MARKER_AT + k as u32) == byte)
+}
+
+/// Multiplies the BP of enemy slot `slot`, whose record is at `base`. With the mod state block live a BP is 40 bits, the
+/// record's 24 and the 16 of the slot's high part, and it is multiplied whole and put back in both places (an enemy that
+/// `enemy_scaling` made stronger than 24 bits is multiplied as it is). Without the block it is the record's 24 bits, saturating
+/// at them.
+fn multiply_enemy_bp(ctx: &mut Ctx<'_>, slot: u16, base: u16, multiplier: Multiplier) {
+    let low = read24(ctx, base + ENEMY_BP);
+    if !mod_block_live(ctx) {
+        write24(ctx, base + ENEMY_BP, multiplier.scale(low, MAX24));
+        return;
+    }
+    let high_at = MODS_BLOCK + (MODS_ENEMY_HIGH + 2 * usize::from(slot)) as u32;
+    let wide = u64::from(ctx.read16(high_at)) << 24 | u64::from(low);
+    let scaled = if wide == 0 {
+        0
+    } else {
+        (wide * u64::from(multiplier.num) / u64::from(multiplier.den)).clamp(1, MAX40)
+    };
+    write24(ctx, base + ENEMY_BP, (scaled & u64::from(MAX24)) as u32);
+    ctx.write16(high_at, (scaled >> 24) as u16);
+}
+
 /// `01:F719`, the enemies' stats are filled (`rtl`). The HP, the maximum HP and the BP of every enemy
-/// in use are multiplied by the enemy-power multiplier.
+/// in use are multiplied by the enemy-power multiplier, after the numbers the original and the packs' hooks inside it
+/// (the data tables, `enemy_scaling`) have written: the cheat acts on the scaled enemy.
 fn power_wrapper(ctx: &mut Ctx<'_>) {
     ctx.mark_gated();
     let multiplier = multiplier_in(ctx, Setting::Power);
@@ -564,8 +602,7 @@ fn power_wrapper(ctx: &mut Ctx<'_>) {
             ctx.write_db8(base + ENEMY_HP + 1, (hp >> 8) as u8);
             ctx.write_db8(base + ENEMY_MAX_HP, max_hp as u8);
             ctx.write_db8(base + ENEMY_MAX_HP + 1, (max_hp >> 8) as u8);
-            let bp = read24(ctx, base + ENEMY_BP);
-            write24(ctx, base + ENEMY_BP, multiplier.scale(bp, MAX24));
+            multiply_enemy_bp(ctx, slot, base, multiplier);
         }
     }
     ctx.set_cost(0);
@@ -781,7 +818,8 @@ mod tests {
         keys.dedup();
         assert_eq!(keys.len(), entries.len(), "one wrapper per routine");
         for entry in &entries {
-            assert_eq!(entry.mode, HookMode::Rust);
+            let story = entry.name.starts_with("story_");
+            assert_eq!(entry.mode, if story { HookMode::Patch } else { HookMode::Rust });
             assert_eq!(entry.cycles, Some(0));
             assert!(matches!(entry.action, HookAction::Routine { .. }));
             assert!(

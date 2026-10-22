@@ -44,9 +44,9 @@ pub const MONEY: usize = MARKER + 4;
 /// screen's "Zeni gained"). A pair with a zero is read as x1, so a block of an older run is neutral.
 pub const GAIN: usize = MONEY + 2;
 const _: () = assert!(GAIN + 2 <= BLOCK_LEN, "the gain pair is inside the block");
-/// The version of the bytes [`Cheats::to_bytes`] writes (2: with the zeni gained, 3: with the item spawner's mark;
-/// versions 1 and 2 are still read).
-pub const VERSION: u32 = 3;
+/// The version of the bytes [`Cheats::to_bytes`] writes (2: with the zeni gained, 3: with the item spawner's mark, 4: with the
+/// unlock of the chapters; versions 1 to 3 are still read).
+pub const VERSION: u32 = 4;
 /// The seed of the generator, written with the settings (so a settings change starts the same sequence).
 pub const GENERATOR_SEED: u32 = 0x2545_F491;
 /// The value of a Z ball: a corner showing a Z is the value 8 (the battle code counts it as 10).
@@ -286,6 +286,49 @@ pub struct Cheats {
     /// The item spawner was used in this game: its saves carry the CHEATS badge whatever the choices, and Reset all
     /// keeps it (version 3).
     spawned: bool,
+    /// The chapters of the data packs are all offered, whether the game was completed or not (version 4). A cheat, so
+    /// the save carries the CHEATS badge; it is not in the cheat block (the title and the chapter list read it).
+    chapters: bool,
+}
+
+/// [`Cheats`] as version 3 saved them: without the chapters' unlock.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct CheatsV3 {
+    damage: u8,
+    defence: u8,
+    exp: u8,
+    power: u8,
+    enemies: u8,
+    encounters: u8,
+    random_battles_off: bool,
+    z_mode: ZMode,
+    z_target: ZTarget,
+    zeni: bool,
+    endless: bool,
+    gain: u8,
+    spawned: bool,
+}
+
+impl From<CheatsV3> for Cheats {
+    fn from(old: CheatsV3) -> Self {
+        Self {
+            damage: old.damage,
+            defence: old.defence,
+            exp: old.exp,
+            power: old.power,
+            enemies: old.enemies,
+            encounters: old.encounters,
+            random_battles_off: old.random_battles_off,
+            z_mode: old.z_mode,
+            z_target: old.z_target,
+            zeni: old.zeni,
+            endless: old.endless,
+            money: MONEY_NEUTRAL as u8,
+            gain: old.gain,
+            spawned: old.spawned,
+            chapters: false,
+        }
+    }
 }
 
 /// [`Cheats`] as version 2 saved them: without the item spawner's mark.
@@ -322,6 +365,7 @@ impl From<CheatsV2> for Cheats {
             money: MONEY_NEUTRAL as u8,
             gain: old.gain,
             spawned: false,
+            chapters: false,
         }
     }
 }
@@ -330,6 +374,8 @@ impl From<CheatsV2> for Cheats {
 type SidecarV1 = (u32, Vec<(u8, u16, bool, CheatsV1)>);
 /// [`CheatSidecar`] as version 2 saved it.
 type SidecarV2 = (u32, Vec<(u8, u16, bool, CheatsV2)>);
+/// [`CheatSidecar`] as version 3 saved it.
+type SidecarV3 = (u32, Vec<(u8, u16, bool, CheatsV3)>);
 
 /// [`Cheats`] as version 1 saved them: without the zeni gained, read as x1.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -364,6 +410,7 @@ impl From<CheatsV1> for Cheats {
             money: MONEY_NEUTRAL as u8,
             gain: 0,
             spawned: false,
+            chapters: false,
         }
     }
 }
@@ -404,7 +451,19 @@ impl Cheats {
             money: MONEY_NEUTRAL as u8,
             gain: 0,
             spawned: false,
+            chapters: false,
         }
+    }
+
+    /// Whether the chapters of the data packs are all offered (the cheat "Unlock chapters").
+    #[must_use]
+    pub fn chapters(&self) -> bool {
+        self.chapters
+    }
+
+    /// Turns the chapters' unlock on or off.
+    pub fn set_chapters(&mut self, on: bool) {
+        self.chapters = on;
     }
 
     /// Whether the item spawner was used in this game (the CHEATS badge of its saves).
@@ -564,8 +623,13 @@ impl Cheats {
                 .iter()
                 .filter(|&&setting| self.is_on(setting))
                 .count();
-        let switches =
-            [self.random_battles_off, self.z_mode != ZMode::Off, self.zeni, self.endless];
+        let switches = [
+            self.random_battles_off,
+            self.z_mode != ZMode::Off,
+            self.zeni,
+            self.endless,
+            self.chapters,
+        ];
         multipliers
             + usize::from(self.encounters_on())
             + usize::from(self.money_on())
@@ -621,6 +685,9 @@ impl Cheats {
             if self.is_on(setting) {
                 lines.push((label, multiplier_text(self.multiplier(setting))));
             }
+        }
+        if self.chapters {
+            lines.push(("Chapters", "unlocked".to_owned()));
         }
         lines
     }
@@ -699,6 +766,11 @@ impl Cheats {
             }
             2 => {
                 let (old, _): ((u32, CheatsV2), usize) =
+                    bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
+                Self::from(old.1)
+            }
+            3 => {
+                let (old, _): ((u32, CheatsV3), usize) =
                     bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
                 Self::from(old.1)
             }
@@ -784,12 +856,13 @@ pub enum Row {
     HowOften,
     Enemies,
     EnemyPower,
+    UnlockChapters,
     ResetAll,
 }
 
 impl Row {
     /// Every row, in the order the cursor moves through them.
-    pub const ALL: [Row; 14] = [
+    pub const ALL: [Row; 15] = [
         Row::Damage,
         Row::Defence,
         Row::Exp,
@@ -803,6 +876,7 @@ impl Row {
         Row::HowOften,
         Row::Enemies,
         Row::EnemyPower,
+        Row::UnlockChapters,
         Row::ResetAll,
     ];
 
@@ -823,6 +897,7 @@ impl Row {
             Self::HowOften => "How often",
             Self::Enemies => "Enemies",
             Self::EnemyPower => "Enemy power",
+            Self::UnlockChapters => "Unlock chapters",
             Self::ResetAll => "Reset all",
         }
     }
@@ -837,6 +912,7 @@ impl Row {
                 "Resources"
             }
             Self::RandomBattles | Self::HowOften | Self::Enemies | Self::EnemyPower => "Encounters",
+            Self::UnlockChapters => "Story",
             Self::ResetAll => "",
         }
     }
@@ -858,6 +934,7 @@ impl Row {
             Self::HowOften => "How often a random battle starts.",
             Self::Enemies => "How many enemies come at once.",
             Self::EnemyPower => "HP and BP of every enemy.",
+            Self::UnlockChapters => "Every chapter of the data packs is offered.",
             Self::ResetAll => "Turn every cheat off.",
         }
     }
@@ -875,7 +952,7 @@ impl Row {
             Self::ItemSpawner => 1,
             Self::ZCards => ZMode::ALL.len(),
             Self::ZFor => ZTarget::COUNT,
-            Self::MaxZeni | Self::EndlessItems | Self::RandomBattles => 2,
+            Self::MaxZeni | Self::EndlessItems | Self::RandomBattles | Self::UnlockChapters => 2,
             Self::ResetAll => 0,
         }
     }
@@ -901,7 +978,9 @@ impl Row {
             Self::ZCards => ["Off", "Atk", "Def", "Both"][index.min(3)].to_owned(),
             Self::ZFor if index == 0 => "Whole party".to_owned(),
             Self::ZFor => names.get(index - 1).map_or("?", String::as_str).to_owned(),
-            Self::MaxZeni | Self::EndlessItems => ["Off", "On"][index.min(1)].to_owned(),
+            Self::MaxZeni | Self::EndlessItems | Self::UnlockChapters => {
+                ["Off", "On"][index.min(1)].to_owned()
+            }
             Self::RandomBattles => ["On", "Off"][index.min(1)].to_owned(),
             Self::ZeniGained => multiplier_text(GAIN_STEPS[index.min(GAIN_STEPS.len() - 1)]),
             Self::ItemSpawner => "Open".to_owned(),
@@ -921,6 +1000,7 @@ impl Row {
             Self::ZFor => cheats.z_target().index(),
             Self::MaxZeni => usize::from(cheats.zeni()),
             Self::EndlessItems => usize::from(cheats.endless()),
+            Self::UnlockChapters => usize::from(cheats.chapters()),
             Self::RandomBattles => usize::from(cheats.random_battles_off()),
             Self::ZeniGained => cheats.gain_index(),
             Self::ItemSpawner | Self::ResetAll => 0,
@@ -936,6 +1016,7 @@ impl Row {
             Self::ZFor => cheats.set_z_target(ZTarget::from_index(index)),
             Self::MaxZeni => cheats.set_zeni(index == 1),
             Self::EndlessItems => cheats.set_endless(index == 1),
+            Self::UnlockChapters => cheats.set_chapters(index == 1),
             Self::RandomBattles => cheats.set_random_battles_off(index == 1),
             Self::ZeniGained => cheats.set_gain_index(index),
             Self::ItemSpawner | Self::ResetAll => {}
@@ -959,8 +1040,8 @@ impl Row {
     }
 }
 
-/// The layout version of [`CheatSidecar`].
-pub const SIDECAR_VERSION: u32 = 3;
+/// The layout version of [`CheatSidecar`] (3: with the item spawner's mark, 4: with the chapters' unlock).
+pub const SIDECAR_VERSION: u32 = 4;
 
 /// The cheats of one save slot, as the sidecar file keeps them. The slot's checksum word says which save
 /// they belong to; `marked` says whether that save was made with a cheat on (the CHEATS badge).
@@ -1036,6 +1117,22 @@ impl CheatSidecar {
                     .collect();
                 Self { version: SIDECAR_VERSION, saves }
             }
+            // Version 3: the cheats without the chapters' unlock; the file is written as the current version.
+            3 => {
+                let (old, _): (SidecarV3, usize) =
+                    bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
+                let saves = old
+                    .1
+                    .into_iter()
+                    .map(|(slot, checksum, marked, cheats)| SavedCheats {
+                        slot,
+                        checksum,
+                        marked,
+                        cheats: cheats.into(),
+                    })
+                    .collect();
+                Self { version: SIDECAR_VERSION, saves }
+            }
             SIDECAR_VERSION => {
                 let (sidecar, _): (Self, usize) =
                     bincode::serde::decode_from_slice(bytes, config()).map_err(not)?;
@@ -1079,7 +1176,7 @@ fn version_of(bytes: &[u8]) -> Result<u32, String> {
 }
 
 /// The encoding of [`Cheats::to_bytes`]: bincode, little-endian, varint integers, as the bag's.
-fn config() -> bincode::config::Configuration<
+pub(crate) fn config() -> bincode::config::Configuration<
     bincode::config::LittleEndian,
     bincode::config::Varint,
     bincode::config::Limit<{ 1024 * 1024 }>,
@@ -1478,5 +1575,81 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(other, config()).unwrap();
         assert!(Cheats::from_bytes(&bytes).unwrap_err().contains("character"));
         assert!(Cheats::from_bytes(&[0xFF]).is_err());
+    }
+
+    /// The choices of a version 3 file: everything of version 4 but the chapters' unlock.
+    fn version_3_choices() -> CheatsV3 {
+        CheatsV3 {
+            damage: 2,
+            defence: 1,
+            exp: 1,
+            power: 1,
+            enemies: 1,
+            encounters: 2,
+            random_battles_off: false,
+            z_mode: ZMode::Off,
+            z_target: ZTarget::Party,
+            zeni: true,
+            endless: false,
+            gain: 2,
+            spawned: true,
+        }
+    }
+
+    #[test]
+    fn the_unlock_chapters_row_is_a_switch_of_the_story_group_that_the_block_does_not_hold() {
+        assert_eq!(Row::UnlockChapters.label(), "Unlock chapters");
+        assert_eq!(Row::UnlockChapters.group(), "Story");
+        assert_eq!(Row::UnlockChapters.choices(), 2);
+        let mut cheats = Cheats::neutral();
+        assert_eq!(Row::UnlockChapters.index(&cheats), 0, "Off by default");
+        Row::UnlockChapters.step(&mut cheats, 1);
+        assert!(cheats.chapters());
+        assert_eq!(Row::UnlockChapters.index(&cheats), 1);
+        assert_eq!(Row::UnlockChapters.choice_text(1, &[]), "On");
+        assert!(!cheats.is_neutral(), "a cheat: the save is marked");
+        assert_eq!(cheats.on_count(), 1);
+        assert_eq!(cheats.lines(&[]), vec![("Chapters", "unlocked".to_owned())]);
+        assert_eq!(
+            cheats.to_block(),
+            Cheats::neutral().to_block(),
+            "the cheat block is not changed"
+        );
+        assert!(Cheats::from_bytes(&cheats.to_bytes()).unwrap().chapters());
+        Row::UnlockChapters.step(&mut cheats, 1);
+        assert!(!cheats.chapters(), "Right from On wraps to Off");
+    }
+
+    #[test]
+    fn a_version_3_cheats_file_reads_without_the_chapters_and_is_written_as_version_4() {
+        let bytes = bincode::serde::encode_to_vec((3_u32, version_3_choices()), config()).unwrap();
+        let read = Cheats::from_bytes(&bytes).unwrap();
+        assert_eq!(read.multiplier(Setting::Damage), times(2));
+        assert!(read.zeni() && read.spawned() && !read.chapters());
+        assert_eq!(read.gain(), times(3));
+        assert_eq!(version_of(&read.to_bytes()), Ok(VERSION), "written as the current version");
+        assert_eq!(Cheats::from_bytes(&read.to_bytes()), Ok(read));
+    }
+
+    #[test]
+    fn a_version_3_sidecar_reads_its_saves_without_the_chapters_and_is_written_as_version_4() {
+        let saves = vec![(0_u8, 0xABCD_u16, true, version_3_choices())];
+        let bytes = bincode::serde::encode_to_vec((3_u32, saves), config()).unwrap();
+        let sidecar = CheatSidecar::from_bytes(&bytes).unwrap();
+        assert_eq!(sidecar.version, SIDECAR_VERSION);
+        let saved = sidecar.entry_for(0, 0xABCD).expect("the save's entry");
+        assert!(saved.marked && saved.cheats.spawned() && !saved.cheats.chapters());
+        assert_eq!(CheatSidecar::from_bytes(&sidecar.to_bytes()), Ok(sidecar));
+    }
+
+    #[test]
+    fn a_save_with_the_chapters_unlocked_keeps_the_choice_and_carries_the_badge() {
+        let mut cheats = Cheats::neutral();
+        cheats.set_chapters(true);
+        let mut sidecar = CheatSidecar::empty();
+        sidecar.store(2, 0x77, cheats);
+        assert!(sidecar.marked(2, 0x77), "the cheat marks the save");
+        let back = CheatSidecar::from_bytes(&sidecar.to_bytes()).unwrap();
+        assert!(back.entry_for(2, 0x77).is_some_and(|saved| saved.cheats.chapters()));
     }
 }

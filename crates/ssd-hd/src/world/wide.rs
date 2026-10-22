@@ -31,7 +31,7 @@ use super::check::check_tiles;
 use super::map::{FieldState, GAME_MODE, Rom, is_field_mode};
 use super::objects::{ObjectPart, Part, drop_anchors};
 use crate::art::poses::{ExtraSprite, View};
-use crate::art::{ArtPixel, ArtState, Lookup};
+use crate::art::{ArtPixel, ArtState, Conditions, Lookup};
 use crate::bgart::Probe;
 use crate::enhanced::picture;
 use crate::font::{Font, TextCapture};
@@ -42,6 +42,7 @@ use rayon::prelude::*;
 use ssd_catalogue::engine::OnScreen;
 use ssd_oracle::{CgramWrite, Color, FrameLog, LineEntry, LineRegs, OamWrite, VramWrite};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The widest view: two chunks of 256 pixels.
 pub const MAX_WIDTH: usize = 2 * WIDTH;
@@ -340,6 +341,30 @@ pub struct WideHd {
     pub stats: WideStats,
 }
 
+/// The serial of the next picture made: a counter of the process, so two pictures with one serial are one picture.
+#[must_use]
+pub fn next_serial() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// An Enhanced picture of the wide view, shared with its caller. The serial names the picture: two pictures
+/// with one serial are the same pixels, so a caller that shows the picture its frame shows already (the
+/// serial it has) keeps its texture, and the picture is never copied (see [`WideRun::note_hd_shared`]).
+#[derive(Debug, Clone)]
+pub struct SharedHd {
+    pub serial: u64,
+    pub picture: Arc<WideHd>,
+}
+
+impl SharedHd {
+    /// `picture`, under a serial of its own.
+    #[must_use]
+    pub fn new(picture: WideHd) -> Self {
+        Self { serial: next_serial(), picture: Arc::new(picture) }
+    }
+}
+
 impl Default for WideRenderer {
     fn default() -> Self {
         Self::new()
@@ -410,6 +435,21 @@ impl WideRenderer {
     pub fn set_art_measure(&mut self, on: bool) {
         if let Some(art) = self.art.as_mut() {
             art.measure = on;
+        }
+    }
+
+    /// Keeps the layers' art with its colour transfer between frames (`on`, the default), or applies each transfer to
+    /// each colour as it is drawn (off: the reference the `bench-hd --check` compares with). The pictures are the same.
+    pub fn set_transfer_cache(&mut self, on: bool) {
+        if let Some(art) = self.art.as_mut() {
+            art.set_transfer_cache(on);
+        }
+    }
+
+    /// The conditions of the frame the next picture with art is drawn from (see [`crate::Renderer::set_conditions`]).
+    pub fn set_conditions(&mut self, conditions: Conditions) {
+        if let Some(art) = self.art.as_mut() {
+            art.conditions = conditions;
         }
     }
 
@@ -1151,13 +1191,80 @@ pub struct WideRun {
     /// comes back with it.
     drawing: Option<std::thread::JoinHandle<(WideRenderer, Option<WideHd>)>>,
     /// The main loop's state and the field variables at the end of the last frame noted.
-    ended: Option<(u8, Option<FieldState>)>,
+    ended: Option<Started>,
     /// What the last frame skipped ([`WideRun::skip`]) started from, until it is drawn after all
     /// ([`WideRun::redraw`]) or another frame is noted.
-    skipped: Option<(u8, Option<FieldState>)>,
+    skipped: Option<Started>,
     /// With a translation ([`WideRun::set_overlay`]): the page the message engine named at the end of the last
     /// frame noted, and the one the frame being drawn started from.
     text: Option<TextRun>,
+    /// The last picture [`WideRun::note_hd_shared`] drew, with the inputs it was drawn from.
+    shared: Option<Drawn>,
+}
+
+/// What a frame started from, as the work RAM says it: the main loop's state, the field variables and the pose variants'
+/// conditions.
+type Started = (u8, Option<FieldState>, Conditions);
+
+/// What a picture of [`WideRun::note_hd_shared`] was drawn from: the frame's start, the text page handed to the
+/// renderer, the HD options and the render log. Equal inputs draw the same picture.
+struct Inputs {
+    started: Started,
+    text: Option<OnScreen>,
+    hd: HdOptions,
+    log: FrameLog,
+}
+
+impl Inputs {
+    fn is(
+        &self,
+        started: &Started,
+        text: Option<&OnScreen>,
+        hd: HdOptions,
+        log: &FrameLog,
+    ) -> bool {
+        self.hd == hd
+            && self.started == *started
+            && self.text.as_ref() == text
+            && same_log(&self.log, log)
+    }
+}
+
+/// The last picture [`WideRun::note_hd_shared`] drew, and what it was drawn from.
+struct Drawn {
+    inputs: Inputs,
+    shared: SharedHd,
+}
+
+/// Whether two render logs hold the same frame (`FrameLog` has no `PartialEq`). The pattern names every field, so a
+/// field the log gains is an error here until it is compared as well.
+fn same_log(a: &FrameLog, b: &FrameLog) -> bool {
+    let FrameLog {
+        complete,
+        height,
+        h_hi_res,
+        v_hi_res,
+        entries,
+        cgram_start,
+        cgram_writes,
+        vram,
+        vram_writes,
+        oam_low,
+        oam_high,
+        oam_writes,
+    } = a;
+    *complete == b.complete
+        && *height == b.height
+        && *h_hi_res == b.h_hi_res
+        && *v_hi_res == b.v_hi_res
+        && *entries == b.entries
+        && *cgram_start == b.cgram_start
+        && *cgram_writes == b.cgram_writes
+        && *vram == b.vram
+        && *vram_writes == b.vram_writes
+        && *oam_low == b.oam_low
+        && *oam_high == b.oam_high
+        && *oam_writes == b.oam_writes
 }
 
 /// The pages the message engine named, for the translation: at the end of the last frame noted, and at the start
@@ -1179,6 +1286,7 @@ impl WideRun {
             ended: None,
             skipped: None,
             text: None,
+            shared: None,
         }
     }
 
@@ -1186,6 +1294,7 @@ impl WideRun {
     /// the original's text); see [`crate::translate`].
     pub fn set_overlay(&mut self, overlay: Option<Arc<Overlay>>) {
         self.text = overlay.is_some().then(TextRun::default);
+        self.shared = None;
         self.renderer().set_overlay(overlay);
     }
 
@@ -1221,7 +1330,7 @@ impl WideRun {
     /// and the frame was logged from its start. Returns the frame's 16:9 view ([`WIDTH_16_9`]
     /// wide), or `None` when there is no log or the frame is one the renderer refuses.
     pub fn note(&mut self, wram: &[u8], log: Option<&FrameLog>) -> Option<WideFrame> {
-        let (game_mode, field) = self.advance(wram);
+        let (game_mode, field, _) = self.advance(wram);
         self.skipped = None;
         let log = log?;
         let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
@@ -1237,13 +1346,63 @@ impl WideRun {
         log: Option<&FrameLog>,
         hd: HdOptions,
     ) -> Option<WideHd> {
-        let (game_mode, field) = self.advance(wram);
+        let (game_mode, field, conditions) = self.advance(wram);
         self.skipped = None;
         let log = log?;
         let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
         let rom = Arc::clone(&self.rom);
         self.hand_text();
-        self.renderer().render_hd(Rom(&rom), game_mode, field.as_ref(), log, options, hd).ok()
+        let renderer = self.renderer();
+        renderer.set_conditions(conditions);
+        renderer.render_hd(Rom(&rom), game_mode, field.as_ref(), log, options, hd).ok()
+    }
+
+    /// [`WideRun::note_hd`] that shares its picture (see [`SharedHd`]). When the frame's inputs are those the picture
+    /// drawn last came from (its start state, text page, HD options and render log), that picture comes back with
+    /// its serial and nothing is drawn; otherwise the frame is drawn. The pictures are [`WideRun::note_hd`]'s.
+    pub fn note_hd_shared(
+        &mut self,
+        wram: &[u8],
+        log: Option<&FrameLog>,
+        hd: HdOptions,
+    ) -> Option<SharedHd> {
+        let started = self.advance(wram);
+        self.skipped = None;
+        self.shared_picture(started, log?, hd)
+    }
+
+    /// [`WideRun::redraw_hd`] that shares its picture (see [`WideRun::note_hd_shared`]).
+    pub fn redraw_hd_shared(&mut self, log: Option<&FrameLog>, hd: HdOptions) -> Option<SharedHd> {
+        let started = self.skipped.take()?;
+        self.shared_picture(started, log?, hd)
+    }
+
+    /// The picture of a frame that started as `started` with render log `log`: the picture drawn last when its
+    /// inputs are the same, else a new one. A frame the renderer refuses is not kept.
+    fn shared_picture(
+        &mut self,
+        started: Started,
+        log: &FrameLog,
+        hd: HdOptions,
+    ) -> Option<SharedHd> {
+        let text = self.text.as_ref().and_then(|text| text.started.clone());
+        if let Some(drawn) = &self.shared
+            && drawn.inputs.is(&started, text.as_ref(), hd, log)
+        {
+            return Some(drawn.shared.clone());
+        }
+        let (game_mode, field, conditions) = started.clone();
+        let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
+        let rom = Arc::clone(&self.rom);
+        self.hand_text();
+        let renderer = self.renderer();
+        renderer.set_conditions(conditions);
+        let picture =
+            renderer.render_hd(Rom(&rom), game_mode, field.as_ref(), log, options, hd).ok()?;
+        let shared = SharedHd { serial: next_serial(), picture: Arc::new(picture) };
+        let inputs = Inputs { started, text, hd, log: log.clone() };
+        self.shared = Some(Drawn { inputs, shared: shared.clone() });
+        Some(shared)
     }
 
     /// A frame ran and ended with the work RAM `wram`, and its picture is not wanted (a frame the
@@ -1258,7 +1417,7 @@ impl WideRun {
     /// what [`WideRun::note`] would have returned for it. `None` when no frame was skipped since
     /// the last one noted, or there is no log or the frame is one the renderer refuses.
     pub fn redraw(&mut self, log: Option<&FrameLog>) -> Option<WideFrame> {
-        let (game_mode, field) = self.skipped.take()?;
+        let (game_mode, field, _) = self.skipped.take()?;
         let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
         let rom = Arc::clone(&self.rom);
         self.renderer().render_view(Rom(&rom), game_mode, field.as_ref(), log?, options).ok()
@@ -1266,11 +1425,13 @@ impl WideRun {
 
     /// [`WideRun::redraw`] as the Enhanced picture ([`WideRun::note_hd`]).
     pub fn redraw_hd(&mut self, log: Option<&FrameLog>, hd: HdOptions) -> Option<WideHd> {
-        let (game_mode, field) = self.skipped.take()?;
+        let (game_mode, field, conditions) = self.skipped.take()?;
         let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
         let rom = Arc::clone(&self.rom);
         self.hand_text();
-        self.renderer().render_hd(Rom(&rom), game_mode, field.as_ref(), log?, options, hd).ok()
+        let renderer = self.renderer();
+        renderer.set_conditions(conditions);
+        renderer.render_hd(Rom(&rom), game_mode, field.as_ref(), log?, options, hd).ok()
     }
 
     /// [`WideRun::redraw_hd`] drawn in the background, for a run whose pictures are shown a window
@@ -1294,17 +1455,18 @@ impl WideRun {
             return None;
         }
         let previous = self.finish_drawing();
-        let started = self
-            .skipped
-            .take()
-            .zip(log)
-            .map(|((game_mode, field), log)| (game_mode, field, log.clone()));
-        let Some((game_mode, field, log)) = started else { return previous.flatten() };
+        let started = self.skipped.take().zip(log).map(|((game_mode, field, conditions), log)| {
+            (game_mode, field, conditions, log.clone())
+        });
+        let Some((game_mode, field, conditions, log)) = started else {
+            return previous.flatten();
+        };
         let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
         let rom = Arc::clone(&self.rom);
         self.hand_text();
         let mut renderer =
             self.renderer.take().expect("the renderer is back once the drawing is done");
+        renderer.set_conditions(conditions);
         let handle = std::thread::Builder::new()
             .name("hd-draw".to_owned())
             .spawn(move || {
@@ -1320,21 +1482,32 @@ impl WideRun {
 
     /// The art the Enhanced pictures draw (`None`: none).
     pub fn set_art(&mut self, pack: Option<Arc<Pack>>) {
+        self.shared = None;
         self.renderer().set_art(pack);
     }
 
     /// Makes the Enhanced pictures of a scale of 2 or more draw the game's UI text from `font`.
     pub fn set_font(&mut self, font: Option<Arc<Font>>) {
+        self.shared = None;
         self.renderer().set_font(font);
     }
 
     /// Measures the colours the art draws against the original's ([`crate::ArtStats::drawn`]).
     pub fn set_art_measure(&mut self, on: bool) {
+        self.shared = None;
         self.renderer().set_art_measure(on);
+    }
+
+    /// Keeps the layers' art with its colour transfer between frames, or (off) applies each transfer as it draws
+    /// ([`WideRenderer::set_transfer_cache`]).
+    pub fn set_transfer_cache(&mut self, on: bool) {
+        self.shared = None;
+        self.renderer().set_transfer_cache(on);
     }
 
     /// Draws the art of the backgrounds alone ([`WideRenderer::set_art_backgrounds_only`]).
     pub fn set_art_backgrounds_only(&mut self, on: bool) {
+        self.shared = None;
         self.renderer().set_art_backgrounds_only(on);
     }
 
@@ -1347,12 +1520,14 @@ impl WideRun {
 
     /// Counts the pixels of the pictures instead of drawing the art ([`WideRenderer::set_tally`]).
     pub fn set_tally(&mut self, on: bool) {
+        self.shared = None;
         self.renderer().set_tally(on);
     }
 
     /// Draws the frames of a field state as the field whatever BG2 holds
     /// ([`WideRenderer::set_trust_field`]).
     pub fn set_trust_field(&mut self, trust: bool) {
+        self.shared = None;
         self.renderer().set_trust_field(trust);
     }
 
@@ -1381,15 +1556,18 @@ impl WideRun {
     }
 
     /// Notes the work RAM at the end of a frame: the state the frame just run started from.
-    fn advance(&mut self, wram: &[u8]) -> (u8, Option<FieldState>) {
+    fn advance(&mut self, wram: &[u8]) -> Started {
         if let Some(text) = self.text.as_mut() {
             let hint = text.ended.as_ref().map(|screen| screen.page);
             let now = ssd_catalogue::engine::on_screen(&self.rom, wram, hint);
             text.started = std::mem::replace(&mut text.ended, now);
         }
         let rom = Rom(&self.rom);
-        let current =
-            (wram[GAME_MODE], FieldState::from_wram(wram).map(|state| state.in_room(rom)));
+        let current = (
+            wram[GAME_MODE],
+            FieldState::from_wram(wram).map(|state| state.in_room(rom)),
+            Conditions::of_work_ram(wram),
+        );
         self.ended.replace(current.clone()).unwrap_or(current)
     }
 }
@@ -2203,6 +2381,7 @@ mod tests {
             },
             bg: crate::bgart::Index::default(),
             mode7: crate::mode7art::Index::default(),
+            variants: Vec::new(),
         })
     }
 
@@ -2231,6 +2410,7 @@ mod tests {
             maps: crate::mapart::Index::default(),
             bg: crate::bgart::Index::default(),
             mode7: crate::mode7art::Index::default(),
+            variants: Vec::new(),
         })
     }
 
@@ -2890,5 +3070,36 @@ mod tests {
         // Only the lines of the rows asked for count
         log.entries = (1..=224_u16).map(|line| entry(line, 0, true)).collect();
         assert_eq!(segment_starts(&log, Some((10, 20)), 224), [0]);
+    }
+
+    #[test]
+    fn two_logs_are_the_same_frame_only_when_every_part_of_them_is() {
+        let log = FrameLog {
+            complete: true,
+            height: 224,
+            h_hi_res: false,
+            v_hi_res: false,
+            entries: Vec::new(),
+            cgram_start: vec![0; 256],
+            cgram_writes: Vec::new(),
+            vram: vec![0; 0x8000],
+            vram_writes: Vec::new(),
+            oam_low: vec![0; 512],
+            oam_high: vec![0; 32],
+            oam_writes: Vec::new(),
+        };
+        assert!(same_log(&log, &log.clone()));
+        let mut other = log.clone();
+        other.vram[0x1234] = 1;
+        assert!(!same_log(&log, &other), "VRAM");
+        let mut other = log.clone();
+        other.oam_high[3] = 0x80;
+        assert!(!same_log(&log, &other), "OAM");
+        let mut other = log.clone();
+        other.cgram_start[7] = 0x1F;
+        assert!(!same_log(&log, &other), "CGRAM");
+        let mut other = log.clone();
+        other.complete = false;
+        assert!(!same_log(&log, &other), "complete");
     }
 }

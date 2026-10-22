@@ -117,47 +117,58 @@ fn reference_of(image: &crate::bgart::BgImage, pix: crate::bgart::BgPix) -> Opti
     }
 }
 
+/// Whether the pixel is drawn from the art of the background layers: a layer's pixel, the backdrop, or an object
+/// that `hidden` names.
+fn drawable(pixel: &ArtPixel, hidden: u128) -> bool {
+    use crate::bgart::Kind;
+    match pixel.bg.kind {
+        Kind::Hidden | Kind::Under => false,
+        Kind::Layer => true,
+        Kind::Object => hidden >> (pixel.oam & 127) & 1 != 0,
+    }
+}
+
+/// The pairs of slot `slot` of the frame, from the art `image` of that slot: the colour the layer's pixel had where
+/// the art was made and the colour it has now, of the pixels drawn from the art (see [`crate::transfer`]).
+pub(crate) fn pairs_of(
+    image: &crate::bgart::BgImage,
+    slot: usize,
+    pixels: &[ArtPixel],
+    hidden: u128,
+) -> crate::transfer::Pairs {
+    use crate::bgart::NO_COLOUR;
+    let mut pairs = crate::transfer::Pairs::default();
+    for pixel in pixels.iter().filter(|pixel| drawable(pixel, hidden)) {
+        let pix = pixel.bg.pix[slot];
+        if !pix.is_set() || pix.colour == NO_COLOUR {
+            continue;
+        }
+        if let Some(reference) = reference_of(image, pix) {
+            pairs.add(reference, expand(pix.colour));
+        }
+    }
+    pairs
+}
+
 /// Draws the art of the background layers: each 1x pixel the original showed a layer (or the
 /// backdrop, or an object that is `hidden`) of is replaced by the block of the art it covers, in
 /// the colours the game's layer has now, with the colour math and the brightness of the pixel.
-/// `images[j]` is the art of the pixel's slot `j` (far to near); a layer that is not `fill`ed is
-/// drawn by its alpha. Returns the pixels drawn (a pixel counts once, and only when it is one of a battle background's).
+/// `images[j]` is the art of the pixel's slot `j` (far to near); `colourings[j]` says how that art's colours
+/// are transferred as it is drawn (see [`crate::transfer::Colouring`]). A layer that is not `fill`ed is drawn by its
+/// alpha. Returns the pixels drawn (a pixel counts once, and only when it is one of a battle background's).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_backgrounds(
     rgba: &mut [u8],
     scale: usize,
     frame_width: usize,
     pixels: &[ArtPixel],
     images: &[Option<Arc<crate::bgart::BgImage>>],
+    colourings: &[crate::transfer::Colouring],
     fills: &[bool],
     hidden: u128,
 ) -> u64 {
-    use crate::bgart::{Kind, NO_COLOUR};
-    let drawable_of = |pixel: &ArtPixel| match pixel.bg.kind {
-        Kind::Hidden | Kind::Under => false,
-        Kind::Layer => true,
-        Kind::Object => hidden >> (pixel.oam & 127) & 1 != 0,
-    };
-    // What each slot's art colours become in the colours the frame shows: one smooth transfer of
-    // the art's colour per layer, from the pairs (the colour the layer's pixel had where the art
-    // was made, the colour it has now) of the pixels drawn
-    let transfers: Vec<Option<crate::transfer::Transfer>> = images
-        .iter()
-        .enumerate()
-        .map(|(j, image)| {
-            let image = image.as_ref()?;
-            let mut pairs = crate::transfer::Pairs::default();
-            for pixel in pixels.iter().filter(|pixel| drawable_of(pixel)) {
-                let pix = pixel.bg.pix[j];
-                if !pix.is_set() || pix.colour == NO_COLOUR {
-                    continue;
-                }
-                if let Some(reference) = reference_of(image, pix) {
-                    pairs.add(reference, expand(pix.colour));
-                }
-            }
-            Some(pairs.transfer())
-        })
-        .collect();
+    use crate::transfer::Colouring;
+    let drawable_of = |pixel: &ArtPixel| drawable(pixel, hidden);
     let row_bytes = frame_width * scale * 4;
     rgba.par_chunks_mut(row_bytes * scale)
         .enumerate()
@@ -189,8 +200,12 @@ pub(crate) fn draw_backgrounds(
                                 continue;
                             }
                             let mut color = [source[0], source[1], source[2]];
-                            if let Some(transfer) = &transfers[j] {
-                                color = transfer.apply(color);
+                            match &colourings[j] {
+                                Colouring::Same => {}
+                                Colouring::Each(transfer) => color = transfer.apply(color),
+                                Colouring::Numbered { colours, transferred } => {
+                                    color = transferred[usize::from(colours.number[at / 4])];
+                                }
                             }
                             let color = shade(pix.plan, pixel.brightness, color);
                             let target = (sy * frame_width * scale + x * scale + sx) * 4;
@@ -548,6 +563,51 @@ pub(crate) fn draw_objects(
         shown.push(Drawn { visible, ..sums });
     }
     shown
+}
+
+/// Draws the picture of a pose variant over `rgba`: `image` is the variant's picture at the picture's `scale`, its top left at
+/// `origin` (frame coordinates, the margin included). Its opaque pixels are drawn in their own colours, dimmed only by the
+/// screen's brightness: they are not the palette's (`recolour`) nor the colour math's. A pixel that shows a sprite of another
+/// object is left as it is (that object is in front); the others, the pose's own sprites included, are drawn over the
+/// picture, so the variant's margin shows past the sprites it grows from.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_variant(
+    rgba: &mut [u8],
+    scale: usize,
+    frame: &Frame,
+    pixels: &[ArtPixel],
+    sprites: u128,
+    image: &Image,
+    origin: (i32, i32),
+    clip: (i32, i32, i32, i32),
+) {
+    let width = frame.width * scale;
+    let rows = rgba.len() / (width * 4);
+    let plain = Plan { force_black: false, math: None };
+    for py in 0..image.height {
+        let y = origin.1 * scale as i32 + py as i32;
+        if y < 0 || y as usize >= rows {
+            continue;
+        }
+        for px in 0..image.width {
+            let source = &image.rgba[(py * image.width + px) * 4..][..4];
+            let x = origin.0 * scale as i32 + px as i32;
+            if source[3] == 0 || x < 0 || x as usize >= width {
+                continue;
+            }
+            let Some((pixel, _)) =
+                at_frame(frame, pixels, clip, x / scale as i32, y / scale as i32)
+            else {
+                continue;
+            };
+            if pixel.oam != NO_OBJECT && sprites >> pixel.oam & 1 == 0 {
+                continue;
+            }
+            let colour = shade(plain, pixel.brightness, [source[0], source[1], source[2]]);
+            let at = (y as usize * width + x as usize) * 4;
+            blend(&mut rgba[at..at + 4], colour, source[3]);
+        }
+    }
 }
 
 /// The colour of a pixel of luma art: the original's colour there, lit by the art's luminance.

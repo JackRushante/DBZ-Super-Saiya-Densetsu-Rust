@@ -17,6 +17,7 @@ ssd-recomp = { workspace = true }   # recompile: the 65816 to Rust generator
 ssd-recomp-gen = { workspace = true, optional = true }   # recomp-cover, fuzz-recomp: the generated code
 ssd-rom = { workspace = true }      # make-replays: the cached ROM's CRC32
 ssd-save = { workspace = true }     # save-edit, replay-from-save: the battery save
+ssd-mod = { workspace = true }      # mod-build, mod-check: the data packs; --mods-identity: the empty set image
 serde = { workspace = true }      # hd-pack: the overrides file
 serde_json = { workspace = true } # hd-import: the art indexes
 png = { workspace = true }        # hd-import: reading the art

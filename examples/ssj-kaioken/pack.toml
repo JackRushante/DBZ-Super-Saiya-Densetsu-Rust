@@ -1,0 +1,232 @@
+# Super Saiyan Kaioken: the Kaioken for the Super Saiyan Goku (not canon; Enhanced mode only, off unless the pack is enabled).
+[pack]
+id = "ssj.kaioken"
+name = "Super Saiyan Kaioken"
+version = "1.0.0"
+game = "A8CF4F2A"
+description = "Goku can use the Kaioken while he is a Super Saiyan, up to x10. While both are on, each move costs 10 percent of his maximum HP."
+
+[[tables]]
+file = "tables.toml"
+
+[[feature]]
+name = "ssj_kaioken"
+max_factor = 10
+hp_cost_percent = 10
+
+# The Kaioken over the Super Saiyan Goku's poses (docs/mods/art.md): each picture is the pose redrawn with the aura, made
+# locally from the installed HD art (`xtask kaioken-art examples/ssj-kaioken`). Without the pictures the pack loads and the
+# poses are drawn as they are.
+
+[[pose_variant]]
+art = "battle-goku-ssj-000"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-000.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-001"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-001.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-002"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-002.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-003"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-003.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-004"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-004.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-005"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-005.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-006"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-006.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-007"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-007.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-008"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-008.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-009"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-009.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-010"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-010.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-011"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-011.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-012"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-012.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-013"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-013.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-014"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-014.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-015"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-015.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-016"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-016.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-017"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-017.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-018"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-018.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-019"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-019.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-020"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-020.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-021"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-021.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-022"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-022.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-023"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-023.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-024"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-024.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-025"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-025.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-ssj-026"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-026.png"
+margin = 24
+
+# Poses 000 to 007 of the Super Saiyan are drawn from the normal Goku's art recoloured gold (the same pose key): the same
+# variants are given for those objects too. The condition (the Kaioken on Super Saiyan Goku, unit $3B) keeps the normal Goku as he is.
+
+[[pose_variant]]
+art = "battle-goku-000"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-000.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-001"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-001.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-002"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-002.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-003"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-003.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-004"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-004.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-005"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-005.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-006"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-006.png"
+margin = 24
+
+[[pose_variant]]
+art = "battle-goku-007"
+when = "kaioken"
+file = "art/hd/variants/battle-goku-ssj-007.png"
+margin = 24

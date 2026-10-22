@@ -1,0 +1,18 @@
+# Free Progression: the story moves on what the party has done, not on its level, and the enemies follow the party's level (not canon; Enhanced mode only, off unless the
+# pack is enabled). The note docs/re/data/free-progression.md lists every place the story reads a level; docs/mods/features.md
+# says what each one becomes.
+[pack]
+id = "free.progression"
+name = "Free Progression"
+version = "0.2.0"
+game = "A8CF4F2A"
+description = "The story moves on events only: the forced fight with Raditz comes after the cave, random battles never stop on a level, the recruits wait for the Saiyans, Goku turns Super Saiyan in the last fight whatever his level, and he lands at the Ginyu squad's last fight. Every enemy, bosses included, follows the party's level (difficulty normal)."
+
+[[feature]]
+name = "free_progression"
+ginyu_arrival = 3
+
+# The enemies: examples/enemy-scaling is the same feature alone (enable one of the two packs, not both).
+[[feature]]
+name = "enemy_scaling"
+difficulty = "normal"

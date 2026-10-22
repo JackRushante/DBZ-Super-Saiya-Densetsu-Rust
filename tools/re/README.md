@@ -117,3 +117,11 @@ re-disassembles only those with a different mode.
 `python tools/re/scenes.py [--rom canonical.sfc] [scene ...]` lists the story scripts of the cached ROM (the
 82 "scenes" of `docs/re/data/scenes.md`), one command per line, with jump labels and the decoded flag, battle
 group, map and character of the commands that have one. The output is derived from the game: stdout only.
+
+## Reads of a level, BP or EXP
+
+`python tools/re/story_level_reads.py [--rom canonical.sfc] [--all]` lists the instructions of the cached ROM that read or write the
+level, the BP or the EXP of a character record (party, enemy slot, side record, roster image, BP snapshot; absolute, indexed, long and
+record-relative forms), grouped by routine, with the counts of `docs/re/data/free-progression.md`. A match is the bytes of an
+instruction, so a table that holds the same pair matches too: read each routine with `xtask disasm`. The output is derived from the
+game: stdout only.

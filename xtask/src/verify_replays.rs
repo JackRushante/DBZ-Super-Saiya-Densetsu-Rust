@@ -40,15 +40,20 @@ pub struct Args {
     /// Machine B runs with the battle cheats installed, at a neutral block: the replays must still be
     /// identical to the original (`--cheats-identity`).
     pub cheats_identity: bool,
+    /// Machine B runs on the zero-padded 2 MiB image of the empty pack set, with the redirectors
+    /// installed: the replays must still be identical to the original (`--mods-identity`).
+    pub mods_identity: bool,
 }
 
-/// Parses the arguments after `verify-replays`: `[--hooks rust|original] [--cheats-identity] [dir]`.
+/// Parses the arguments after `verify-replays`: `[--hooks rust|original] [--cheats-identity]
+/// [--mods-identity] [dir]`.
 ///
 /// # Errors
 ///
 /// An unknown option or mode, a missing mode, or more than one directory.
 pub fn parse_args(args: &[&str]) -> Result<Args, String> {
-    let mut parsed = Args { hooks: Hooks::Rust, dir: None, cheats_identity: false };
+    let mut parsed =
+        Args { hooks: Hooks::Rust, dir: None, cheats_identity: false, mods_identity: false };
     let mut args = args.iter();
     while let Some(&arg) = args.next() {
         match arg {
@@ -61,6 +66,7 @@ pub fn parse_args(args: &[&str]) -> Result<Args, String> {
                 };
             }
             "--cheats-identity" => parsed.cheats_identity = true,
+            "--mods-identity" => parsed.mods_identity = true,
             option if option.starts_with('-') => return Err(format!("unknown option `{option}`")),
             dir if parsed.dir.is_none() => parsed.dir = Some(PathBuf::from(dir)),
             dir => return Err(format!("one directory only (`{dir}` is a second one)")),
@@ -71,7 +77,9 @@ pub fn parse_args(args: &[&str]) -> Result<Args, String> {
 
 /// The lockstep setup for `hooks`: B's table built from `symbols` as the app builds it for its
 /// `--hooks` (`ssd_game::hook_table`), and the sync points of `symbols`. A warning (on stderr)
-/// names the Rust routines without `cycles`, which never run in Rust.
+/// names the Rust routines without `cycles`, which never run in Rust. With `cheats_identity`, B also
+/// has the cheat wrappers; with `mods`, B runs on that image (the empty pack set's, see
+/// `--mods-identity`) with the redirectors installed.
 ///
 /// # Errors
 ///
@@ -80,6 +88,7 @@ pub fn config(
     symbols: &Symbols,
     hooks: Hooks,
     cheats_identity: bool,
+    mods: Option<&ssd_mod::Image>,
 ) -> anyhow::Result<LockstepConfig> {
     let mut table = match hooks {
         Hooks::Rust => {
@@ -96,10 +105,17 @@ pub fn config(
         ssd_game::cheats::install(&mut cheat_table);
         table = Some(cheat_table);
     }
+    let b_packs = mods.map(|image| {
+        let mut mod_table = table.take().unwrap_or_default();
+        ssd_game::mods::install(&mut mod_table);
+        table = Some(mod_table);
+        (crate::shared::pack_tag(image), image.bytes.clone())
+    });
     Ok(LockstepConfig {
         table,
         sync_keys: symbols.sync_points().iter().map(|point| point.address).collect(),
         budget_frames: DEFAULT_BUDGET_FRAMES,
+        b_packs,
     })
 }
 
@@ -328,14 +344,20 @@ mod tests {
     fn the_arguments_default_to_rust_and_the_work_directory() {
         assert_eq!(
             parse_args(&[]),
-            Ok(Args { hooks: Hooks::Rust, dir: None, cheats_identity: false })
+            Ok(Args {
+                hooks: Hooks::Rust,
+                dir: None,
+                cheats_identity: false,
+                mods_identity: false
+            })
         );
         assert_eq!(
             parse_args(&["--hooks", "original", "some/dir"]),
             Ok(Args {
                 hooks: Hooks::Original,
                 dir: Some(PathBuf::from("some/dir")),
-                cheats_identity: false
+                cheats_identity: false,
+                mods_identity: false,
             })
         );
         assert_eq!(
@@ -343,8 +365,14 @@ mod tests {
             Ok(Args {
                 hooks: Hooks::Rust,
                 dir: Some(PathBuf::from("other")),
-                cheats_identity: false
+                cheats_identity: false,
+                mods_identity: false,
             })
+        );
+        assert_eq!(
+            parse_args(&["--cheats-identity", "--mods-identity"]),
+            Ok(Args { hooks: Hooks::Rust, dir: None, cheats_identity: true, mods_identity: true }),
+            "the two identities combine"
         );
         for bad in [&["--hooks"][..], &["--hooks", "verify"], &["--fast"], &["a", "b"]] {
             assert!(parse_args(bad).is_err(), "{bad:?}");
@@ -514,7 +542,7 @@ mod tests {
     fn the_rust_config_hooks_every_routine_of_the_repository_and_its_sync_points() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../re/symbols.toml");
         let symbols = Symbols::load(path).unwrap();
-        let rust = config(&symbols, Hooks::Rust, false).unwrap();
+        let rust = config(&symbols, Hooks::Rust, false, None).unwrap();
         let table = rust.table.unwrap();
         assert_eq!(table.len(), symbols.routines().len());
         assert!(table.entries().all(|entry| entry.mode == HookMode::Rust));
@@ -522,8 +550,23 @@ mod tests {
         assert_ne!(sync, Vec::<u32>::new());
         assert_eq!(rust.sync_keys, sync);
         assert_eq!(rust.budget_frames, DEFAULT_BUDGET_FRAMES);
-        let original = config(&symbols, Hooks::Original, false).unwrap();
+        let original = config(&symbols, Hooks::Original, false, None).unwrap();
         assert!(original.table.is_none());
         assert_eq!(original.sync_keys, sync);
+        assert!(original.b_packs.is_none(), "without --mods-identity B runs on the ROM");
+    }
+
+    #[test]
+    fn the_mods_identity_puts_the_redirectors_on_b_and_its_image_there() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../re/symbols.toml");
+        let symbols = Symbols::load(path).unwrap();
+        let rom = vec![0_u8; ssd_mod::ROM_LEN];
+        let image = ssd_mod::build(&rom, &[]).unwrap();
+        let config = config(&symbols, Hooks::Rust, false, Some(&image)).unwrap();
+        let table = config.table.unwrap();
+        assert!(ssd_game::mods::installed_in(Some(&table)), "the redirectors are on B");
+        let (tag, bytes) = config.b_packs.unwrap();
+        assert_eq!(tag, crate::shared::pack_tag(&image));
+        assert_eq!(bytes.len(), 0x20_0000, "the zero-padded 2 MiB image");
     }
 }

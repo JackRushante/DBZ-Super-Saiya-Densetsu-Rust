@@ -534,6 +534,7 @@ fn a_rejected_replay_exits_with_code_6() {
         initial_sram: Some(vec![0; 16]),
         mode: 0,
         events: Vec::new(),
+        packs: None,
         inputs: Vec::new(),
     };
     replay.write_to(&small_sram, CORE_VERSION).unwrap();

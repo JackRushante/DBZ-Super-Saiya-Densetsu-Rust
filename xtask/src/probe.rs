@@ -957,6 +957,7 @@ pub fn verify(
             table: Some(table),
             sync_keys: symbols.sync_points().iter().map(|p| p.address).collect(),
             budget_frames: ssd_oracle::DEFAULT_BUDGET_FRAMES,
+            b_packs: None,
         };
         let lockstep = verify_replays::verify(rom, symbols, &config, Hooks::Rust, dir, out)?;
         code = match (code, lockstep) {

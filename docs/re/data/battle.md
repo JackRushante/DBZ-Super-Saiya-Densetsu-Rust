@@ -146,6 +146,33 @@ new count's formation.
   (bosses, the scripted fights) must keep their units. A random encounter picks its group at 02:D34A, which runs only on the
   normal-battle path (below), so a flag set there tells 01:F692 which battles may change.
 
+## Enemy scaling: what the battle code keeps absolute (found for the mod `enemy_scaling`)
+
+The hooks of `enemy_scaling` (`docs/mods/free-progression.md`) sit at the `RTL` of the record builder (`01:F7F1`) and at the `RTL`
+of the EXP award (`1D:8C66`). What the code around them showed, read in the listings and run on the replays named:
+
+- **The EXP award** (`1D:8C33`) takes the defeated slot from `battle_enemy_offset` (`$14C5`, divided by 32), the unit of that
+  slot from the byte table at `$7E:17C1` (one byte a slot), and adds the 24 bits at byte 11 of that unit's row (14 times the unit)
+  to `battle_exp_award`. `X` still holds the row's offset at the `RTL`.
+- **A fighter who is knocked out keeps bit 7 of his flags.** The KO routine (`05:A9AA`) clears bit 6 of the side record's flags
+  (`$C0` becomes `$80`) and the copy back puts them in the party record: `secret-ssj-frieza` shows `$0B20`, `$0B40` and
+  `$0B60` going from `$C0` to `$80` as Piccolo, Krillin and Vegeta fall. The end-of-battle EXP loop tests bit 6, so a fighter who is down is
+  paid nothing, while the party list (bit 7 or bit 6) is unchanged for the whole battle.
+- **Four enemies withdraw at a floor of HP** (`05:A4F5`, called from the hit step `05:A435` for a side-B target that is still alive):
+  Frieza's first, second and third forms (units 53, 54 and 55) at 300, 20 and 50, and Zarbon's first form (unit 30) at 30. When the
+  HP after the hit is at or below the floor it becomes the floor, the record's flags are cleared and the EXP award is called
+  (`05:A528`, as the KO routine does), which ends the fight with the enemy gone and its reward paid. A floor above the unit's
+  maximum HP is therefore harmless (the first hit that leaves the enemy alive ends the fight).
+- **The second form's fight** (group `$54`) is judged at its end by an absolute HP (`05:9802`): below 21 the story goes on
+  (game mode 0), otherwise the generic checks follow.
+- **The Ginyu duel** (group `$51`) keeps its enemy at 1 HP when a hit would kill him, until `$15F1` is 2 (`05:A48C`).
+- **The special attack's chance** (`05:BA8B`) is `10 + the attacker's level + its +0E byte - the card (a Z is 10) - the defender's
+  level`, capped at 24, against the random byte masked with `$1F` (`$0F` for two animations), so the levels of the two records
+  matter and a record's level is a number the battle reads. The same `+02` is read for the choice of an attack animation
+  (`05:AF9E`: `level - 1`, capped at 47, over 6, with the card value) and compared with 47 (48 for Gohan) in `05:D12A`.
+- **The game raises Vegeta to level 17 when it builds his record** (`00:8A46`): on a crafted save with Gohan, Krillin and Vegeta
+  at level 1, the scaling read the mean 6.33 (1, 1 and 17) at the first battle, as the HP it gave the first form of Frieza shows.
+
 ## Random encounters
 
 The map's per-frame code (00:976A, every frame) calls **02:D1F6**; the zone logic runs from 03:F163 every 64 frames

@@ -212,6 +212,8 @@ pub enum Opens {
     Mode,
     /// The HD pack install of the setup (Android): the game restarts into it.
     Pack,
+    /// The Data packs screen (M10): the installed packs, the set the game runs with, and the chapters.
+    Packs,
     /// The touch controls' places and sizes go back to the design (M9).
     ResetTouchLayout,
 }
@@ -716,7 +718,7 @@ mod tests {
 
     #[test]
     fn the_encounter_row_is_a_view_of_the_cheats() {
-        let row = gameplay::ROWS.last().unwrap();
+        let row = gameplay::ROWS.iter().find(|row| row.key == "gameplay.encounters").unwrap();
         let (mut values, mut cheats) = (Values::new(), Cheats::neutral());
         assert_eq!(row.index(&values, &cheats, 0), 3, "x1");
         assert_eq!(row.step(&mut values, &mut cheats, 0, 1), Effect::Cheats);

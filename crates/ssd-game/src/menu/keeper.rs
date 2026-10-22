@@ -116,6 +116,8 @@ impl Keeper {
                     .map(|mut bag| {
                         // The options of this run apply to the bag it saved.
                         bag.set_rules(self.rules);
+                        // A bag saved under older rules is brought up to today's (state objects stack).
+                        bag.coalesce();
                         bag
                     })
                     .unwrap_or_else(|| self.rebuild(&listed, labels))
@@ -559,6 +561,42 @@ mod tests {
         apply(&mut ram, &events);
         assert_eq!(keeper.bag().unwrap().stacks().len(), 1, "the Scouter has no slot");
         assert_eq!(read_list(&ram), [(2, 0)], "and the list does not show it");
+    }
+
+    /// Sets the state word of list entry `index` in work RAM.
+    fn set_extra(ram: &mut [u8], index: usize, extra: u16) {
+        let at = EXTRA as usize - 0x7E_0000 + 2 * index;
+        ram[at..at + 2].copy_from_slice(&extra.to_le_bytes());
+    }
+
+    #[test]
+    fn two_fresh_porunga_are_one_stack_and_a_used_wish_splits_it_in_the_list() {
+        let labels = Labels::default();
+        let mut ram = wram_with(&[15, 15], 0);
+        set_extra(&mut ram, 0, 0x0300);
+        set_extra(&mut ram, 1, 0x0300);
+        let mut keeper = Keeper::new(Rules::default());
+        let events = keeper.bind(&ram, &labels, None, &Sidecar::empty(), true);
+        apply(&mut ram, &events);
+        assert_eq!(keeper.bag().unwrap().stacks().len(), 1, "two fresh Porunga are one stack");
+        assert_eq!(keeper.bag().unwrap().units_of(15), 2);
+        assert_eq!(read_list(&ram), [(15, 0x0300)], "the list shows the stack as one entry");
+        // The original uses one wish: the entry's state word goes to two wishes left.
+        set_extra(&mut ram, 0, 0x0200);
+        let events = keeper.sync(&ram, &labels, None, &Sidecar::empty());
+        apply(&mut ram, &events);
+        let bag = keeper.bag().unwrap();
+        assert_eq!(bag.stacks().len(), 2, "one unit takes the new state, the rest keep the old");
+        assert_eq!(bag.units_of(15), 2);
+        assert_eq!(read_list(&ram), [(15, 0x0300), (15, 0x0200)], "the list shows both stacks");
+        let mut sidecar = Sidecar::empty();
+        sidecar.store(0, 7, bag);
+        let back = Sidecar::from_bytes(&sidecar.to_bytes()).unwrap();
+        assert_eq!(back.bag_for(0, 7), Some(bag), "the sidecar keeps both stacks");
+        assert!(
+            keeper.sync(&ram, &labels, None, &Sidecar::empty()).is_empty(),
+            "nothing changed since"
+        );
     }
 
     #[test]

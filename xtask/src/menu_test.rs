@@ -1032,6 +1032,7 @@ fn bag_harness(rom: &[u8], starts: &Starts, sidecar: &Sidecar) -> anyhow::Result
 fn enhanced_hooks(machine: &mut Machine) {
     let mut table = machine.hook_table().cloned().unwrap_or_else(ssd_oracle::HookTable::new);
     ssd_game::cheats::install(&mut table);
+    ssd_game::mods::install(&mut table);
     machine.set_hook_table(Some(table));
 }
 
@@ -1299,13 +1300,14 @@ fn bag_full(h: &mut Harness, r: &mut Report, _rom: &[u8]) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// The sidecar of a full bag: 60 stacks of the Porunga (each unit its own stack), keyed by the
-/// checksum of the crafted start (slot 1 with the first 21 objects).
+/// The sidecar of a full bag: 60 stacks of 60 different objects (one unit each), keyed by the checksum of the
+/// crafted start (slot 1 with the first 21 objects). Units of one object join its stack, and a state object (the
+/// Porunga, whose units stack by their state word) would not give 60 stacks, so each stack is a different object.
 fn full_sidecar(rom: &[u8], base: &[u8]) -> anyhow::Result<Sidecar> {
     let crafted = craft_save(rom, base, &(0..21).collect::<Vec<u8>>(), None)?;
     let mut bag = Bag::new(Rules::default());
-    for _ in 0..60 {
-        bag.add(15, 0, Class::of(15, false))
+    for object in 1..=60_u8 {
+        bag.add(object, 0, Class::of(object, false))
             .map_err(|_| anyhow::anyhow!("the bag is full too soon"))?;
     }
     let mut sidecar = Sidecar::empty();

@@ -114,7 +114,7 @@ impl DebugState {
             breakpoint.hits += 1;
         }
         let detail = match mode {
-            Some(HookMode::Rust) => {
+            Some(HookMode::Rust | HookMode::Patch) => {
                 "Next step runs it in Rust as one step (a Rust routine cannot stop half-way)."
             }
             Some(HookMode::Verify) => {

@@ -9,11 +9,11 @@ use crate::layout::{
     HELP_LINE, ITEM_PORTRAIT, ITEM_ROW, LARGE_TEXT, LINE, MARGIN, PADDING, PORTRAIT_FRAME,
     SMALL_TEXT, WIDTH, fit, palette, text_width,
 };
-use crate::nav::{Entry, MENU_ROWS, command_rows};
+use crate::nav::{Entry, MENU_ROWS, ModsAsk, command_rows};
 use crate::options::{Category, Kind};
 use crate::view::{
-    BagView, CheatsView, MenuView, OptionsView, Picture, Screen, Selected, Sheet, SpawnerView, Tab,
-    VideoAsk,
+    BagView, CheatsView, MenuView, ModsView, OptionsView, PackState, Picture, Screen, Selected,
+    Sheet, SpawnerView, Tab, VideoAsk,
 };
 
 /// The items shown on one page of the item list.
@@ -42,7 +42,7 @@ pub fn scene(view: &MenuView) -> DrawList {
         Screen::Command => command(view),
         Screen::Menu => menu_list(view),
         Screen::Items => items(view),
-        Screen::Cheats | Screen::Options => DrawList::new(),
+        Screen::Cheats | Screen::Options | Screen::Mods => DrawList::new(),
     }
 }
 
@@ -581,6 +581,7 @@ pub fn cheats_screen(view: &CheatsView) -> DrawList {
         &[
             &[Row::MaxZeni, Row::ZeniGained, Row::EndlessItems, Row::ItemSpawner],
             &[Row::RandomBattles, Row::HowOften, Row::Enemies, Row::EnemyPower],
+            &[Row::UnlockChapters],
         ],
     );
     next_card(&mut list, view, card);
@@ -731,6 +732,327 @@ fn spawner_screen(view: &SpawnerView) -> DrawList {
     let back = strip.right() - FRAME - 20.0;
     list.text(back, strip.middle_y(), "B  Back", SMALL_TEXT, palette::DARK_RED, Align::Right);
     list
+}
+
+/// The frame of the Data packs screen (the approved canvas, in the space of the screen): the list window on the left,
+/// the details window on the right, and the help strip along the foot.
+const MODS_EDGE: f32 = 30.0;
+const MODS_TOP: f32 = 30.0;
+const MODS_BOTTOM: f32 = 630.0;
+const MODS_GAP: f32 = 20.0;
+const MODS_LIST: f32 = 620.0;
+/// The height of a row of the list, and the top of the first one under the window's top.
+const MODS_ROW: f32 = 50.0;
+const MODS_ROWS_TOP: f32 = 62.0;
+/// The side of a pack's on and off box.
+const MODS_BOX: f32 = 22.0;
+/// The text of a pack's name and of a detail's title, and of the other lines of the details.
+const MODS_NAME_TEXT: f32 = 22.0;
+const MODS_LINE_TEXT: f32 = 18.0;
+/// The characters a line of the details holds (at the line's size, inside the details window).
+const MODS_DETAIL_CHARS: usize = 50;
+
+/// The Data packs screen: the packs with their boxes and versions, then the chapters of the packs that are on, on the left;
+/// the details of the line under the cursor and the notice on the right; the keys along the foot. A question (Apply, a
+/// chapter's start, Main game) is drawn over both, with the cursor on its choice.
+#[must_use]
+pub fn mods_screen(view: &ModsView) -> DrawList {
+    let mut list = DrawList::new();
+    backdrop(&mut list);
+    let left = Rect::new(MODS_EDGE, MODS_TOP, MODS_LIST, MODS_BOTTOM - MODS_TOP);
+    let right_x = left.right() + MODS_GAP;
+    let right = Rect::new(right_x, MODS_TOP, WIDTH - MODS_EDGE - right_x, MODS_BOTTOM - MODS_TOP);
+    mods_list(&mut list, view, left);
+    mods_details(&mut list, view, right);
+    let strip = Rect::new(MODS_EDGE, MODS_BOTTOM + 15.0, WIDTH - 2.0 * MODS_EDGE, 60.0);
+    list.push(Op::Window { rect: strip });
+    list.text(
+        strip.x + FRAME + 20.0,
+        strip.middle_y(),
+        "A on/off   Y + Up/Down move (order)   X Apply",
+        MODS_LINE_TEXT + 1.0,
+        palette::BLACK,
+        Align::Left,
+    );
+    list.text(
+        strip.right() - FRAME - 20.0,
+        strip.middle_y(),
+        "B Back",
+        SMALL_TEXT,
+        palette::DARK_RED,
+        Align::Right,
+    );
+    if let Some((ask, choice)) = view.ask {
+        mods_question(&mut list, ask, choice);
+    }
+    list
+}
+
+/// The list window: the packs (a box, the name, the version; a refused pack in red with a cross), then the chapters under
+/// their header, each a name, grey when it is locked; the cursor on the line under it; and the note and Apply at the foot.
+fn mods_list(list: &mut DrawList, view: &ModsView, window: Rect) {
+    list.push(Op::Window { rect: window });
+    let x = window.x + FRAME + 16.0;
+    list.text(
+        x + 10.0,
+        window.y + 36.0,
+        "-- Data packs --",
+        MODS_LINE_TEXT,
+        palette::DARK_RED,
+        Align::Left,
+    );
+    list.text(window.x + 390.0, window.y + 36.0, "Version", SMALL_TEXT, palette::GREY, Align::Left);
+    let mut line = 0;
+    for pack in &view.packs {
+        let middle = window.y + MODS_ROWS_TOP + MODS_ROW * line as f32 + 13.0;
+        mods_row_band(list, view, line, window, middle);
+        let refused = pack.state == PackState::Refused;
+        let box_rect = Rect::new(window.x + 50.0, middle - MODS_BOX / 2.0, MODS_BOX, MODS_BOX);
+        list.push(Op::Outline { rect: box_rect, width: LINE, color: palette::DARK_RED });
+        match pack.state {
+            PackState::On => {
+                list.fill(box_rect.grow(-5.0), palette::ORANGE);
+            }
+            PackState::Off => {}
+            PackState::Refused => {
+                let (a, b) = (box_rect.grow(-4.0), box_rect);
+                list.push(Op::Line {
+                    from: (a.x, a.y),
+                    to: (a.right(), a.bottom()),
+                    width: 3.0,
+                    color: palette::STORY,
+                });
+                list.push(Op::Line {
+                    from: (a.right(), a.y),
+                    to: (a.x, a.bottom()),
+                    width: 3.0,
+                    color: palette::STORY,
+                });
+                list.push(Op::Outline { rect: b, width: LINE, color: palette::STORY });
+            }
+        }
+        let colour = if refused { palette::STORY } else { palette::BLACK };
+        list.text(
+            window.x + 86.0,
+            middle,
+            &fit(&pack.name, MODS_NAME_TEXT, 290.0),
+            MODS_NAME_TEXT,
+            colour,
+            Align::Left,
+        );
+        list.text(
+            window.x + 390.0,
+            middle,
+            &pack.version,
+            MODS_NAME_TEXT,
+            palette::GREY,
+            Align::Left,
+        );
+        line += 1;
+    }
+    let mut chapter_top = window.y + MODS_ROWS_TOP + MODS_ROW * line as f32;
+    if !view.chapters.is_empty() {
+        list.text(
+            x + 10.0,
+            chapter_top + 10.0,
+            "-- Chapters --",
+            MODS_LINE_TEXT,
+            palette::DARK_RED,
+            Align::Left,
+        );
+        chapter_top += 34.0;
+    }
+    for (at, chapter) in view.chapters.iter().enumerate() {
+        let index = view.packs.len() + at;
+        let middle = chapter_top + MODS_ROW * at as f32 + 13.0;
+        mods_row_band(list, view, index, window, middle);
+        let colour = if chapter.locked { palette::GREY } else { palette::BLACK };
+        list.text(
+            window.x + 50.0,
+            middle,
+            &fit(&chapter.name, MODS_NAME_TEXT, 420.0),
+            MODS_NAME_TEXT,
+            colour,
+            Align::Left,
+        );
+        if chapter.locked {
+            list.text(
+                window.right() - 24.0,
+                middle,
+                "locked",
+                SMALL_TEXT,
+                palette::GREY,
+                Align::Right,
+            );
+        }
+    }
+    list.text(
+        window.x + 40.0,
+        window.bottom() - 100.0,
+        "Classic is never changed by packs.",
+        SMALL_TEXT,
+        palette::GREY,
+        Align::Left,
+    );
+    let apply = Rect::new(window.x + 40.0, window.bottom() - 72.0, 230.0, 28.0);
+    list.push(Op::Outline { rect: apply, width: LINE, color: palette::DARK_RED });
+    list.text(
+        apply.x + 115.0,
+        apply.middle_y(),
+        "Apply",
+        SMALL_TEXT,
+        palette::BLACK,
+        Align::Centre,
+    );
+}
+
+/// The band and the cursor of a list line (the pale one under the cursor).
+fn mods_row_band(list: &mut DrawList, view: &ModsView, index: usize, window: Rect, middle: f32) {
+    if view.cursor != index {
+        return;
+    }
+    list.fill(
+        Rect::new(window.x + 40.0, middle - 19.0, window.w - 70.0, 38.0),
+        Color::rgb(0xFF, 0xD9, 0xA8),
+    );
+    list.push(Op::Cursor { x: window.x + 14.0, y: middle - CURSOR_HEIGHT / 2.0 });
+}
+
+/// The details window: the pack under the cursor (its name, author, description, what it needs, its size, and why it is
+/// refused), or the chapter under it (its name, description and the Start button), and the notice at its foot.
+fn mods_details(list: &mut DrawList, view: &ModsView, window: Rect) {
+    list.push(Op::Window { rect: window });
+    let x = window.x + 40.0;
+    list.text(x, window.y + 36.0, "-- Details --", MODS_LINE_TEXT, palette::DARK_RED, Align::Left);
+    let mut lines: Vec<(String, f32, Color)> = Vec::new();
+    let mut button = None;
+    if let Some(pack) = view.packs.get(view.cursor) {
+        lines.push((
+            fit(&format!("{}  {}", pack.name, pack.version), MODS_NAME_TEXT, 500.0),
+            MODS_NAME_TEXT,
+            palette::BLACK,
+        ));
+        if !pack.author.is_empty() {
+            lines.push((format!("by {}", pack.author), MODS_LINE_TEXT, palette::GREY));
+        }
+        lines.push((String::new(), MODS_LINE_TEXT, palette::BLACK));
+        for line in wrap(&pack.description, MODS_DETAIL_CHARS) {
+            lines.push((line, MODS_LINE_TEXT, palette::BLACK));
+        }
+        lines.push((String::new(), MODS_LINE_TEXT, palette::BLACK));
+        lines.push((format!("Needs: {}", pack.needs), MODS_LINE_TEXT, palette::BLACK));
+        lines.push((
+            format!("Size: {} KB", pack.size.div_ceil(1024)),
+            MODS_LINE_TEXT,
+            palette::BLACK,
+        ));
+        if let Some(reason) = &pack.reason {
+            lines.push((String::new(), MODS_LINE_TEXT, palette::BLACK));
+            lines.push(("REFUSED:".to_owned(), MODS_LINE_TEXT, palette::STORY));
+            for line in wrap(reason, MODS_DETAIL_CHARS) {
+                lines.push((line, MODS_LINE_TEXT, palette::BLACK));
+            }
+            lines.push((String::new(), MODS_LINE_TEXT, palette::BLACK));
+            for line in wrap(
+                "It stays off. Remove it or ask its author for a new version.",
+                MODS_DETAIL_CHARS,
+            ) {
+                lines.push((line, MODS_LINE_TEXT, palette::BLACK));
+            }
+        }
+    } else if let Some(chapter) = view.chapters.get(view.cursor.saturating_sub(view.packs.len())) {
+        lines.push((fit(&chapter.name, MODS_NAME_TEXT, 500.0), MODS_NAME_TEXT, palette::BLACK));
+        lines.push((String::new(), MODS_LINE_TEXT, palette::BLACK));
+        for line in wrap(&chapter.description, MODS_DETAIL_CHARS) {
+            lines.push((line, MODS_LINE_TEXT, palette::BLACK));
+        }
+        if chapter.locked {
+            lines.push((String::new(), MODS_LINE_TEXT, palette::BLACK));
+            lines.push((
+                "Locked: the game must be finished first.".to_owned(),
+                MODS_LINE_TEXT,
+                palette::GREY,
+            ));
+        } else {
+            button = Some(if chapter.main { "Go" } else { "Start" });
+        }
+    }
+    let mut y = window.y + 80.0;
+    for (text, size, colour) in &lines {
+        list.text(x, y, text, *size, *colour, Align::Left);
+        y += 26.0;
+    }
+    if let Some(label) = button {
+        let rect = Rect::new(x, y + 14.0, 150.0, 36.0);
+        list.push(Op::Outline { rect, width: LINE, color: palette::DARK_RED });
+        list.text(
+            rect.x + 75.0,
+            rect.middle_y(),
+            label,
+            MODS_LINE_TEXT,
+            palette::BLACK,
+            Align::Centre,
+        );
+    }
+    if let Some(notice) = &view.notice {
+        let texts = wrap(notice, MODS_DETAIL_CHARS);
+        let mut at = window.bottom() - 30.0 - 26.0 * texts.len() as f32;
+        for text in texts {
+            list.text(x, at, &text, MODS_LINE_TEXT, palette::STORY, Align::Left);
+            at += 26.0;
+        }
+    }
+}
+
+/// The question over the Data packs screen: its title and lines, its two buttons (the confirm one red, Cancel outlined), and
+/// the cursor on the choice.
+fn mods_question(list: &mut DrawList, ask: ModsAsk, choice: u8) {
+    let window = Rect::new(330.0, 230.0, 620.0, 240.0);
+    list.push(Op::Window { rect: window });
+    let (title, lines, confirm): (&str, &[&str], &str) = match ask {
+        ModsAsk::Apply => (
+            "Apply the packs?",
+            &["The game goes back to the title screen.", "Save first: unsaved progress is lost."],
+            "Apply",
+        ),
+        ModsAsk::Chapter(_) => {
+            ("Start this chapter?", &["The game goes to the chapter's own saves."], "Start")
+        }
+        ModsAsk::Main => ("Back to the main game?", &["The game goes to the main saves."], "Go"),
+    };
+    list.text(window.x + 40.0, window.y + 34.0, title, LARGE_TEXT, palette::BLACK, Align::Left);
+    for (at, line) in lines.iter().enumerate() {
+        list.text(
+            window.x + 40.0,
+            window.y + 80.0 + 30.0 * at as f32,
+            line,
+            MODS_LINE_TEXT,
+            palette::BLACK,
+            Align::Left,
+        );
+    }
+    let confirm_rect = Rect::new(window.x + 230.0, window.y + 180.0, 160.0, 36.0);
+    let cancel_rect = Rect::new(window.x + 410.0, window.y + 180.0, 160.0, 36.0);
+    list.fill(confirm_rect, palette::STORY);
+    list.text(
+        confirm_rect.x + 80.0,
+        confirm_rect.middle_y(),
+        confirm,
+        MODS_LINE_TEXT,
+        palette::WHITE,
+        Align::Centre,
+    );
+    list.push(Op::Outline { rect: cancel_rect, width: LINE, color: palette::DARK_RED });
+    list.text(
+        cancel_rect.x + 80.0,
+        cancel_rect.middle_y(),
+        "Cancel",
+        MODS_LINE_TEXT,
+        palette::BLACK,
+        Align::Centre,
+    );
+    let chosen = if choice == 0 { confirm_rect } else { cancel_rect };
+    list.push(Op::Cursor { x: chosen.x + 12.0, y: chosen.middle_y() - CURSOR_HEIGHT / 2.0 });
 }
 
 /// A panel of choices: its window, and each group with its title and its rows.
@@ -2283,7 +2605,7 @@ mod tests {
             .iter()
             .filter(|op| matches!(op, Op::Fill { rect, color } if *color == palette::ORANGE && rect.x < 960.0))
             .count();
-        assert_eq!(highlights, 12, "one highlight in each row of choices, the For cycler has none");
+        assert_eq!(highlights, 13, "one highlight in each row of choices, the For cycler has none");
     }
 
     #[test]
@@ -2432,5 +2754,136 @@ mod tests {
         assert_eq!(wrap("A card as the game deals it", 15), ["A card as the", "game deals it"]);
         assert_eq!(wrap("", 15), Vec::<String>::new());
         assert_eq!(wrap("averyveryverylongword", 5), ["averyveryverylongword"]);
+    }
+
+    fn pack_line(name: &str, state: PackState, reason: Option<&str>) -> crate::view::PackLine {
+        crate::view::PackLine {
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            author: "The project".to_owned(),
+            description: "Goku can use the Kaioken while he is a Super Saiyan, up to x10."
+                .to_owned(),
+            needs: "nothing".to_owned(),
+            size: 412 * 1024,
+            state,
+            reason: reason.map(str::to_owned),
+        }
+    }
+
+    fn mods_view(cursor: usize, ask: Option<(ModsAsk, u8)>) -> ModsView {
+        ModsView {
+            packs: vec![
+                pack_line("Free progression", PackState::On, None),
+                pack_line(
+                    "Old map test",
+                    PackState::Refused,
+                    Some(
+                        "This pack was made for another ROM (CRC 1A2B3C4D). Your game is A8CF4F2A.",
+                    ),
+                ),
+            ],
+            chapters: vec![
+                crate::view::ChapterLine {
+                    name: "The Androids".to_owned(),
+                    description: "Goku's family.".to_owned(),
+                    locked: true,
+                    main: false,
+                },
+                crate::view::ChapterLine {
+                    name: "Training".to_owned(),
+                    description: "A room with a Kaioken master.".to_owned(),
+                    locked: false,
+                    main: false,
+                },
+            ],
+            cursor,
+            moving: false,
+            ask,
+            notice: None,
+        }
+    }
+
+    #[test]
+    fn the_data_packs_list_shows_the_boxes_versions_chapters_and_the_keys() {
+        let list = mods_screen(&mods_view(0, None));
+        let shown = texts(&list);
+        for text in [
+            "-- Data packs --",
+            "Version",
+            "Free progression",
+            "1.0.0",
+            "Old map test",
+            "-- Chapters --",
+            "The Androids",
+            "locked",
+            "Training",
+            "Classic is never changed by packs.",
+            "Apply",
+            "A on/off   Y + Up/Down move (order)   X Apply",
+            "B Back",
+        ] {
+            assert!(shown.contains(&text), "{text} is shown: {shown:?}");
+        }
+        assert!(!shown.contains(&"Start"), "the first line is a pack: no Start");
+        assert!(shown.contains(&"Free progression  1.0.0"), "the details name the pack");
+        assert!(shown.contains(&"by The project"), "and its author");
+        assert!(shown.contains(&"Size: 412 KB"), "and its size");
+        assert!(shown.contains(&"Needs: nothing"), "and what it needs");
+        assert!(!shown.contains(&"REFUSED:"));
+    }
+
+    #[test]
+    fn a_refused_pack_says_why_it_stays_off_and_a_chapter_shows_its_start() {
+        let refused_list = mods_screen(&mods_view(1, None));
+        let refused = texts(&refused_list);
+        assert!(refused.contains(&"REFUSED:"), "{refused:?}");
+        assert!(refused.iter().any(|line| line.starts_with("This pack was made for another ROM")));
+        assert!(refused.iter().any(|line| line.starts_with("It stays off.")));
+        let chapter_list = mods_screen(&mods_view(3, None));
+        let chapter = texts(&chapter_list);
+        assert!(chapter.contains(&"A room with a Kaioken master."), "{chapter:?}");
+        assert!(chapter.contains(&"Start"), "an open chapter's details have the Start button");
+        let locked_list = mods_screen(&mods_view(2, None));
+        let locked = texts(&locked_list);
+        assert!(locked.contains(&"Locked: the game must be finished first."), "{locked:?}");
+        assert!(!locked.contains(&"Start"));
+    }
+
+    #[test]
+    fn a_question_is_drawn_over_the_screen_with_its_two_buttons() {
+        let apply_list = mods_screen(&mods_view(0, Some((ModsAsk::Apply, 1))));
+        let apply = texts(&apply_list);
+        for text in [
+            "Apply the packs?",
+            "The game goes back to the title screen.",
+            "Save first: unsaved progress is lost.",
+            "Apply",
+            "Cancel",
+        ] {
+            assert!(apply.contains(&text), "{text}: {apply:?}");
+        }
+        let start_list = mods_screen(&mods_view(3, Some((ModsAsk::Chapter(3), 0))));
+        let start = texts(&start_list);
+        assert!(start.contains(&"Start this chapter?"));
+        assert!(start.contains(&"The game goes to the chapter's own saves."));
+        assert!(start.contains(&"Start"));
+        let main_list = mods_screen(&mods_view(0, Some((ModsAsk::Main, 1))));
+        let main = texts(&main_list);
+        assert!(main.contains(&"Back to the main game?") && main.contains(&"Go"));
+        // The cursor is on the choice: Cancel (choice 1) has the orange cursor beside it, Apply (choice 0) another place.
+        let on_cancel = mods_screen(&mods_view(0, Some((ModsAsk::Apply, 1))));
+        let on_apply = mods_screen(&mods_view(0, Some((ModsAsk::Apply, 0))));
+        let cursor_at = |list: &DrawList| {
+            list.ops()
+                .iter()
+                .filter_map(|op| match op {
+                    Op::Cursor { x, y } if *x > 300.0 && *x < 950.0 => Some((*x, *y)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (cancel, apply) = (cursor_at(&on_cancel), cursor_at(&on_apply));
+        assert_eq!(cancel.len(), 1, "one cursor in the question");
+        assert!(cancel[0].0 > apply[0].0, "Cancel is to the right of Apply: {cancel:?} {apply:?}");
     }
 }

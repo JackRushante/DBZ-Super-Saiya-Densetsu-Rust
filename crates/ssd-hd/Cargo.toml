@@ -8,6 +8,7 @@ publish = false
 ssd-oracle = { workspace = true }   # the frame log the PPU writes (FrameLog) and Color
 ssd-rom = { workspace = true }      # crc32 of the index and of the pack's ROM
 ssd-catalogue = { workspace = true } # the title set's LZ stream (graphics::lz_decode, regroup)
+ssd-mod = { workspace = true }       # the HD art of the pack maps and faces (Overlay::of_pack, from the image)
 rustc-hash = { workspace = true }   # the tile index of the pack
 rayon = { workspace = true }         # the row-parallel passes of the Enhanced picture
 serde = { workspace = true }        # hdpack.toml

@@ -44,9 +44,10 @@ pub(crate) fn recolour_to(
 use crate::art_index::Palette;
 use crate::bgart::{self, BgArt, BgImage, Probe, Slot};
 use crate::binding::Binder;
-use crate::pack::Pack;
+use crate::pack::{Pack, PoseVariant};
 use crate::screen::{Layer, Plan};
-use poses::Pose;
+use crate::transfer::{Colouring, Colours, Transfer};
+use poses::{Pose, ROW_OF_CAPTURE};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use ssd_oracle::{FrameLog, LineRegs};
@@ -121,6 +122,22 @@ const VARIANT_BYTES: usize = 96 << 20;
 
 /// Objects whose art is kept decoded (the least recently used one goes first).
 const OBJECT_CACHE: usize = 256;
+
+/// Pictures of a layer's art whose colours are numbered and kept (see [`ArtState::numbered_colours`]).
+const NUMBERED_PICTURES: usize = 16;
+
+/// `image` flipped left to right: the art of a pose facing the other way, every row read right to left.
+fn mirror(image: &Image) -> Image {
+    let mut rgba = Vec::with_capacity(image.rgba.len());
+    for row in image.rgba.chunks(image.width * 4) {
+        for pixel in row.chunks(4).rev() {
+            rgba.extend_from_slice(pixel);
+        }
+    }
+    let mut mirrored = Image::new(image.width, image.height, rgba);
+    mirrored.luma_ref = image.luma_ref;
+    mirrored
+}
 
 /// What a four-bit character shows of the pictures.
 #[derive(Debug, Clone, Copy)]
@@ -370,6 +387,47 @@ pub(crate) struct PlaneFrame {
     vram: Vec<u16>,
 }
 
+/// The work RAM bytes the conditions of a pack's pose variants are read from (`docs/re/data/kaioken-bp.md`, section 4).
+const KAIOKEN_STATE: usize = 0x0C36;
+/// The party records: nine of them from `$0B00`, `$20` bytes each, the unit in the second byte.
+const PARTY_RECORDS: usize = 0x0B00;
+const RECORD_STRIDE: usize = 0x20;
+const PARTY_SLOTS: usize = 9;
+/// The unit of Super Saiyan Goku.
+const SUPER_SAIYAN_GOKU: u8 = 0x3B;
+/// The mark of a unit of Goku's art in the index (`battle-goku-NNN`, `gallery-party-goku-u00-NNN`, see [`ArtState::unit_of`]).
+const GOKU_MARK: &str = "goku";
+/// The mark of a unit of Super Saiyan Goku's art (`battle-goku-ssj-NNN`, `gallery-party-goku-ssj-NNN`).
+const SUPER_SAIYAN_GOKU_MARK: &str = "goku-ssj";
+
+/// The conditions a pack's pose variants name (`[[pose_variant]]`, `ssd_mod::pose::Condition`), as the game's work RAM of a
+/// frame shows them. The Enhanced picture draws a variant only while its condition holds. `super_saiyan_goku` is the party
+/// record of Super Saiyan Goku (see [`ArtState::unit_for`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Conditions {
+    kaioken: bool,
+    super_saiyan_goku: bool,
+}
+
+impl Conditions {
+    /// The conditions of the work RAM `wram` (the 128 KiB of `$7E` and `$7F`): the Kaioken is on (`$0C36` bit 7) and a party
+    /// record has Super Saiyan Goku's unit (`$3B`). A `wram` too short to hold the bytes says no.
+    #[must_use]
+    pub fn of_work_ram(wram: &[u8]) -> Self {
+        let on = wram.get(KAIOKEN_STATE).is_some_and(|byte| byte & 0x80 != 0);
+        let goku = (0..PARTY_SLOTS).any(|slot| {
+            wram.get(PARTY_RECORDS + RECORD_STRIDE * slot + 1) == Some(&SUPER_SAIYAN_GOKU)
+        });
+        Self { kaioken: on && goku, super_saiyan_goku: goku }
+    }
+
+    fn holds(self, condition: ssd_mod::pose::Condition) -> bool {
+        match condition {
+            ssd_mod::pose::Condition::Kaioken => self.kaioken,
+        }
+    }
+}
+
 /// The art of a pack, loaded as the frames need it, at the scale of the picture.
 pub(crate) struct ArtState {
     pack: Arc<Pack>,
@@ -383,6 +441,11 @@ pub(crate) struct ArtState {
     /// (a picture or an object), its index and the colours, and the bytes they take.
     variants: FxHashMap<VariantKey, Arc<Image>>,
     variant_bytes: usize,
+    /// The pictures of the pack's pose variants at the scale, by the index of the variant and whether it is mirrored (see
+    /// [`ArtState::pose_variant`]); `None` for a picture that cannot be read.
+    pose_images: FxHashMap<(usize, bool), Option<Arc<Image>>>,
+    /// The conditions the pose variants are drawn under: those of the frame (see [`Conditions::of_work_ram`]).
+    pub(crate) conditions: Conditions,
     /// The art of the background layers, by the index of the entry.
     bg_images: FxHashMap<u32, Option<Arc<BgImage>>>,
     /// The field maps' art: the source of the layer shown, and the tiles of art read at the
@@ -405,6 +468,10 @@ pub(crate) struct ArtState {
     pub(crate) binder: Option<Binder<'static>>,
     /// Whether [`ArtStats::drawn`] is filled.
     pub(crate) measure: bool,
+    /// The layers' art numbered by its colours, kept for the last pictures drawn (see [`ArtState::colourings`]), and
+    /// whether the table transfers are made that way (`transfer_cache`).
+    numbered: Vec<(Arc<BgImage>, Option<Arc<Colours>>)>,
+    pub(crate) transfer_cache: bool,
     /// Draw the backgrounds' art alone (no poses, portraits or shadows): what an audit compares the
     /// layers' colours with the original's by.
     pub(crate) backgrounds_only: bool,
@@ -461,6 +528,8 @@ impl ArtState {
             recent: VecDeque::new(),
             variants: FxHashMap::default(),
             variant_bytes: 0,
+            pose_images: FxHashMap::default(),
+            conditions: Conditions::default(),
             bg_images: FxHashMap::default(),
             field_sources: FxHashMap::default(),
             field_tiles: FxHashMap::default(),
@@ -471,6 +540,8 @@ impl ArtState {
             unit_sizes: std::sync::OnceLock::new(),
             shapes: FxHashMap::default(),
             measure: false,
+            numbered: Vec::new(),
+            transfer_cache: true,
             backgrounds_only: false,
             memo: None,
             pixels: Vec::new(),
@@ -511,11 +582,13 @@ impl ArtState {
     pub(crate) fn begin(&mut self, width: usize, height: usize, scale: usize) {
         if scale != self.scale {
             self.scale = scale;
+            self.numbered.clear();
             self.pictures.clear();
             self.objects.clear();
             self.recent.clear();
             self.variants.clear();
             self.variant_bytes = 0;
+            self.pose_images.clear();
             self.bg_images.clear();
             self.field_tiles.clear();
             self.plane_arts.clear();
@@ -1174,7 +1247,13 @@ impl ArtState {
         draw_shadows(&mut hd.rgba, scale, frame, &self.pixels, &shadows, others, x_offset, clip);
         bgshadow::draw(&mut hd.rgba, scale, frame, &self.pixels, &ground_shadows, others, clip);
         let mut placed: Vec<Placed<'_>> = Vec::new();
+        // The poses a pose variant replaces: drawn by the variant, after the others
+        let mut replaced: Vec<(&Pose, Arc<Image>, i32)> = Vec::new();
         for (pose, at) in found.iter().filter(|(_, at)| *at != SHADOW) {
+            if let Some((image, margin)) = self.pose_variant(*at) {
+                replaced.push((pose, image, margin));
+                continue;
+            }
             let luma = self.pack.art.objects()[real(*at)].luma;
             if let Some(image) = self.object(*at) {
                 let image = match &pose.recolour {
@@ -1195,6 +1274,12 @@ impl ArtState {
             clip,
             measure,
         );
+        for (pose, image, margin) in &replaced {
+            let x_offset = if pose.bg { 0 } else { x_offset };
+            let origin = (pose.org.0 + x_offset - margin, pose.org.1 + ROW_OF_CAPTURE - margin);
+            let sprites = pose.sprites & !pose.excluded;
+            draw_variant(&mut hd.rgba, scale, frame, &self.pixels, sprites, image, origin, clip);
+        }
         if measure {
             self.stats.drawn = placed
                 .iter()
@@ -1254,15 +1339,75 @@ impl ArtState {
             self.plane = Some(plane);
         }
         let fills: Vec<bool> = slots.iter().map(|slot| slot.fill).collect();
+        let colourings = self.colourings(&images, hidden);
         self.stats.bg_art = draw::draw_backgrounds(
             &mut hd.rgba,
             self.scale,
             self.width,
             &self.pixels,
             &images,
+            &colourings,
             &fills,
             hidden,
         );
+    }
+
+    /// How the colours of each slot's art are transferred to the frame's (see [`crate::transfer`]). A table transfer of a
+    /// whole picture is applied to the picture's own colours, once each (see [`Colours`]), the picture numbered once
+    /// (`numbered`); a fade, a tiled art and a picture with too many colours are applied to each colour as it is drawn.
+    /// With `transfer_cache` off every table transfer is applied so: the reference `bench-hd --check` compares with.
+    fn colourings(&mut self, images: &[Option<Arc<BgImage>>], hidden: u128) -> Vec<Colouring> {
+        let mut colourings = Vec::with_capacity(images.len());
+        for (slot, image) in images.iter().enumerate() {
+            let Some(image) = image else {
+                colourings.push(Colouring::Same);
+                continue;
+            };
+            let pairs = draw::pairs_of(image, slot, &self.pixels, hidden);
+            if pairs.is_identity() {
+                colourings.push(Colouring::Same);
+                continue;
+            }
+            let transfer = pairs.transfer();
+            let numbered = match &transfer {
+                Transfer::Table(_) if self.transfer_cache => self.numbered_colours(image),
+                _ => None,
+            };
+            colourings.push(match numbered {
+                Some(colours) => {
+                    let transferred = colours.transferred(&transfer);
+                    Colouring::Numbered { colours, transferred }
+                }
+                None => Colouring::Each(transfer),
+            });
+        }
+        colourings
+    }
+
+    /// The colours of a picture of a layer's art, numbered (see [`Colours`]): `None` for a tiled art and for a picture
+    /// with too many colours. The last pictures numbered are kept, so a picture is numbered once while it is drawn.
+    fn numbered_colours(&mut self, image: &Arc<BgImage>) -> Option<Arc<Colours>> {
+        if let Some((_, colours)) =
+            self.numbered.iter().find(|(source, _)| Arc::ptr_eq(source, image))
+        {
+            return colours.clone();
+        }
+        let colours = match &image.art {
+            BgArt::Whole(art) => Colours::of(art).map(Arc::new),
+            BgArt::Tiled(_) => None,
+        };
+        if self.numbered.len() >= NUMBERED_PICTURES {
+            self.numbered.remove(0);
+        }
+        self.numbered.push((Arc::clone(image), colours.clone()));
+        colours
+    }
+
+    /// Numbers the layers' art by its colours (`on`, the default), or applies each table transfer to each colour as it
+    /// is drawn (off: the reference that `bench-hd --check` compares with; the pictures are the same).
+    pub(crate) fn set_transfer_cache(&mut self, on: bool) {
+        self.transfer_cache = on;
+        self.numbered.clear();
     }
 
     /// Picture `at` in the colours of CGRAM row `row` (see [`ArtPixel::row`]) when the picture was
@@ -1368,16 +1513,66 @@ impl ArtState {
         if at & MIRROR == 0 {
             return Some(image);
         }
-        // The art of the pose facing the other way: every row read right to left
-        let mut rgba = Vec::with_capacity(image.rgba.len());
-        for row in image.rgba.chunks(image.width * 4) {
-            for pixel in row.chunks(4).rev() {
-                rgba.extend_from_slice(pixel);
+        Some(Arc::new(mirror(&image)))
+    }
+
+    /// The picture of a pose variant of `object` at the scale, mirrored when the pose faces the other way (as the object's own
+    /// picture is). The file must be the object's picture grown by the margin, four art pixels to a game pixel: a file that is
+    /// missing or of another size is not drawn, and the log says why.
+    fn load_variant(
+        &self,
+        variant: &PoseVariant,
+        object: &crate::art_index::Object,
+        mirrored: bool,
+    ) -> Option<Arc<Image>> {
+        let margin = variant.margin as usize;
+        let (w, h) =
+            (usize::from(object.width) + 2 * margin, usize::from(object.height) + 2 * margin);
+        let refused = |reason: String| {
+            log::warn!("the pose variant {} of {} is not drawn: {reason}", variant.file, object.id);
+        };
+        let bytes = match std::fs::read(self.pack.dir.join(&variant.file)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                refused(error.to_string());
+                return None;
             }
+        };
+        let (pw, ph, rgba) = match crate::png::read_rgba(&bytes) {
+            Ok(picture) => picture,
+            Err(error) => {
+                refused(error);
+                return None;
+            }
+        };
+        if (pw as usize, ph as usize) != (w * 4, h * 4) {
+            refused(format!("it is {pw} x {ph} pixels, not {} x {}", w * 4, h * 4));
+            return None;
         }
-        let mut mirrored = Image::new(image.width, image.height, rgba);
-        mirrored.luma_ref = image.luma_ref;
-        Some(Arc::new(mirrored))
+        let picture = Image::new(pw as usize, ph as usize, rgba);
+        let image = resample::resize(&picture, w * self.scale, h * self.scale);
+        Some(Arc::new(if mirrored { mirror(&image) } else { image }))
+    }
+
+    /// The picture of the pose variant the pack gives the object `at` while the conditions of the frame hold, and its margin
+    /// in game pixels. `None` when no variant holds for the object, or its picture is not drawn (see
+    /// [`ArtState::load_variant`]): the object is then drawn as it is.
+    fn pose_variant(&mut self, at: u32) -> Option<(Arc<Image>, i32)> {
+        let pack = Arc::clone(&self.pack);
+        let object = &pack.art.objects()[real(at)];
+        let index = pack
+            .variants
+            .iter()
+            .position(|variant| variant.art == object.id && self.conditions.holds(variant.when))?;
+        let variant = &pack.variants[index];
+        let mirrored = at & MIRROR != 0;
+        let margin = variant.margin as i32;
+        if let Some(loaded) = self.pose_images.get(&(index, mirrored)) {
+            return loaded.clone().map(|image| (image, margin));
+        }
+        let loaded = self.load_variant(variant, object, mirrored);
+        self.pose_images.insert((index, mirrored), loaded.clone());
+        loaded.map(|image| (image, margin))
     }
 
     /// Keeps `image` as the art of object `at`, the least recently used one making room.
@@ -1535,7 +1730,9 @@ impl ArtState {
     /// Saibamen of the game) and each was drawn on its own, so they differ in the details: the
     /// fighters of a formation are drawn from the unit with the most poses in the index, in the
     /// colours of their own palettes, whatever their colours, and so are the frames of an
-    /// animation. `None` when one unit (or none) has art for the pose.
+    /// animation. While Super Saiyan Goku is in the party, a pose that both his normal and his Super
+    /// Saiyan art have is drawn from the Super Saiyan art: the normal art has the same pixels, in the
+    /// normal palette, where his hair is black. `None` when one unit (or none) has art for the pose.
     fn unit_for(&self, pose: &Pose) -> Option<String> {
         let mut units: Vec<String> =
             self.candidates(pose).into_iter().map(|(at, _)| self.unit_of(at)).collect();
@@ -1543,6 +1740,17 @@ impl ArtState {
         units.dedup();
         if units.len() < 2 {
             return None;
+        }
+        if self.conditions.super_saiyan_goku {
+            // Any set of Goku's art (the battle poses, the close-ups of the special attacks) that has a Super Saiyan set for
+            // these pixels is drawn from it.
+            let super_saiyan = units.iter().find(|unit| unit.contains(SUPER_SAIYAN_GOKU_MARK));
+            let normal = units
+                .iter()
+                .any(|unit| unit.contains(GOKU_MARK) && !unit.contains(SUPER_SAIYAN_GOKU_MARK));
+            if let (Some(unit), true) = (super_saiyan, normal) {
+                return Some(unit.clone());
+            }
         }
         let sizes = self.unit_sizes();
         units.into_iter().max_by_key(|unit| {
@@ -1922,4 +2130,4 @@ pub(crate) fn object_priority(mode_01: bool, bits: u8) -> u8 {
 }
 
 pub use draw::{COLOUR_CLASSES, Drawn, colour_class};
-pub(crate) use draw::{Placed, draw_objects, draw_pictures, draw_shadows};
+pub(crate) use draw::{Placed, draw_objects, draw_pictures, draw_shadows, draw_variant};

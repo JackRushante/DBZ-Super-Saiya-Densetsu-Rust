@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds the Android app: libmain.so (the game) and libSDL3.so for the ABIs given, SDL's Java glue, then the APK.
-#   android/build-apk.sh [--release] [abi ...]        default ABI: x86_64 (the emulator); use arm64-v8a for a phone
+#   android/build-apk.sh [--release | --fast] [abi ...]   default ABI: x86_64 (the emulator); use arm64-v8a for a phone
+# --fast: a signed release APK built with the `phone` profile (no LTO, incremental) and a warm Gradle daemon, for test builds.
 # Needs: Rust with the Android targets, cargo-ndk, the Android SDK and NDK (ANDROID_HOME, ANDROID_NDK_HOME),
 # a JDK 17+, cmake. The APK lands in android/app/build/outputs/apk/.
 set -euo pipefail
@@ -9,6 +10,8 @@ cd "$(dirname "$0")/.."
 export CMAKE="${CMAKE_ANDROID:-$(command -v cmake)}"
 profile=debug; cargo_profile=(); gradle_task=assembleDebug
 if [ "${1:-}" = "--release" ]; then profile=release; cargo_profile=(--release); gradle_task=assembleRelease; shift; fi
+daemon=--no-daemon
+if [ "${1:-}" = "--fast" ]; then profile=phone; cargo_profile=(--profile phone); gradle_task=assembleRelease; daemon=--daemon; shift; fi
 abis=("$@"); [ ${#abis[@]} -eq 0 ] && abis=(x86_64)
 # A debug build still runs the game's own crates fully optimised: at the dev profile's level 1 the HD renderer is too slow
 # on a phone. Without debug info the library is ten times smaller.
@@ -38,4 +41,4 @@ cp -r "$sdl_java" android/app/src/main/java/org/libsdl/app
 
 # Gradle packages an APK incrementally over the last one and never gives back the room of a bigger old library.
 rm -rf android/app/build/outputs/apk
-(cd android && ./gradlew --no-daemon "$gradle_task")
+(cd android && ./gradlew "$daemon" "$gradle_task")

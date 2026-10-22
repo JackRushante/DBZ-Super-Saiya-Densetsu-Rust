@@ -1,0 +1,10 @@
+# Unit 59, the Super Saiyan Goku: the Kaioken (command 0x33) is added after the slots of its original command list, which
+# the game reads from your ROM when the pack is loaded. Its stats, name and sprite stay the original's.
+[[unit]]
+id = 59
+commands_append = true
+
+[[unit.command]]
+id = 0x33
+attr = 0xFF
+factor = 255

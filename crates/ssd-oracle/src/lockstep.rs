@@ -68,7 +68,7 @@ use crate::compare::{DifferenceText, compare_except, keep_first, wram_labels};
 use crate::verify::dead_stack;
 use crate::{
     Difference, HookAction, HookEntry, HookMode, HookStats, HookTable, Joypad, Machine, NullAudio,
-    OracleError, Outcome, Replay, Symbols, SyncEvent, hook_key,
+    OracleError, Outcome, PackTag, Replay, Symbols, SyncEvent, hook_key,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -90,11 +90,20 @@ pub struct LockstepConfig {
     /// Frames A may run without a sync event: then B runs to the same frame and the window is
     /// compared on its NMIs only (an unsynced window). At least 1 (0 counts as 1).
     pub budget_frames: u64,
+    /// The pack set and its image machine B runs on, instead of the ROM (`None`: B runs on the ROM as
+    /// A does). B then plays the replay as a replay of that set ([`Replay::packs`] is set to the tag
+    /// for it); A stays on the ROM alone.
+    pub b_packs: Option<(PackTag, Vec<u8>)>,
 }
 
 impl Default for LockstepConfig {
     fn default() -> Self {
-        Self { table: None, sync_keys: Vec::new(), budget_frames: DEFAULT_BUDGET_FRAMES }
+        Self {
+            table: None,
+            sync_keys: Vec::new(),
+            budget_frames: DEFAULT_BUDGET_FRAMES,
+            b_packs: None,
+        }
     }
 }
 
@@ -337,7 +346,14 @@ impl LockstepRun {
         }
 
         let mut a = replay.power_on(rom.clone())?;
-        let mut b = replay.power_on(rom)?;
+        let mut b = match &config.b_packs {
+            None => replay.power_on(rom)?,
+            Some((tag, image)) => {
+                let mut on_packs = (*replay).clone();
+                on_packs.packs = Some(*tag);
+                on_packs.power_on_image(image.clone())?
+            }
+        };
         a.set_hook_table(Some(sync_points.into_iter().collect()));
         b.set_hook_table(Some(table_b));
         a.watch_stack();

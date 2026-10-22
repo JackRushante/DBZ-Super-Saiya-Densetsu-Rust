@@ -3,13 +3,15 @@
 //! `ssd_hd::Renderer::render_hd` at each configuration; only the drawing is timed, not the
 //! emulation. Reports the mean, the 99th percentile and the worst frame per replay and
 //! configuration, and over all the replays together. The last two configurations are the 16:9
-//! view at 4x with the look alone and with the pack's art (`ssd_hd::world::WideRun::note_hd`),
-//! the picture of the Enhanced mode at 16:9.
+//! view at 4x with the look alone and with the pack's art (`ssd_hd::world::WideRun::note_hd_shared`),
+//! the picture of the Enhanced mode at 16:9. Those share their pictures as the window does: a frame whose
+//! inputs are those of the picture before is not drawn again, and `reused` counts such frames. `--check`
+//! compares every shared picture with one drawn fresh (by a run that draws every frame).
 
 use crate::shared::{read_replay, render_table};
 use anyhow::Context;
 use ssd_hd::pack::Pack;
-use ssd_hd::world::WideRun;
+use ssd_hd::world::{SharedHd, WideRun};
 use ssd_hd::{HdOptions, Look, Renderer};
 use ssd_oracle::NullAudio;
 use std::io::Write;
@@ -48,6 +50,8 @@ pub struct Args {
     pub frames: Option<u64>,
     /// The pack folder of the art (default: the converter's under the cache directory).
     pub pack: Option<PathBuf>,
+    /// Compare every picture of the 16:9 configurations that is shared (not drawn again) with a fresh one.
+    pub check: bool,
 }
 
 /// Parses the arguments after `bench-hd`: `[--frames N] [--pack DIR] [replay|dir...]`.
@@ -56,7 +60,7 @@ pub struct Args {
 ///
 /// An unknown option, or `--frames` without a number.
 pub fn parse_args(args: &[&str]) -> Result<Args, String> {
-    let mut parsed = Args { paths: Vec::new(), frames: None, pack: None };
+    let mut parsed = Args { paths: Vec::new(), frames: None, pack: None, check: false };
     let mut args = args.iter();
     while let Some(&arg) = args.next() {
         match arg {
@@ -68,6 +72,7 @@ pub fn parse_args(args: &[&str]) -> Result<Args, String> {
                         .ok_or_else(|| "--frames needs a number".to_owned())?,
                 );
             }
+            "--check" => parsed.check = true,
             "--pack" => {
                 parsed.pack = Some(PathBuf::from(
                     args.next().ok_or_else(|| "--pack takes a folder".to_owned())?,
@@ -80,10 +85,15 @@ pub fn parse_args(args: &[&str]) -> Result<Args, String> {
     Ok(parsed)
 }
 
-/// The draw times of one replay, per configuration.
+/// The draw times of one replay, per configuration, and for the 16:9 ones how many frames showed the picture
+/// of the frame before (not drawn again), and with `--check` how many shared pictures were compared with a
+/// fresh draw and how many differed.
 struct Timings {
     name: String,
     frames: Vec<Vec<Duration>>,
+    reused: Vec<u64>,
+    checked: Vec<u64>,
+    differing: Vec<u64>,
 }
 
 /// The mean, the 99th percentile (nearest rank) and the worst of `times`, in milliseconds.
@@ -137,13 +147,30 @@ pub fn run(
         let mut machine = replay.power_on(rom.to_vec())?;
         machine.set_line_log(true);
         let mut renderer = Renderer::new();
+        // The wide runs share their pictures as the window does (`note_hd_shared`): a frame whose inputs are
+        // those of the picture before is not drawn again
         let mut plain = WideRun::new(rom);
         let mut with_art = WideRun::new(rom);
         with_art.set_art(Some(Arc::clone(&art)));
-        let mut timings = Timings { name, frames: vec![Vec::new(); CONFIGURATIONS.len()] };
+        // With `--check`: runs that draw every frame, the reference the shared pictures are compared with
+        let mut fresh_plain = WideRun::new(rom);
+        let mut fresh_art = WideRun::new(rom);
+        fresh_art.set_art(Some(Arc::clone(&art)));
+        // ... and transfer each colour as it is drawn, the way the art was drawn before the transfer was kept
+        fresh_art.set_transfer_cache(false);
+        let configurations = CONFIGURATIONS.len();
+        let mut timings = Timings {
+            name,
+            frames: vec![Vec::new(); configurations],
+            reused: vec![0; configurations],
+            checked: vec![0; configurations],
+            differing: vec![0; configurations],
+        };
+        let mut last: Vec<Option<u64>> = vec![None; configurations];
         while machine.frame_count() < frames {
             machine.run_frame_with(&mut |f| replay.input(f), &mut NullAudio)?;
             let log = machine.frame_log();
+            let mut shown: Vec<Option<SharedHd>> = vec![None; configurations];
             for (slot, &(kind, scale, look)) in CONFIGURATIONS.iter().enumerate() {
                 let started = Instant::now();
                 match kind {
@@ -155,14 +182,33 @@ pub fn run(
                     Kind::Wide | Kind::WideArt => {
                         // The wide runs follow the work RAM frame by frame, logged or not
                         let run = if kind == Kind::Wide { &mut plain } else { &mut with_art };
-                        let picture = run.note_hd(machine.wram(), log, HdOptions { scale, look });
+                        let picture =
+                            run.note_hd_shared(machine.wram(), log, HdOptions { scale, look });
                         if log.is_none() {
                             continue;
                         }
                         std::hint::black_box(&picture);
+                        shown[slot] = picture;
                     }
                 }
                 timings.frames[slot].push(started.elapsed());
+                if let Some(picture) = &shown[slot] {
+                    timings.reused[slot] += u64::from(last[slot] == Some(picture.serial));
+                    last[slot] = Some(picture.serial);
+                }
+            }
+            // Outside the timing: the fresh runs follow every frame too (a frame with no log is no picture)
+            if args.check {
+                for (slot, &(kind, scale, look)) in CONFIGURATIONS.iter().enumerate() {
+                    if !matches!(kind, Kind::Wide | Kind::WideArt) {
+                        continue;
+                    }
+                    let run = if kind == Kind::Wide { &mut fresh_plain } else { &mut fresh_art };
+                    let fresh = run.note_hd(machine.wram(), log, HdOptions { scale, look });
+                    let shared = shown[slot].as_ref().map(|picture| picture.picture.as_ref());
+                    timings.checked[slot] += 1;
+                    timings.differing[slot] += u64::from(fresh.as_ref() != shared);
+                }
             }
         }
         replays.push(timings);
@@ -174,7 +220,8 @@ pub fn run(
         replays.len(),
         replays.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")
     )?;
-    let header = ["replay", "scale", "look", "frames", "mean ms", "p99 ms", "worst ms"];
+    // The frames that showed the picture of the frame before: the 16:9 configurations only ("-" for the others)
+    let header = ["replay", "scale", "look", "frames", "reused", "mean ms", "p99 ms", "worst ms"];
     let mut rows = Vec::new();
     for timings in &replays {
         for (slot, &configuration) in CONFIGURATIONS.iter().enumerate() {
@@ -185,6 +232,7 @@ pub fn run(
                 scale,
                 look.to_owned(),
                 timings.frames[slot].len().to_string(),
+                reused_text(configuration.0, timings.reused[slot]),
                 format!("{mean:.2}"),
                 format!("{p99:.2}"),
                 format!("{worst:.2}"),
@@ -194,6 +242,7 @@ pub fn run(
     for (slot, &configuration) in CONFIGURATIONS.iter().enumerate() {
         let all: Vec<Duration> =
             replays.iter().flat_map(|timings| timings.frames[slot].iter().copied()).collect();
+        let reused: u64 = replays.iter().map(|timings| timings.reused[slot]).sum();
         let (mean, p99, worst) = summary(&all);
         let (scale, look) = label(configuration);
         rows.push(vec![
@@ -201,13 +250,40 @@ pub fn run(
             scale,
             look.to_owned(),
             all.len().to_string(),
+            reused_text(configuration.0, reused),
             format!("{mean:.2}"),
             format!("{p99:.2}"),
             format!("{worst:.2}"),
         ]);
     }
     write!(out, "{}", render_table(&header, &rows))?;
+    if args.check {
+        let mut differing = 0;
+        for timings in &replays {
+            for (slot, &(kind, scale, look)) in CONFIGURATIONS.iter().enumerate() {
+                if matches!(kind, Kind::Wide | Kind::WideArt) {
+                    let (scale, look) = label((kind, scale, look));
+                    writeln!(
+                        out,
+                        "check {} {scale} {look}: {} shared pictures compared with a fresh draw, {} differ",
+                        timings.name, timings.checked[slot], timings.differing[slot]
+                    )?;
+                    differing += timings.differing[slot];
+                }
+            }
+        }
+        anyhow::ensure!(differing == 0, "{differing} shared pictures differ from a fresh draw");
+        writeln!(out, "check: every shared picture equals a fresh draw")?;
+    }
     Ok(())
+}
+
+/// The frames of a configuration that showed the picture before: a count for the 16:9 ones, `-` otherwise.
+fn reused_text(kind: Kind, reused: u64) -> String {
+    match kind {
+        Kind::Wide | Kind::WideArt => reused.to_string(),
+        Kind::Square => "-".to_owned(),
+    }
 }
 
 /// The batch sizes `hd-skip-check` tries.
@@ -322,7 +398,9 @@ mod tests {
         let args = parse_args(&["--frames", "300", "a.ssdreplay"]).unwrap();
         assert_eq!(args.frames, Some(300));
         assert_eq!(args.paths, [PathBuf::from("a.ssdreplay")]);
-        assert_eq!(parse_args(&[]).unwrap(), Args { paths: Vec::new(), frames: None, pack: None });
+        let plain = Args { paths: Vec::new(), frames: None, pack: None, check: false };
+        assert_eq!(parse_args(&[]).unwrap(), plain);
+        assert!(parse_args(&["--check"]).unwrap().check);
         assert_eq!(parse_args(&["--pack", "p"]).unwrap().pack, Some(PathBuf::from("p")));
         assert!(parse_args(&["--frames"]).unwrap_err().contains("needs a number"));
         assert!(parse_args(&["--fast"]).unwrap_err().contains("unknown option"));

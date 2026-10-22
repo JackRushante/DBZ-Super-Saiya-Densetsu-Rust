@@ -1,3 +1,4 @@
+mod art_derive;
 mod bench;
 mod bench_hd;
 mod catalogue;
@@ -27,8 +28,10 @@ mod hd_pack_public;
 mod hd_pack_to_store;
 mod hd_parity;
 mod hd_wide;
+mod kaioken_art;
 mod make_replays;
 mod menu_test;
+mod mod_tileset;
 mod probe;
 mod publish_check;
 mod rebase_replays;
@@ -36,6 +39,7 @@ mod recompile;
 mod repro;
 mod routines;
 mod save;
+mod scene_dump;
 mod scene_flicker;
 mod scene_mixed;
 mod scenes;
@@ -253,7 +257,8 @@ fn verify_replays(args: &[&str]) -> anyhow::Result<ExitCode> {
     let rom = cached_rom()?;
     let root = repo_root()?;
     let symbols = ssd_oracle::Symbols::load(root.join("re").join("symbols.toml"))?;
-    let config = verify_replays::config(&symbols, args.hooks, args.cheats_identity)?;
+    let mods = args.mods_identity.then(|| ssd_mod::build(&rom, &[])).transpose()?;
+    let config = verify_replays::config(&symbols, args.hooks, args.cheats_identity, mods.as_ref())?;
     let dir = args.dir.unwrap_or_else(|| root.join(".work").join("replays"));
     let sync_points: Vec<&str> = symbols.sync_points().iter().map(|p| p.name.as_str()).collect();
     let hooks = match args.hooks {
@@ -943,18 +948,23 @@ fn framecheck(args: &[&str]) -> anyhow::Result<ExitCode> {
 fn standalone_diff(args: &[&str]) -> anyhow::Result<ExitCode> {
     let verbose = args.contains(&"--verbose");
     let cheats = args.contains(&"--cheats-identity");
+    let mods_identity = args.contains(&"--mods-identity");
     let replays: Vec<&str> = args.iter().copied().filter(|a| !a.starts_with("--")).collect();
     if replays.is_empty()
-        || args
-            .iter()
-            .any(|a| a.starts_with("--") && !["--verbose", "--cheats-identity"].contains(a))
+        || args.iter().any(|a| {
+            a.starts_with("--")
+                && !["--verbose", "--cheats-identity", "--mods-identity"].contains(a)
+        })
     {
-        eprintln!("standalone-diff: takes [--verbose] [--cheats-identity] and one or more replays");
+        eprintln!(
+            "standalone-diff: takes [--verbose] [--cheats-identity] [--mods-identity] and one or more replays"
+        );
         return Ok(usage());
     }
     let root = repo_root()?;
     let symbols = ssd_oracle::Symbols::load(root.join("re").join("symbols.toml"))?;
     let rom = cached_rom()?;
+    let mods = mods_identity.then(|| ssd_mod::build(&rom, &[])).transpose()?;
     let mut differing = 0_u32;
     for replay in replays {
         let outcome = standalone_diff::run(
@@ -963,11 +973,92 @@ fn standalone_diff(args: &[&str]) -> anyhow::Result<ExitCode> {
             Path::new(replay),
             verbose,
             cheats,
+            mods.as_ref(),
             &mut std::io::stdout(),
         )?;
         differing += u32::from(outcome.first_difference.is_some());
     }
     Ok(ExitCode::from(u8::from(differing > 0)))
+}
+
+/// Writes the original's blocks as a Tiled tileset for painting pack maps, outside the repository or under `.work/`
+/// (see [`mod_tileset`]).
+fn mod_tileset_command(args: &[&str]) -> anyhow::Result<ExitCode> {
+    let [out] = args else {
+        eprintln!("mod-tileset: takes <out dir> (under .work/)");
+        return Ok(usage());
+    };
+    let out = std::path::absolute(out)?;
+    if let Some(reason) = text_dump::refused(&repo_root()?, &out) {
+        eprintln!("mod-tileset: {reason}");
+        return Ok(usage());
+    }
+    let rom = cached_rom()?;
+    mod_tileset::run(&rom, &out)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Packs a data pack folder into a `.ssdpack` zip, after its checks against the cached ROM (see
+/// [`ssd_mod`]). `--local` lets the files hold runs of the ROM's bytes, for a build that is not tracked.
+fn mod_build(args: &[&str]) -> anyhow::Result<ExitCode> {
+    let local = args.contains(&"--local");
+    let paths: Vec<&str> = args.iter().copied().filter(|a| *a != "--local").collect();
+    let [dir, out] = paths.as_slice() else {
+        eprintln!("mod-build: takes <dir> <out.ssdpack> [--local]");
+        return Ok(usage());
+    };
+    let pack = ssd_mod::Pack::from_dir(Path::new(dir))?;
+    let rom = cached_rom()?;
+    let options = ssd_mod::CheckOptions { allow_rom_bytes: local };
+    if let Err(errors) = ssd_mod::check_set(&rom, std::slice::from_ref(&pack), options) {
+        for error in &errors {
+            eprintln!("mod-build: refused: {error}");
+        }
+        return Ok(ExitCode::from(1));
+    }
+    pack.write_zip(Path::new(out))?;
+    println!("mod-build: {out}: pack `{}` {}", pack.manifest.pack.id, pack.manifest.pack.version);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Checks data packs against the cached ROM and prints the placements of their data, the image's size, its
+/// CRC32 and the set id (see [`ssd_mod`]). `--local` as for [`mod_build`].
+fn mod_check(args: &[&str]) -> anyhow::Result<ExitCode> {
+    let local = args.contains(&"--local");
+    let paths: Vec<&str> = args.iter().copied().filter(|a| *a != "--local").collect();
+    if paths.is_empty() || args.iter().any(|a| a.starts_with("--") && *a != "--local") {
+        eprintln!(
+            "mod-check: takes <pack>... [--local], each a folder with pack.toml or a .ssdpack zip"
+        );
+        return Ok(usage());
+    }
+    let rom = cached_rom()?;
+    let packs = paths
+        .iter()
+        .map(|path| ssd_mod::Pack::open(Path::new(path)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let options = ssd_mod::CheckOptions { allow_rom_bytes: local };
+    if let Err(errors) = ssd_mod::check_set(&rom, &packs, options) {
+        for error in &errors {
+            println!("refused: {error}");
+        }
+        return Ok(ExitCode::from(1));
+    }
+    println!("checks: ok, {} pack(s)", packs.len());
+    let image = ssd_mod::build(&rom, &packs)?;
+    for placement in &image.placements {
+        println!(
+            "{} {:>5}  ${:02X}:{:04X}  {} bytes",
+            placement.family.name(),
+            placement.id,
+            placement.address >> 16,
+            placement.address & 0xFFFF,
+            placement.len
+        );
+    }
+    println!("image: {} bytes, CRC32 {:08X}", image.bytes.len(), image.crc32);
+    println!("set id: {:016X}", image.set_id);
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Builds the routine table from the traces (see [`routines`]).
@@ -1062,6 +1153,20 @@ fn shots(args: &[&str]) -> anyhow::Result<ExitCode> {
 }
 
 /// Edits a save file (see [`save`]).
+/// `chapter-save`: writes the save slot a chapter of the packs starts from (see [`save::chapter_save`]).
+fn chapter_save(args: &[&str]) -> anyhow::Result<ExitCode> {
+    match save::chapter_save(args, &cached_rom()?) {
+        Ok(text) => {
+            print!("{text}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(error) => {
+            eprintln!("chapter-save: {error:#}");
+            Ok(usage())
+        }
+    }
+}
+
 fn save_edit(args: &[&str]) -> anyhow::Result<ExitCode> {
     let args = match save::parse_edit_args(args) {
         Ok(args) => args,
@@ -1130,7 +1235,7 @@ fn usage() -> ExitCode {
     eprintln!("usage: cargo xtask publish-check [--allow-no-rom]");
     eprintln!("       cargo run --release -p xtask -- make-replays");
     eprintln!(
-        "       cargo run --release -p xtask -- verify-replays [--hooks rust|original] [dir]"
+        "       cargo run --release -p xtask -- verify-replays [--hooks rust|original] [--cheats-identity] [--mods-identity] [dir]"
     );
     eprintln!(
         "       cargo run --release -p xtask -- coverage [--exclude name[,name...]] [replay]"
@@ -1214,8 +1319,15 @@ fn usage() -> ExitCode {
     eprintln!("       cargo run --release -p xtask -- recompile");
     eprintln!("       cargo run --release -p xtask -- framecheck <replay>");
     eprintln!(
-        "       cargo run --release -p xtask -- standalone-diff [--verbose] [--cheats-identity] <replay>..."
+        "       cargo run --release -p xtask -- standalone-diff [--verbose] [--cheats-identity] [--mods-identity] <replay>..."
     );
+    eprintln!("       cargo run --release -p xtask -- mod-build <dir> <out.ssdpack> [--local]");
+    eprintln!("       cargo run --release -p xtask -- mod-check <pack>... [--local]");
+    eprintln!("       cargo run --release -p xtask -- mod-tileset <out dir>");
+    eprintln!(
+        "       cargo run --release -p xtask -- art-derive <hd.png> <face|tiles> <out dir> [--palette <file>]"
+    );
+    eprintln!("       cargo run --release -p xtask -- kaioken-art <pack dir>");
     eprintln!(
         "       cargo run --release --features recomp -p xtask -- recomp-cover <out.cov> <replay>..."
     );
@@ -1235,16 +1347,21 @@ fn usage() -> ExitCode {
         "       cargo run --release -p xtask -- probe <symbol> | --address A --returns rts|rtl [--name n] [--entry-m8 b] [--entry-x8 b] [--cycles N] [--samples N] [--dir D] [--verify [--quick]]"
     );
     eprintln!(
-        "       cargo run --release -p xtask -- shots <script|timeline.txt> [--frames a,b|--every N] [--upto N] [--sheet COLS] [--peek v,a] [--state-in f] [--state-out f] [--wram-out f] [--mesen-inputs f] [--hd-scale N] [--pack DIR] [--gaps DIR] [--out dir] [--no-png]"
+        "       cargo run --release -p xtask -- shots <script|timeline.txt> [--frames a,b|--every N] [--upto N] [--sheet COLS] [--peek v,a] [--state-in f] [--state-out f] [--wram-out f] [--mesen-inputs f] [--hd-scale N] [--pack DIR] [--gaps DIR] [--mods PACK]... [--out dir] [--no-png]"
     );
     eprintln!(
         "       cargo run --release -p xtask -- catalogue [--kind characters|cards|enemies|items|attacks|encounters]"
     );
     eprintln!("       cargo run --release -p xtask -- text-dump [out.tsv]");
+    eprintln!("       cargo run --release -p xtask -- scene-dump <scene id hex|all> [--out <dir>]");
+    eprintln!("       cargo run --release -p xtask -- scene-check <file.scene>...");
     eprintln!(
         "       cargo run --release -p xtask -- save-edit <in.sav> <out.sav> [--slot N] [--to-slot N] [--set field=value ...]"
     );
     eprintln!("       cargo run --release -p xtask -- save-dump <file.sav>");
+    eprintln!(
+        "       cargo run --release -p xtask -- chapter-save <pack>... --chapter <id> --out <folder>"
+    );
     eprintln!(
         "       cargo run --release -p xtask -- replay-from-save <save.sav> <script.txt> <out.ssdreplay> [--slot N] [--title] [--cheats]"
     );
@@ -1362,7 +1479,10 @@ fn main() -> anyhow::Result<ExitCode> {
         ["shots", rest @ ..] => shots(rest),
         ["catalogue", rest @ ..] => catalogue(rest),
         ["text-dump", rest @ ..] => text_dump(rest),
+        ["scene-dump", rest @ ..] => scene_dump::dump(rest),
+        ["scene-check", rest @ ..] => scene_dump::check(rest),
         ["save-edit", rest @ ..] => save_edit(rest),
+        ["chapter-save", rest @ ..] => chapter_save(rest),
         ["save-dump", path] => {
             let game = cached_rom().ok().and_then(|rom| save::Game::from_rom(&rom).ok());
             save::dump(Path::new(path), game.as_ref(), &mut std::io::stdout())?;
@@ -1387,6 +1507,11 @@ fn main() -> anyhow::Result<ExitCode> {
         }
         ["framecheck", rest @ ..] => framecheck(rest),
         ["standalone-diff", rest @ ..] => standalone_diff(rest),
+        ["mod-build", rest @ ..] => mod_build(rest),
+        ["mod-check", rest @ ..] => mod_check(rest),
+        ["mod-tileset", rest @ ..] => mod_tileset_command(rest),
+        ["art-derive", rest @ ..] => art_derive::command(rest),
+        ["kaioken-art", rest @ ..] => kaioken_art::command(rest),
         #[cfg(feature = "recomp")]
         ["recomp-cover", out, replays @ ..] if !replays.is_empty() => {
             let root = repo_root()?;

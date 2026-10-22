@@ -1,7 +1,7 @@
 //! The Gameplay page (saved with the game): the text speed, the message auto-run, the battle animation speed
 //! and the random-encounter rate.
 
-use super::{Kind, RowDef, Source};
+use super::{Kind, Opens, RowDef, Source};
 
 /// The five speeds of the original's Text screen, slowest first. The game's byte (`$01D0`) counts the other way:
 /// 0 prints the most characters a frame and 4 the fewest, so the row shows `4 - byte` (see `options::TEXT_SPEED_LAST`).
@@ -74,6 +74,14 @@ pub const ROWS: &[RowDef] = &[
         kind: Kind::Cycle(ENCOUNTERS),
         source: Source::Encounters,
     },
+    RowDef {
+        key: "gameplay.data_packs",
+        label: "Data packs",
+        group: "Packs",
+        help: "The data packs: which are on, their order, and the chapters they start.",
+        kind: Kind::Button("Open"),
+        source: Source::Opens(Opens::Packs),
+    },
 ];
 
 /// A line under the rows, if the page has one.
@@ -140,5 +148,15 @@ mod tests {
         assert_eq!(AUTO_WAITS.len(), AUTO_WAIT_FRAMES.len());
         assert_eq!(ANIM_SPEEDS.len(), ANIM_FACTORS.len());
         assert_eq!(TEXT_SPEEDS.len(), 5, "five steps, as the original");
+    }
+
+    #[test]
+    fn the_data_packs_row_is_a_button_that_opens_the_packs_and_stores_nothing() {
+        let row = ROWS.last().expect("the Data packs row");
+        assert_eq!(row.key, "gameplay.data_packs");
+        assert_eq!(row.source, Source::Opens(Opens::Packs));
+        assert_eq!(row.text(0), "Open");
+        assert_eq!(row.count(), 1, "a button has one value, which is its text");
+        assert!(!row.is_info(), "a button has a cursor");
     }
 }

@@ -479,8 +479,12 @@ fn run_lockstep_goldens() {
             let machine = Machine::new(rom.clone(), Box::new(MemorySaveStore::default())).unwrap();
             let mut replay = Replay::of(&machine);
             replay.inputs = (0..LOCKSTEP_FRAMES).map(input).collect();
-            let config =
-                LockstepConfig { table: Some(table), sync_keys: vec![sync], budget_frames: 30 };
+            let config = LockstepConfig {
+                table: Some(table),
+                sync_keys: vec![sync],
+                budget_frames: 30,
+                b_packs: None,
+            };
             let report = run_lockstep(rom, &replay, &config, None).unwrap();
             let text = format!(
                 "{} events, {} frames, {} unsynced, drift {}, dead stack {:?}\n{:?}\n{}",
@@ -744,8 +748,12 @@ fn sync_arrivals_inside_a_dispatch_are_counted_and_are_no_events() {
     let mut replay = Replay::of(&pure(rom.clone()));
     replay.inputs = vec![Joypad::default(); 30];
     let routines = table().entries().filter(|e| e.name == "outer").cloned().collect();
-    let config =
-        LockstepConfig { table: Some(routines), sync_keys: vec![CALL_INNER], budget_frames: 30 };
+    let config = LockstepConfig {
+        table: Some(routines),
+        sync_keys: vec![CALL_INNER],
+        budget_frames: 30,
+        b_packs: None,
+    };
     let report = run_lockstep(rom, &replay, &config, None).unwrap();
     assert_eq!(report.hook_stats.len(), 1, "{:?}", report.hook_stats);
     let [(name, sync)] = &report.sync_stats[..] else { panic!("{:?}", report.sync_stats) };

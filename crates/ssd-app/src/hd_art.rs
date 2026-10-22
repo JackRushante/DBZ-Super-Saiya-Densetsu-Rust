@@ -5,7 +5,7 @@
 //! too; `--no-hd-font` turns it off.
 
 use ssd_hd::Font;
-use ssd_hd::pack::Pack;
+use ssd_hd::pack::{Overlay, Pack};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -18,9 +18,29 @@ pub struct Config {
     pub off: bool,
     /// No HD text: the game's own letters, made bigger by the look.
     pub font_off: bool,
+    /// The HD art of the data packs of the run (`--mods`), drawn over the installed pack's.
+    pub overlays: Vec<Overlay>,
+    /// The image the data packs run on (`--mods`): the field's maps of the packs are in its banks.
+    pub image: Option<Vec<u8>>,
 }
 
-static CONFIG: Mutex<Config> = Mutex::new(Config { pack: None, off: false, font_off: false });
+static CONFIG: Mutex<Config> = Mutex::new(Config {
+    pack: None,
+    off: false,
+    font_off: false,
+    overlays: Vec::new(),
+    image: None,
+});
+
+/// The bytes the field of the Enhanced picture is read from: the image the data packs run on, or else the ROM.
+pub fn world(rom: &[u8]) -> Vec<u8> {
+    CONFIG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .image
+        .clone()
+        .unwrap_or_else(|| rom.to_vec())
+}
 // Found on first use, and forgotten by [`configure`]: Android runs the game more than once in a process (the setup can
 // install a new pack between two runs).
 static PACK: Mutex<Option<Found<Pack>>> = Mutex::new(None);
@@ -55,6 +75,9 @@ pub fn pack(rom: &[u8]) -> Option<Arc<Pack>> {
             },
             None => Pack::find(&crate::paths::data_dir().join("cache"), ssd_rom::crc32(rom)),
         };
+        let found = found.map(|pack| {
+            config.overlays.iter().fold(pack, |pack, overlay| pack.with_overlay(overlay.clone()))
+        });
         let pack = found
             .filter(|pack| !pack.art.pictures().is_empty() || !pack.art.objects().is_empty())?;
         log::info!(

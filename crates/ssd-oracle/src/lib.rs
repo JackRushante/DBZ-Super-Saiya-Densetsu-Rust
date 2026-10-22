@@ -38,8 +38,8 @@ pub use machine::{
     TickEvent,
 };
 pub use replay::{
-    CORE_VERSION, HostEvent, MODE_CLASSIC, MODE_ENHANCED, ORACLE_REVISION, Recorder, Replay,
-    apply_events,
+    CORE_VERSION, HostEvent, MODE_CLASSIC, MODE_ENHANCED, ORACLE_REVISION, PackTag, Recorder,
+    Replay, apply_events,
 };
 pub use savestore::{FsSaveStore, MemorySaveStore, SaveStore};
 pub use sinks::{AudioSink, NullAudio};

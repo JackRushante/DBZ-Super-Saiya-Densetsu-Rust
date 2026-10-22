@@ -54,6 +54,8 @@ pub enum Status {
     Done(String),
     /// The file was refused, or the work failed: the reason. The page is the choice again.
     Error(String),
+    /// A message that leaves the page's choice open (a mod picked on the pack page went to the mods folder).
+    Note(String),
 }
 
 /// What a button does.
@@ -288,7 +290,7 @@ impl Setup {
                     .find(|b| b.enabled && b.command == Command::Back)
                     .map(|b| b.command);
             }
-            Key::ResetPage | Key::ResetAll => {}
+            Key::ResetPage | Key::ResetAll | Key::Apply => {}
         }
         None
     }
@@ -387,7 +389,9 @@ impl Setup {
     fn foot_status(&self, list: &mut DrawList, idle: &str) {
         let (message, color) = match &self.status {
             Status::Idle => (idle.to_owned(), INK),
-            Status::Busy { text, .. } | Status::Done(text) => (text.clone(), INK),
+            Status::Busy { text, .. } | Status::Done(text) | Status::Note(text) => {
+                (text.clone(), INK)
+            }
             Status::Error(text) => (text.clone(), palette::DARK_RED),
         };
         let chars = (440.0 / (ADVANCE * 14.0)) as usize;
@@ -405,7 +409,8 @@ impl Setup {
             15.0,
             &format!(
                 "Enhanced mode uses the HD art pack. Pick the file hd-pack.zip. It takes about \
-                 {PACK_SIZE_NOTE} of free space once installed."
+                 {PACK_SIZE_NOTE} of free space once installed. A mod (a .ssdpack file) picked here goes \
+                 to the mods."
             ),
         );
         match &self.status {
@@ -428,11 +433,13 @@ impl Setup {
                 text(list, 24.0, 192.0, 15.0, message, INK, Align::Left);
                 bar(list, Some(100));
             }
-            Status::Error(message) => {
+            Status::Error(message) | Status::Note(message) => {
+                let colour =
+                    if matches!(self.status, Status::Error(_)) { palette::DARK_RED } else { INK };
                 let chars = (650.0 / (ADVANCE * 14.0)) as usize;
                 for (line, part) in wrap(message, chars).iter().take(4).enumerate() {
                     let top = 190.0 + 20.0 * line as f32;
-                    text(list, 24.0, top, 14.0, part, palette::DARK_RED, Align::Left);
+                    text(list, 24.0, top, 14.0, part, colour, Align::Left);
                 }
             }
         }
@@ -636,6 +643,15 @@ mod tests {
         setup.set_status(Status::Done("Installed.".to_owned()));
         let start = inner(500.0, 330.0, 0.0, 0.0);
         assert_eq!(setup.hit(start.x, start.y), Some(Command::Continue));
+    }
+
+    #[test]
+    fn a_mod_installed_from_the_pack_page_leaves_the_pick_open() {
+        let mut setup = Setup::new(Page::Pack);
+        setup.set_status(Status::Note("The mod Free progression is installed.".to_owned()));
+        assert!(texts(&setup.scene()).iter().any(|t| t.contains("Free progression")));
+        let pick = setup.buttons().into_iter().find(|b| b.command == Command::Pick).unwrap();
+        assert!(pick.enabled, "the HD pack can still be picked");
     }
 
     #[test]

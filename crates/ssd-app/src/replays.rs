@@ -413,6 +413,7 @@ mod tests {
             initial_sram: None,
             mode: 0,
             events: Vec::new(),
+            packs: None,
             inputs: vec![Joypad::default(); 3],
         };
         replay.write_to(&dir.path().join("battle.ssdreplay"), CORE_VERSION).unwrap();

@@ -234,6 +234,9 @@ pub struct Machine {
     /// The joypad of the frame the core polls, looked up once per frame and run.
     input_cache: InputCache,
     rom_crc32: u32,
+    /// CRC32 of the image the machine runs: the ROM's own for [`Machine::with_wram_seed`], a pack
+    /// set's image for [`Machine::with_image`]. The save states are keyed on it.
+    image_crc32: u32,
     /// The ROM image as the core maps it (copier header stripped, mirrored to a power of two),
     /// for reading code without side effects ([`Machine::peek_code`]).
     rom: Arc<[u8]>,
@@ -462,13 +465,43 @@ impl Machine {
     /// As for [`Machine::new`].
     pub fn with_wram_seed(
         rom: Vec<u8>,
+        saves: Box<dyn SaveStore>,
+        wram_seed: u64,
+    ) -> Result<Self, OracleError> {
+        let rom_crc32 = ssd_rom::crc32(&rom);
+        Self::create(rom, rom_crc32, rom_crc32, saves, wram_seed)
+    }
+
+    /// A machine at power-on that runs `image` instead of a ROM: a pack set's image (`ssd_mod::build`),
+    /// whose first 1 MiB is the ROM with CRC32 `original_crc32`. [`Machine::rom_crc32`] reports that CRC32,
+    /// [`Machine::image_crc32`] the image's, and the save states are keyed on the image's. Its WRAM fills
+    /// from `wram_seed` as [`Machine::with_wram_seed`] does.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Machine::new`].
+    pub fn with_image(
+        image: Vec<u8>,
+        original_crc32: u32,
+        saves: Box<dyn SaveStore>,
+        wram_seed: u64,
+    ) -> Result<Self, OracleError> {
+        let image_crc32 = ssd_rom::crc32(&image);
+        Self::create(image, original_crc32, image_crc32, saves, wram_seed)
+    }
+
+    /// The machine of [`Machine::with_wram_seed`] and [`Machine::with_image`] for the bytes `rom`
+    /// (the ROM or the image) with the given CRC32s.
+    fn create(
+        rom: Vec<u8>,
+        rom_crc32: u32,
+        image_crc32: u32,
         mut saves: Box<dyn SaveStore>,
         wram_seed: u64,
     ) -> Result<Self, OracleError> {
         // The core treats any SRAM read error as "no save" and would later overwrite the real file
         // with blank SRAM, so surface read errors here before the core is created.
         saves.load("sav")?;
-        let rom_crc32 = ssd_rom::crc32(&rom);
         let image = rom_image(&rom);
         // Changing this configuration changes what replays play: bump `ORACLE_REVISION`.
         let config = SnesEmulatorConfig {
@@ -495,6 +528,7 @@ impl Machine {
             frames: 0,
             input_cache: InputCache::default(),
             rom_crc32,
+            image_crc32,
             rom: image,
             wram_seed,
             audio_hz: None,
@@ -981,6 +1015,13 @@ impl Machine {
             mode => mode,
         };
         match mode {
+            HookMode::Patch => {
+                let call = RustCall { key, func, ret, max_cost: 0, defer_hold };
+                match self.dispatch_rust(&call, input, audio)? {
+                    Some(rendered) => Ok(Dispatch::Ran { rendered }),
+                    None => Ok(Dispatch::Resumed),
+                }
+            }
             HookMode::Rust => {
                 let (cycles, bound) = (entry.cycles, entry.bound);
                 // The bound of this call, from the entry state, in place of the static maximum.
@@ -2241,10 +2282,17 @@ impl Machine {
         self.frames
     }
 
-    /// CRC32 of the ROM image the machine runs.
+    /// CRC32 of the ROM the machine runs (of the original ROM, for a machine on a pack set's image).
     #[must_use]
     pub fn rom_crc32(&self) -> u32 {
         self.rom_crc32
+    }
+
+    /// CRC32 of the image the machine runs: [`Machine::rom_crc32`] unless it runs a pack set's image
+    /// ([`Machine::with_image`]).
+    #[must_use]
+    pub fn image_crc32(&self) -> u32 {
+        self.image_crc32
     }
 
     /// Seed of the machine's power-on WRAM fill ([`Machine::with_wram_seed`]).
@@ -2652,6 +2700,7 @@ impl Machine {
             frames: self.frames,
             input_cache: InputCache::default(),
             rom_crc32: self.rom_crc32,
+            image_crc32: self.image_crc32,
             rom: Arc::clone(&self.rom),
             wram_seed: self.wram_seed,
             audio_hz: self.audio_hz,
@@ -2719,7 +2768,7 @@ impl Machine {
             payload.extend_from_slice(&hold.slow.to_le_bytes());
             payload.push(u8::from(hold.poll));
         }
-        state::wrap(SnesEmulator::save_state_version(), self.rom_crc32, self.frames, &payload)
+        state::wrap(SnesEmulator::save_state_version(), self.image_crc32, self.frames, &payload)
     }
 
     /// Validates everything before touching the running machine: on error it is left unchanged.
@@ -2729,7 +2778,7 @@ impl Machine {
     /// Returns [`OracleError::State`] if the bytes are not a valid state for this ROM and core.
     pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), OracleError> {
         let (header, payload) =
-            state::unwrap(bytes, SnesEmulator::save_state_version(), self.rom_crc32)
+            state::unwrap(bytes, SnesEmulator::save_state_version(), self.image_crc32)
                 .map_err(OracleError::State)?;
         let (decoded, used): (SnesEmulator, usize) =
             bincode::decode_from_slice(payload, state::STATE_CONFIG)

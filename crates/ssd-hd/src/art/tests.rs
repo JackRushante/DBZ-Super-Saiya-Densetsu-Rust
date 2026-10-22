@@ -1,10 +1,10 @@
 //! The art passes on synthetic frames: a pack of a few pictures made in a temporary folder, and
 //! frames with one tile or one sprite.
 
-use super::ArtState;
 use super::poses::{self, Pose};
+use super::{ArtState, Conditions};
 use crate::art_index::{ArtIndex, Object, Palette, Picture};
-use crate::pack::{Asset, Index, Manifest, Mode, Pack, word_key};
+use crate::pack::{Asset, Index, Manifest, Mode, Pack, PoseVariant, word_key};
 use crate::world::{HudPlacement, Rom, WideOptions, WideRenderer};
 use crate::{Fate, HdOptions, ItemKey, Look, Renderer, SpriteLine, TallyLayer};
 use ssd_oracle::{FrameLog, LineEntry, LineRegs};
@@ -82,6 +82,7 @@ fn pack_of(dir: &std::path::Path, assets: Vec<Asset>, art: ArtIndex) -> Arc<Pack
         maps: crate::mapart::Index::default(),
         bg: crate::bgart::Index::default(),
         mode7: crate::mode7art::Index::default(),
+        variants: Vec::new(),
     })
 }
 
@@ -1861,4 +1862,159 @@ fn a_portrait_whose_halves_use_two_palette_rows_is_drawn_in_one() {
     let portrait = &tally.portraits[0];
     assert_eq!(portrait.pictures.len(), 1, "{portrait:?}");
     assert_eq!(portrait.rows.len(), 1, "one row: {portrait:?}");
+}
+
+/// Work RAM with the Kaioken on (`$0C36` bit 7) and Super Saiyan Goku in party record `slot`.
+fn wram_with_kaioken(on: bool, slot: usize) -> Vec<u8> {
+    let mut wram = vec![0_u8; 0x20000];
+    wram[0x0C36] = if on { 0x80 } else { 0x40 };
+    wram[0x0B00 + 0x20 * slot + 1] = 0x3B;
+    wram
+}
+
+#[test]
+fn the_kaioken_condition_is_the_bit_of_the_state_and_goku_in_a_party_record() {
+    let on = Conditions::of_work_ram(&wram_with_kaioken(true, 3));
+    assert_eq!(on, Conditions { kaioken: true, super_saiyan_goku: true });
+    let off = Conditions::of_work_ram(&wram_with_kaioken(false, 3));
+    assert_eq!(off, Conditions { kaioken: false, super_saiyan_goku: true }, "Goku without it");
+    let mut no_goku = wram_with_kaioken(true, 3);
+    no_goku[0x0B00 + 0x20 * 3 + 1] = 0x39;
+    assert_eq!(Conditions::of_work_ram(&no_goku), Conditions::default(), "Goku's unit is $3B");
+    assert_eq!(Conditions::of_work_ram(&[]), Conditions::default(), "no work RAM says no");
+}
+
+#[test]
+fn super_saiyan_goku_is_drawn_from_his_own_art_for_the_pixels_he_shares_with_the_normal_goku() {
+    let dir = tempfile::tempdir().unwrap();
+    // The 16 x 16 fighter of `fighter_log`: the normal Goku's art for its pixels is blue, Super Saiyan
+    // Goku's red. The normal unit has a second pose (other pixels), so it is the unit with the most
+    // poses: the one `unit_for` gave before the party's Super Saiyan Goku was taken into account.
+    let (frame, pose) = fighter_log(40, 50);
+    write_png(&dir.path().join("art/normal.png"), 64, 64, |_, _| [0, 0, 255, 255]);
+    write_png(&dir.path().join("art/ssj.png"), 64, 64, |_, _| [255, 0, 0, 255]);
+    write_png(&dir.path().join("art/other.png"), 64, 64, |_, _| [0, 255, 0, 255]);
+    let goku = |id: &str, key: u64, art: &str| Object {
+        id: id.to_owned(),
+        key,
+        ..object(&pose, art, false)
+    };
+    let objects = vec![
+        goku("battle-goku-000", pose.key, "art/normal.png"),
+        goku("battle-goku-001", pose.key ^ 1, "art/other.png"),
+        goku("battle-goku-ssj-000", pose.key, "art/ssj.png"),
+    ];
+    let pack = pack_of(dir.path(), Vec::new(), ArtIndex::new(Vec::new(), objects));
+    let mut renderer = Renderer::new();
+    renderer.set_art(Some(pack));
+    // A pixel of the sprite
+    let (x, y) = (41 * 4 + 1, 51 * 4 + 1);
+    renderer.set_conditions(Conditions::default());
+    let without = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&without, x, y), [0, 0, 255], "no Super Saiyan Goku: the normal unit");
+    // Goku with the Kaioken off: `wram_with_kaioken(false, 0)` has his unit in the first party record
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
+    let with = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&with, x, y), [255, 0, 0], "Super Saiyan Goku: his own art");
+    // The close-ups of the special attacks are another set of Goku's art: its Super Saiyan set is drawn the same way
+    let gallery = pack_of(
+        dir.path(),
+        Vec::new(),
+        ArtIndex::new(
+            Vec::new(),
+            vec![
+                goku("gallery-party-goku-u00-000", pose.key, "art/normal.png"),
+                goku("gallery-party-goku-u00-001", pose.key ^ 1, "art/other.png"),
+                goku("gallery-party-goku-ssj-000", pose.key, "art/ssj.png"),
+            ],
+        ),
+    );
+    renderer.set_art(Some(gallery));
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
+    let close_up = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&close_up, x, y), [255, 0, 0], "Super Saiyan Goku's close-up: his own art");
+    // A pose that the Super Saiyan art has no picture of (its pixels are the other ones) stays the normal art
+    let normal_only = pack_of(
+        dir.path(),
+        Vec::new(),
+        ArtIndex::new(
+            Vec::new(),
+            vec![
+                goku("battle-goku-000", pose.key, "art/normal.png"),
+                goku("battle-goku-001", pose.key ^ 1, "art/other.png"),
+                goku("battle-goku-ssj-001", pose.key ^ 1, "art/ssj.png"),
+            ],
+        ),
+    );
+    renderer.set_art(Some(normal_only));
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
+    let kept = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&kept, x, y), [0, 0, 255], "no Super Saiyan art for the pose: the normal one");
+}
+
+/// A pack with the picture `art/o.png` of the fighter of [`fighter_log`] (blue) and the pose variant `art/v.png` (red, `size`
+/// art pixels) of the same object, drawn while the Kaioken is on; the variant's margin is 2 game pixels.
+fn variant_pack(dir: &tempfile::TempDir, pose: &Pose, variant: Option<(u32, u32)>) -> Arc<Pack> {
+    write_png(&dir.path().join("art/o.png"), 64, 64, |_, _| [0, 0, 255, 255]);
+    let mut pack = pack_of(
+        dir.path(),
+        Vec::new(),
+        ArtIndex::new(Vec::new(), vec![object(pose, "art/o.png", false)]),
+    );
+    if let Some((width, height)) = variant {
+        write_png(&dir.path().join("art/v.png"), width, height, |_, _| [255, 0, 0, 255]);
+        let file = dir.path().join("art/v.png").to_string_lossy().into_owned();
+        let variants = vec![PoseVariant {
+            art: "battle-x-000".to_owned(),
+            when: ssd_mod::pose::Condition::Kaioken,
+            margin: 2,
+            file,
+        }];
+        Arc::get_mut(&mut pack).unwrap().variants = variants;
+    }
+    pack
+}
+
+#[test]
+fn a_pose_variant_is_drawn_over_its_box_and_its_margin_while_the_kaioken_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    // The 16 x 16 fighter at (40, 50), the variant 4 game pixels larger (2 on each side): 80 x 80 art pixels
+    let (frame, pose) = fighter_log(40, 50);
+    let pack = variant_pack(&dir, &pose, Some((80, 80)));
+    let mut renderer = Renderer::new();
+    let plain = renderer.render_hd(&frame, options(4)).unwrap();
+    renderer.set_art(Some(pack));
+    let red = [255, 0, 0];
+    // Off: the object's own picture, and nothing past the sprite
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
+    let off = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&off, 41 * 4 + 1, 51 * 4 + 1), [0, 0, 255], "the object's picture");
+    assert_eq!(pixel(&off, 38 * 4 + 1, 48 * 4 + 1), pixel(&plain, 38 * 4 + 1, 48 * 4 + 1));
+    // On: the variant covers the sprite and its margin (frame 38 to 57, 48 to 67), and nothing past it
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(true, 0)));
+    let on = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&on, 41 * 4 + 1, 51 * 4 + 1), red, "the sprite's pixels");
+    assert_eq!(pixel(&on, 38 * 4, 48 * 4), red, "the margin's first pixel");
+    assert_eq!(pixel(&on, 57 * 4 + 3, 67 * 4 + 3), red, "the margin's last pixel");
+    assert_ne!(pixel(&on, 37 * 4 + 3, 50 * 4), red, "nothing past the margin on the left");
+    assert_ne!(pixel(&on, 40 * 4, 47 * 4 + 3), red, "nor above it");
+    // Away from the pose nothing changes
+    assert_eq!(pixel(&on, 5, 5), pixel(&plain, 5, 5));
+}
+
+#[test]
+fn a_pose_variant_that_is_missing_or_of_another_size_is_not_drawn_and_the_object_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let (frame, pose) = fighter_log(40, 50);
+    let on = Conditions::of_work_ram(&wram_with_kaioken(true, 0));
+    // The variant's picture must be the object's (16 + 2 x 2 game pixels, four art pixels to one): 80 x 80
+    for variant in [Some((64, 64)), None] {
+        let pack = variant_pack(&dir, &pose, variant);
+        let mut renderer = Renderer::new();
+        renderer.set_art(Some(pack));
+        renderer.set_conditions(on);
+        let drawn = renderer.render_hd(&frame, options(4)).unwrap();
+        assert_eq!(pixel(&drawn, 41 * 4 + 1, 51 * 4 + 1), [0, 0, 255], "{variant:?}");
+        assert_ne!(pixel(&drawn, 38 * 4, 48 * 4), [255, 0, 0], "{variant:?}");
+    }
 }

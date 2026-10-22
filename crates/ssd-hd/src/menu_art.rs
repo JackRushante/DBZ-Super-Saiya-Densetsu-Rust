@@ -146,6 +146,7 @@ mod tests {
             maps: crate::mapart::Index::default(),
             bg: crate::bgart::Index::default(),
             mode7: crate::mode7art::Index::default(),
+            variants: Vec::new(),
         }
     }
 

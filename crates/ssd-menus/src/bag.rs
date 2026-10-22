@@ -23,7 +23,9 @@ pub const STACK: u16 = 99;
 /// The Dragon Balls: object ids 33 to 39.
 const DRAGON_BALLS: std::ops::RangeInclusive<u8> = 33..=39;
 /// Objects whose list entry keeps state of its own (`item_extra`): the card changers (the mask of the
-/// choices used) and Porunga (the wishes left). Each unit of them is a stack of its own.
+/// choices used) and Porunga (the wishes left). Their units stack by state word: a unit joins a stack
+/// only when the stack holds the same word, so a unit whose state changed (a wish used, a choice of a
+/// card changer) leaves its stack and becomes a stack of its own.
 const KEEPS_STATE: [u8; 6] = [9, 10, 11, 12, 13, 15];
 
 /// The rules of a bag: its slots and the units of a stack. Both are options (`Ruleset`).
@@ -54,7 +56,7 @@ impl Class {
     #[must_use]
     pub fn of(object: u8, aid: bool) -> Self {
         let key = aid || DRAGON_BALLS.contains(&object);
-        Self { key, stackable: !key && !KEEPS_STATE.contains(&object) }
+        Self { key, stackable: !key }
     }
 }
 
@@ -170,8 +172,42 @@ impl Bag {
             .sum()
     }
 
+    /// Brings a bag saved by an older version up to today's rules: each stack's class is computed again (state objects
+    /// became stackable by their state word), and the units of stacks that may share one are joined into the first of
+    /// them, up to the stack limit. Called when a saved bag is bound, so a bag kept before a rule change looks as one
+    /// made under it.
+    pub fn coalesce(&mut self) {
+        for stack in &mut self.stacks {
+            stack.class =
+                Class::of(stack.object, stack.class.key && !DRAGON_BALLS.contains(&stack.object));
+        }
+        let limit = self.rules.stack;
+        let mut joined: Vec<Stack> = Vec::with_capacity(self.stacks.len());
+        for stack in self.stacks.drain(..) {
+            let mut stack = stack;
+            if stack.class.stackable {
+                let by_state = KEEPS_STATE.contains(&stack.object);
+                for earlier in joined.iter_mut().filter(|earlier| {
+                    earlier.object == stack.object && (!by_state || earlier.extra == stack.extra)
+                }) {
+                    let moved = stack.count.min(limit.saturating_sub(earlier.count));
+                    earlier.count += moved;
+                    stack.count -= moved;
+                    if stack.count == 0 {
+                        break;
+                    }
+                }
+            }
+            if stack.count > 0 {
+                joined.push(stack);
+            }
+        }
+        self.stacks = joined;
+    }
+
     /// Adds one unit of `object` with the list entry's state `extra`. It joins the first stack of the
-    /// object that has room (a stackable object only), else it takes a new slot.
+    /// object that has room (a stackable object only), else it takes a new slot. A state object (see
+    /// [`KEEPS_STATE`]) joins only a stack with the same state word.
     ///
     /// # Errors
     ///
@@ -179,9 +215,10 @@ impl Bag {
     pub fn add(&mut self, object: u8, extra: u16, class: Class) -> Result<u32, Full> {
         if class.stackable {
             let limit = self.rules.stack;
-            if let Some(stack) =
-                self.stacks.iter_mut().find(|stack| stack.object == object && stack.count < limit)
-            {
+            let by_state = KEEPS_STATE.contains(&object);
+            if let Some(stack) = self.stacks.iter_mut().find(|stack| {
+                stack.object == object && stack.count < limit && (!by_state || stack.extra == extra)
+            }) {
                 stack.count += 1;
                 return Ok(stack.id);
             }
@@ -347,7 +384,8 @@ mod tests {
         assert_eq!(Rules::default(), Rules { slots: 60, stack: 99 });
         assert!(Class::of(33, false).key && !Class::of(33, false).stackable);
         assert!(Class::of(4, true).key, "an AID object is a key item");
-        assert!(!Class::of(10, false).stackable, "a card changer keeps its own state");
+        assert!(Class::of(10, false).stackable, "a card changer stacks by its state word");
+        assert!(Class::of(15, false).stackable, "Porunga stacks by its wishes left");
         assert!(Class::of(2, false).stackable);
     }
 
@@ -387,12 +425,70 @@ mod tests {
     }
 
     #[test]
-    fn a_state_object_takes_a_slot_for_each_unit() {
+    fn a_bag_saved_before_state_objects_stacked_is_joined_when_bound() {
+        // Before the rule change each Porunga was a stack of its own, marked not stackable.
+        let old = Class { key: false, stackable: false };
         let mut bag = Bag::new(Rules::default());
-        bag.add(15, 3, Class::of(15, false)).unwrap();
-        bag.add(15, 2, Class::of(15, false)).unwrap();
-        assert_eq!(bag.stacks().len(), 2, "each Porunga keeps its own wishes");
-        assert_eq!(bag.stacks()[1].extra, 2);
+        bag.stacks =
+            (0..3).map(|id| Stack { id, object: 15, count: 1, extra: 0, class: old }).collect();
+        bag.stacks.push(Stack { id: 3, object: 15, count: 1, extra: 7, class: old });
+        bag.stacks.push(Stack {
+            id: 4,
+            object: 33,
+            count: 1,
+            extra: 0,
+            class: Class::of(33, false),
+        });
+        bag.next_id = 5;
+        bag.coalesce();
+        let counts: Vec<(u8, u16, u16)> =
+            bag.stacks().iter().map(|s| (s.object, s.count, s.extra)).collect();
+        assert_eq!(
+            counts,
+            [(15, 3, 0), (15, 1, 7), (33, 1, 0)],
+            "same state joins, another state and a key item stay"
+        );
+        assert!(bag.is_consistent());
+    }
+
+    #[test]
+    fn two_fresh_state_objects_stack_and_another_state_takes_a_stack_of_its_own() {
+        let mut bag = Bag::new(Rules::default());
+        // The wishes left are the high byte of the state word (the price box reads them so).
+        let fresh = bag.add(15, 0x0300, Class::of(15, false)).unwrap();
+        assert_eq!(bag.add(15, 0x0300, Class::of(15, false)), Ok(fresh));
+        assert_eq!(bag.stacks().len(), 1, "two fresh Porunga are one stack");
+        assert_eq!(bag.units_of(15), 2);
+        let other = bag.add(15, 0x0200, Class::of(15, false)).unwrap();
+        assert_ne!(other, fresh, "a Porunga with other wishes left is a stack of its own");
+        assert_eq!(bag.stacks().len(), 2);
+    }
+
+    #[test]
+    fn a_used_unit_of_a_state_object_leaves_its_stack_with_its_new_state() {
+        let mut bag = Bag::new(Rules::default());
+        let fresh = bag.add(15, 0x0300, Class::of(15, false)).unwrap();
+        bag.add(15, 0x0300, Class::of(15, false)).unwrap();
+        // The keeper's split: one unit leaves the stack it was in, and one unit comes in with the new word.
+        assert_eq!(bag.take(fresh, 1), 1);
+        let used = bag.add(15, 0x0200, Class::of(15, false)).unwrap();
+        let stacks = bag.stacks();
+        assert_eq!(stacks.len(), 2);
+        assert_eq!(
+            (stacks[0].id, stacks[0].count, stacks[0].extra),
+            (fresh, 1, 0x0300),
+            "the rest keep the old state"
+        );
+        assert_eq!(
+            (stacks[1].id, stacks[1].count, stacks[1].extra),
+            (used, 1, 0x0200),
+            "one unit takes the new state"
+        );
+        assert_eq!(bag.project(None), [fresh, used], "the projection shows both stacks");
+        let mut sidecar = Sidecar::empty();
+        sidecar.store(0, 0xCAFE, &bag);
+        let back = Sidecar::from_bytes(&sidecar.to_bytes()).unwrap();
+        assert_eq!(back.bag_for(0, 0xCAFE), Some(&bag), "the sidecar keeps both stacks");
     }
 
     #[test]

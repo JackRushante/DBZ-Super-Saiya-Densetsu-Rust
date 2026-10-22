@@ -41,8 +41,9 @@ use ssd_oracle::{CgramWrite, Color, FrameLog, LineEntry, OamWrite, VramWrite};
 use std::sync::Arc;
 
 pub use art::{
-    ArtSource, ArtStats, COLOUR_CLASSES, Drawn, DrawnPose, Fate, FrameTally, Image, ItemKey,
-    KindPixels, PortraitUse, PoseShape, PoseStat, TallyCount, TallyItem, TallyLayer, colour_class,
+    ArtSource, ArtStats, COLOUR_CLASSES, Conditions, Drawn, DrawnPose, Fate, FrameTally, Image,
+    ItemKey, KindPixels, PortraitUse, PoseShape, PoseStat, TallyCount, TallyItem, TallyLayer,
+    colour_class,
 };
 pub use binding::Binder;
 pub use cards::{CardArt, Preview as CardPreview};
@@ -231,6 +232,14 @@ impl Renderer {
     pub fn set_art_measure(&mut self, on: bool) {
         if let Some(art) = self.art.as_mut() {
             art.measure = on;
+        }
+    }
+
+    /// The conditions of the frame the next picture with art is drawn from: the pack's pose variants whose condition holds
+    /// are drawn ([`Conditions::of_work_ram`] reads them from the work RAM).
+    pub fn set_conditions(&mut self, conditions: Conditions) {
+        if let Some(art) = self.art.as_mut() {
+            art.conditions = conditions;
         }
     }
 

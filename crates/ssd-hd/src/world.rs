@@ -14,6 +14,6 @@ pub use check::{ObjectCheck, TileCheck, TileDifference, check_objects, check_til
 pub use map::{FieldMap, FieldState, Rom, is_field_mode};
 pub use objects::{MapObject, Part, metasprite};
 pub use wide::{
-    HudPlacement, MAX_WIDTH, NotField, Rect, Scene, WIDTH_16_9, WideError, WideFrame, WideHd,
-    WideOptions, WideRenderer, WideRun, WideStats, classify, place_window,
+    HudPlacement, MAX_WIDTH, NotField, Rect, Scene, SharedHd, WIDTH_16_9, WideError, WideFrame,
+    WideHd, WideOptions, WideRenderer, WideRun, WideStats, classify, next_serial, place_window,
 };

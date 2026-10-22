@@ -17,18 +17,22 @@ use super::{MenuProbe, PORUNGA, SAVE_DONE_STEP, SAVE_LIST_STEP, SAVE_SCREEN};
 use crate::cheats::{CHEATS_TAG, block_events, frame_events, hand_events, settings_events};
 use crate::data as d;
 use crate::gameplay::{self, AutoRun};
+use crate::mods::state::{MODS_TAG, apply_events, capture, clear_events};
 use ssd_menus::bag::{Bag, Rules, SavedBag, Sidecar};
 use ssd_menus::cheats::{CHARACTERS, CheatSidecar, Cheats, SavedCheats};
+use ssd_menus::mods_state::{ModState, ModsSidecar};
 use ssd_menus::nav::{
-    Action, Entry, ItemRow, Key, Nav, ORIGINAL_MENU_ROWS, SPAWNER_OBJECTS, SPAWNER_PAGE, Spawner,
-    command_rows,
+    Action, Entry, ItemRow, Key, ModsLine, Nav, ORIGINAL_MENU_ROWS, SPAWNER_OBJECTS, SPAWNER_PAGE,
+    Spawner, command_rows,
 };
 use ssd_menus::options::{
     Category, Effect, Opens, Options, SlotOptions, Values, controls, difficulty, video,
 };
+use ssd_menus::packs::{Catalog, Listed, Request};
 use ssd_menus::view::{
-    BagView, CheatsView, ControlsView, Labels, MenuView, ObjectLabel, OptionsView, RefusedKey,
-    Screen, Selected, SpawnerRow, SpawnerView, StackView,
+    BagView, ChapterLine, CheatsView, ControlsView, Labels, MenuView, ModsView, ObjectLabel,
+    OptionsView, PackLine, PackState, RefusedKey, Screen, Selected, SpawnerRow, SpawnerView,
+    StackView,
 };
 use ssd_menus::{DrawList, screens};
 use ssd_oracle::{HostEvent, Joypad};
@@ -73,14 +77,17 @@ pub enum Binding {
 }
 
 /// What a frame of the menu needs from the host: the joypad of the frame, the host events to make
-/// before it, the bag of a save that changed (to be kept in the sidecar file), and the cheats of the save
-/// a Save wrote (kept in `saves/ssd.cheats`).
+/// before it, the bag of a save that changed (to be kept in the sidecar file), and the cheats and the mod state
+/// of the save a Save wrote (kept in `saves/ssd.cheats` and `saves/ssd.mods`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
     pub pad: Joypad,
     pub events: Vec<HostEvent>,
     pub saved: Option<SavedBag>,
     pub saved_cheats: Option<SavedCheats>,
+    /// The slot and checksum word of the save a Save wrote, for its mod state's file (`saves/ssd.mods`). Every save
+    /// reports it, as it reports the cheats, so a save without a mod state drops the entry it had.
+    pub saved_mods: Option<(u8, u16)>,
     /// The options of the save slot a Save wrote (kept in `saves/ssd.options`): the file is to be written.
     pub saved_options: bool,
     /// The options kept for this PC, when one changed this frame (kept in `saves/ssd.settings`).
@@ -123,6 +130,10 @@ struct State {
     cheat_save: Option<(u8, u16)>,
     /// The host events of the cheats' changes, made before the next frame.
     cheat_events: Vec<HostEvent>,
+    /// The mod state of the save slots (`saves/ssd.mods`): the extended flags and the high parts of the wide BP.
+    mods_sidecar: ModsSidecar,
+    /// The save the mod state is bound to (the bag's save), so that a new save binds it again.
+    mods_save: Option<(u8, u16)>,
     /// The slot the Save list's cursor is on, kept from the list's step until the Save completes.
     save_slot: Option<u8>,
     /// Whether the Save was at its completion step at the last frame (a completion is seen once).
@@ -130,6 +141,9 @@ struct State {
     /// The Cheats screen is open over a battle ([`Driver::open_battle_cheats`]): Back closes it, and a change
     /// writes the settings only, so the runtime bytes the wrappers keep through the battle stay.
     battle_cheats: bool,
+    /// The Item list of a battle is open and the HD's Items screen is over it: Back goes to the battle's command
+    /// window, and the rows are the stacks a battle can use ([`usable_in_battle`]).
+    battle_items: bool,
     /// The options of the run: the values saved with the game (the bound save's) and the ones of this PC.
     options: Options,
     /// The options of the save slots (`saves/ssd.options`).
@@ -146,10 +160,23 @@ struct State {
     video_apply: bool,
     /// The message auto-run: the wait of a finished message and the press (the Gameplay page).
     auto_run: AutoRun,
+    /// The data packs the Data packs screen lists, as the run found them (kept across a state load).
+    packs: Catalog,
+    /// The list as the player leaves it: the packs in their order, and whether each is on. Made from `packs` when the
+    /// screen opens.
+    packs_edit: Vec<Listed>,
+    /// A line the Data packs screen shows until the next key: why the host could not do what the screen asked.
+    mods_alert: Option<String>,
+    /// The request the Data packs screen made, once: the host applies the set, or starts a chapter.
+    mods_request: Option<Request>,
 }
 
 /// The frames a second the video question counts its ten seconds in (the console's rate, which the host paces to).
 const VIDEO_FPS: u32 = 60;
+/// The line of the Data packs screen when a chapter or Main game is chosen while the list differs from the set in use.
+const APPLY_FIRST: &str = "Apply the packs first: the game runs with another set.";
+/// The line of the Data packs screen when Apply is chosen for the set the game already runs with.
+const UNCHANGED: &str = "The game already runs with this set.";
 
 /// The HD menu of a run: the curtain, the HD cursors, the bag and the plan that is running, if one is.
 pub struct Driver {
@@ -186,9 +213,12 @@ impl Driver {
                 cheats_installed: false,
                 cheat_save: None,
                 cheat_events: Vec::new(),
+                mods_sidecar: ModsSidecar::empty(),
+                mods_save: None,
                 save_slot: None,
                 save_done: false,
                 battle_cheats: false,
+                battle_items: false,
                 options: Options::default(),
                 option_slots: SlotOptions::empty(),
                 settings_changed: false,
@@ -197,6 +227,10 @@ impl Driver {
                 video_frames: 0,
                 video_apply: false,
                 auto_run: AutoRun::default(),
+                packs: Catalog::default(),
+                packs_edit: Vec::new(),
+                mods_alert: None,
+                mods_request: None,
             },
         }
     }
@@ -207,6 +241,14 @@ impl Driver {
     pub fn with_cheats(mut self, sidecar: CheatSidecar) -> Self {
         self.state.cheats_installed = true;
         self.state.cheat_sidecar = sidecar;
+        self
+    }
+
+    /// The run keeps the mod state of the save slots of `sidecar` (`saves/ssd.mods`), bound to the bag's save as the
+    /// cheats are.
+    #[must_use]
+    pub fn with_mods(mut self, sidecar: ModsSidecar) -> Self {
+        self.state.mods_sidecar = sidecar;
         self
     }
 
@@ -234,6 +276,29 @@ impl Driver {
     /// The setup a button of the Game page asked for, once (the host restarts the game into it).
     pub fn take_setup_request(&mut self) -> Option<Opens> {
         self.state.setup_request.take()
+    }
+
+    /// The data packs the Data packs screen lists (see [`Catalog`]): the host gives them when the run starts.
+    #[must_use]
+    pub fn with_packs(mut self, packs: Catalog) -> Self {
+        self.state.packs = packs;
+        self
+    }
+
+    /// The request the Data packs screen made, once: the host applies the set, starts a chapter or goes back to the main
+    /// game (see [`Request`]).
+    pub fn take_mods_request(&mut self) -> Option<Request> {
+        self.state.mods_request.take()
+    }
+
+    /// Whether Y is held this frame: on the Data packs screen Up and Down then move the pack under the cursor.
+    pub fn set_moving(&mut self, held: bool) {
+        self.state.nav.set_mods_moving(held);
+    }
+
+    /// A line the Data packs screen shows until the next key: why the host could not do what the screen asked.
+    pub fn set_mods_alert(&mut self, text: String) {
+        self.state.mods_alert = Some(text);
     }
 
     /// The options of this PC, to change from outside the menus: the touch controls write their layout here, so the
@@ -282,9 +347,12 @@ impl Driver {
             cheats_installed: self.state.cheats_installed,
             cheat_save: None,
             cheat_events: Vec::new(),
+            mods_sidecar: self.state.mods_sidecar.clone(),
+            mods_save: None,
             save_slot: None,
             save_done: false,
             battle_cheats: false,
+            battle_items: false,
             options: Options { game: Values::new(), pc },
             option_slots: self.state.option_slots.clone(),
             settings_changed: reverted,
@@ -293,6 +361,10 @@ impl Driver {
             video_frames: 0,
             video_apply: reverted,
             auto_run: AutoRun::default(),
+            packs: self.state.packs.clone(),
+            packs_edit: Vec::new(),
+            mods_alert: None,
+            mods_request: None,
         };
     }
 
@@ -306,6 +378,12 @@ impl Driver {
     #[must_use]
     pub fn cheat_sidecar(&self) -> &CheatSidecar {
         &self.state.cheat_sidecar
+    }
+
+    /// The mod state of the save slots, as the sidecar file `saves/ssd.mods` keeps it.
+    #[must_use]
+    pub fn mods_sidecar(&self) -> &ModsSidecar {
+        &self.state.mods_sidecar
     }
 
     /// Which save slots carry the CHEATS badge: a good save whose cheats were saved with one on, by its
@@ -423,13 +501,14 @@ impl Driver {
         self.state.frame(&probe, &self.labels, wram, sram, live)
     }
 
-    /// A replay's recorded application event: the bag's bind, applied as it was recorded, or the run's cheats
-    /// ([`CHEATS_TAG`]) for the bookkeeping of the saves. The sidecar files are not written by a replay (see
-    /// [`Frame`]), so only the run's state changes here. Other tags are not the menus'.
+    /// A replay's recorded application event: the bag's bind, applied as it was recorded, the run's cheats
+    /// ([`CHEATS_TAG`]) for the bookkeeping of the saves, or the writes that put the run's mod state into work RAM
+    /// ([`MODS_TAG`]). The sidecar files are not written by a replay (see [`Frame`]), so only the run's state changes
+    /// here. Other tags are not the menus'.
     ///
     /// # Errors
     ///
-    /// The event's payload is not a bag, or not a cheats file.
+    /// The event's payload is not a bag, a cheats file or a mod state.
     pub fn replay_event(
         &mut self,
         tag: u8,
@@ -442,6 +521,7 @@ impl Driver {
                 self.state.cheats = Cheats::from_bytes(payload)?;
                 Ok(Vec::new())
             }
+            MODS_TAG => Ok(apply_events(&ModState::from_bytes(payload)?)),
             SPAWN_TAG => {
                 let &[object, count] = payload else {
                     return Err(format!("a spawn event of {} bytes", payload.len()));
@@ -539,6 +619,7 @@ impl State {
             return;
         }
         self.notice = None;
+        self.mods_alert = None;
         let screen = self.nav.screen();
         let Context { flying, town, party } = context(probe);
         let action = match screen {
@@ -548,6 +629,10 @@ impl State {
             }
             Screen::Cheats if self.nav.spawner().is_some() => {
                 self.nav.key_spawner(key, &|object| Keeper::story(labels, object))
+            }
+            Screen::Mods => {
+                let lines = self.mods_lines();
+                self.nav.key_mods(key, &lines)
             }
             _ => self.nav.key(key, flying, town, probe.item_count()),
         };
@@ -593,6 +678,22 @@ impl State {
                 self.setup_request = Some(opens);
             }
             Action::OptionsVideo { keep } => self.video_answer(keep),
+            Action::OptionsOpen(Opens::Packs) => self.open_packs(),
+            Action::PackToggle(at) => {
+                if let Some(listed) = self.packs_edit.get_mut(at) {
+                    listed.on = !listed.on;
+                }
+            }
+            Action::PackMove { at, by } => {
+                if let Some(to) = at.checked_add_signed(isize::from(by))
+                    && to < self.packs_edit.len()
+                {
+                    self.packs_edit.swap(at, to);
+                }
+            }
+            Action::PacksApply => self.apply_packs(),
+            Action::ChapterStart(line) => self.start_chapter(line),
+            Action::ChapterMain => self.main_game(),
             Action::ResetAll => {
                 // The spawner's mark is history, not a choice: Reset all keeps it.
                 let spawned = self.cheats.spawned();
@@ -636,6 +737,11 @@ impl State {
                     vec![Step::Press { button: Button::B, until: Until::Closed }],
                     Arrival::Closed,
                 ),
+                // Over a battle the Item list is the battle's: B from it goes back to the battle's command window.
+                Screen::Items if self.battle_items => self.start(
+                    vec![Step::Press { button: Button::B, until: Until::BattleCommand }],
+                    Arrival::Closed,
+                ),
                 Screen::Menu | Screen::Items => self.start(
                     vec![Step::Press { button: Button::B, until: Until::Command }],
                     Arrival::Show(Screen::Command),
@@ -649,6 +755,8 @@ impl State {
                 // Back to the Menu list, which the original never left: its cursor stays on Cheats.
                 Screen::Cheats => self.nav.resume(self.nav.cheats_back()),
                 Screen::Options => self.nav.resume(Screen::Menu),
+                // Back to the Options, where the Data packs button was.
+                Screen::Mods => self.nav.resume(Screen::Options),
             },
         }
     }
@@ -778,6 +886,22 @@ impl State {
         events
     }
 
+    /// The mod state of the save the bag is bound to. The markers are cleared first, so that a part the save does not
+    /// keep reads neutral: a save without an entry (a new game, or a save changed by another way) and a part missing
+    /// from the save's state keep none of the flags or high parts the run had. The save's state follows, with its
+    /// markers, when the sidecar has an entry for the save.
+    fn bind_mods(&mut self, wram: &[u8]) -> Vec<HostEvent> {
+        self.mods_save = self.keeper.bound_save();
+        let mut events = clear_events(wram);
+        let entry =
+            self.mods_save.and_then(|(slot, checksum)| self.mods_sidecar.entry_for(slot, checksum));
+        if let Some(state) = entry {
+            events.push(HostEvent::App { tag: MODS_TAG, payload: state.to_bytes() });
+            events.extend(apply_events(state));
+        }
+        events
+    }
+
     /// The bind, the list's keeping and the plan's next frame: see [`Driver::frame`].
     fn frame(
         &mut self,
@@ -802,10 +926,15 @@ impl State {
         if self.keeper.bound() && (bound_now || self.keeper.bound_save() != self.cheat_save) {
             events.extend(self.bind_cheats(wram));
         }
+        if self.keeper.bound() && (bound_now || self.keeper.bound_save() != self.mods_save) {
+            events.extend(self.bind_mods(wram));
+        }
         events.append(&mut self.cheat_events);
         if self.cheats_installed {
             events.extend(frame_events(wram));
         }
+        // The ending of the game (`mods::chapter`): the marker its wrapper set is reported once.
+        events.extend(crate::mods::chapter::completion_events(wram));
         let pad = self.pad(probe, labels, wram, live, &mut events);
         let completed = self.save_completed(probe, sram);
         let bag = self.keeper.saved(sram, wram);
@@ -813,6 +942,7 @@ impl State {
         let written =
             completed.or_else(|| bag.as_ref().map(|&(slot, checksum, _)| (slot, checksum)));
         let saved_cheats = self.store_cheats(written);
+        let saved_mods = self.store_mods(written, wram);
         let saved = bag.map(|(slot, checksum, bag)| {
             self.sidecar.store(slot, checksum, &bag);
             SavedBag { slot, checksum, bag }
@@ -825,7 +955,7 @@ impl State {
         let settings = (self.video_backup.is_none() && std::mem::take(&mut self.settings_changed))
             .then(|| self.options.pc.clone());
         let video = std::mem::take(&mut self.video_apply).then(|| self.options.pc.clone());
-        Frame { pad, events, saved, saved_cheats, saved_options, settings, video }
+        Frame { pad, events, saved, saved_cheats, saved_mods, saved_options, settings, video }
     }
 
     /// The Save of the original, followed on work RAM at every frame. While the Save's list shows, its cursor (the
@@ -860,6 +990,18 @@ impl State {
             self.cheat_save = Some((slot, checksum));
         }
         self.cheat_sidecar.entry_for(slot, checksum).copied()
+    }
+
+    /// Stores the run's mod state for the save written at `written` (its slot and checksum word): the markers and their
+    /// bytes as `wram` has them now. A state with no markers leaves the slot no entry. The save is reported either way
+    /// (see [`Frame::saved_mods`]), so the file drops an entry the slot had.
+    fn store_mods(&mut self, written: Option<(u8, u16)>, wram: &[u8]) -> Option<(u8, u16)> {
+        let (slot, checksum) = written?;
+        self.mods_sidecar.store(slot, checksum, capture(wram));
+        if self.keeper.bound_save() == Some((slot, checksum)) {
+            self.mods_save = Some((slot, checksum));
+        }
+        Some((slot, checksum))
     }
 
     /// The joypad of the next frame of the plan (the live joypad when no plan runs and the curtain
@@ -921,6 +1063,9 @@ impl State {
         }
         if self.nav.screen() == Screen::Options {
             return Some(screens::options_screen(&self.options_view(probe)));
+        }
+        if self.nav.screen() == Screen::Mods {
+            return Some(screens::mods_screen(&self.mods_view()));
         }
         let Context { flying, town, .. } = context(probe);
         let mut view: MenuView = probe.view_as(
@@ -1021,6 +1166,16 @@ impl State {
         }
     }
 
+    /// Whether a stack of `object` can be used at the Item screen now: the map's rule, or over a battle the battle's.
+    fn usable(&self, object: u8, label: Option<&ObjectLabel>) -> bool {
+        if self.battle_items { usable_in_battle(label) } else { usable_here(object, label) }
+    }
+
+    /// Whether a stack can be dropped at the Item screen now: never over a battle, where the HD offers no drop.
+    fn can_drop(&self, label: Option<&ObjectLabel>, key: bool) -> bool {
+        !self.battle_items && droppable(label, key)
+    }
+
     /// The bag's rows of the tab the Item screen shows, as the navigation reads them.
     fn rows(&self, labels: &Labels) -> Vec<ItemRow> {
         let Some(bag) = self.keeper.bag() else { return Vec::new() };
@@ -1031,8 +1186,8 @@ impl State {
                 let label = label(labels, stack.object);
                 ItemRow {
                     id: stack.id,
-                    usable: usable_here(stack.object, label),
-                    droppable: droppable(label, stack.class.key),
+                    usable: self.usable(stack.object, label),
+                    droppable: self.can_drop(label, stack.class.key),
                 }
             })
             .collect()
@@ -1053,8 +1208,8 @@ impl State {
                     object: stack.object,
                     name: label.map_or_else(|| "?".to_owned(), |label| label.name.clone()),
                     count: stack.count,
-                    usable: usable_here(stack.object, label),
-                    droppable: droppable(label, stack.class.key),
+                    usable: self.usable(stack.object, label),
+                    droppable: self.can_drop(label, stack.class.key),
                     ally: ally(labels, stack.object),
                 }
             })
@@ -1100,12 +1255,177 @@ impl State {
     }
 
     /// Starts a plan that leaves the curtain at `arrival`.
+    /// The Data packs screen opens from the Options' button: the list is the packs as the set the run uses has them, the
+    /// cursor on the first line.
+    fn open_packs(&mut self) {
+        self.packs_edit = self
+            .packs
+            .packs
+            .iter()
+            .enumerate()
+            .map(|(pack, info)| Listed { pack, on: info.on })
+            .collect();
+        self.nav.enter(Screen::Mods);
+    }
+
+    /// The chapters the Data packs screen offers, in its order, each with its id (none for "Main game", which a chapter
+    /// session offers first). The packs that are on offer theirs; a chapter that waits is locked until the game is
+    /// completed or the cheat "Unlock chapters" is on.
+    fn offered(&self) -> Vec<(Option<String>, ChapterLine)> {
+        let mut offered = Vec::new();
+        if let Some(name) = &self.packs.playing {
+            offered.push((
+                None,
+                ChapterLine {
+                    name: "Main game".to_owned(),
+                    description: format!("Leave {name}: the game goes to the main saves."),
+                    locked: false,
+                    main: true,
+                },
+            ));
+        }
+        for listed in self.packs_edit.iter().filter(|listed| listed.on) {
+            let pack = &self.packs.packs[listed.pack];
+            if pack.refusal.is_some() {
+                continue;
+            }
+            for chapter in &pack.chapters {
+                let locked = chapter.waits && !self.packs.completed && !self.cheats.chapters();
+                offered.push((
+                    Some(chapter.id.clone()),
+                    ChapterLine {
+                        name: chapter.name.clone(),
+                        description: chapter.description.clone(),
+                        locked,
+                        main: false,
+                    },
+                ));
+            }
+        }
+        offered
+    }
+
+    /// The lines of the Data packs screen's list: the packs in their order, then the chapters offered (see [`State::offered`]).
+    fn mods_lines(&self) -> Vec<ModsLine> {
+        let mut lines: Vec<ModsLine> = self
+            .packs_edit
+            .iter()
+            .map(|listed| ModsLine::Pack {
+                refused: self.packs.packs[listed.pack].refusal.is_some(),
+            })
+            .collect();
+        lines.extend(self.offered().iter().map(|(_, chapter)| {
+            if chapter.main { ModsLine::Main } else { ModsLine::Chapter { locked: chapter.locked } }
+        }));
+        lines
+    }
+
+    /// Whether the list as the player left it is not the set the run uses (the same packs, in the same order).
+    fn edit_differs(&self) -> bool {
+        let pending: Vec<usize> =
+            self.packs_edit.iter().filter(|listed| listed.on).map(|listed| listed.pack).collect();
+        let applied: Vec<usize> = self
+            .packs
+            .packs
+            .iter()
+            .enumerate()
+            .filter(|(_, info)| info.on)
+            .map(|(pack, _)| pack)
+            .collect();
+        pending != applied
+    }
+
+    /// Apply: the set the list gives, in its order, is asked of the host (when it is not the set the run uses already).
+    fn apply_packs(&mut self) {
+        if !self.edit_differs() {
+            self.notice = Some(UNCHANGED);
+            return;
+        }
+        let ids = self
+            .packs_edit
+            .iter()
+            .filter(|listed| listed.on)
+            .map(|listed| self.packs.packs[listed.pack].id.clone())
+            .collect();
+        self.mods_request = Some(Request::Apply(ids));
+    }
+
+    /// Start a chapter (the line `line` of the list): the game restarts into its saves, when the list is the set the run uses.
+    fn start_chapter(&mut self, line: usize) {
+        let Some(index) = line.checked_sub(self.packs_edit.len()) else { return };
+        let offered = self.offered();
+        let Some((Some(id), _)) = offered.get(index) else { return };
+        if self.edit_differs() {
+            self.notice = Some(APPLY_FIRST);
+            return;
+        }
+        self.mods_request = Some(Request::Chapter(id.clone()));
+    }
+
+    /// Back to the main game: the game restarts into the main saves, when the list is the set the run uses.
+    fn main_game(&mut self) {
+        if self.edit_differs() {
+            self.notice = Some(APPLY_FIRST);
+            return;
+        }
+        self.mods_request = Some(Request::Main);
+    }
+
+    /// What the Data packs screen shows now: the list, the chapters, the cursor, the question and the notice.
+    fn mods_view(&self) -> ModsView {
+        let packs = self
+            .packs_edit
+            .iter()
+            .map(|listed| {
+                let info = &self.packs.packs[listed.pack];
+                let state = if info.refusal.is_some() {
+                    PackState::Refused
+                } else if listed.on {
+                    PackState::On
+                } else {
+                    PackState::Off
+                };
+                PackLine {
+                    name: info.name.clone(),
+                    version: info.version.clone(),
+                    author: info.author.clone(),
+                    description: info.description.clone(),
+                    needs: info.needs.clone(),
+                    size: info.size,
+                    state,
+                    reason: info.refusal.clone(),
+                }
+            })
+            .collect();
+        ModsView {
+            packs,
+            chapters: self.offered().into_iter().map(|(_, chapter)| chapter).collect(),
+            cursor: self.nav.mods_cursor(),
+            moving: self.nav.mods_moving(),
+            ask: self.nav.mods_ask(),
+            notice: self
+                .notice
+                .map(str::to_owned)
+                .or_else(|| self.mods_alert.clone())
+                .or_else(|| self.packs.notice.clone()),
+        }
+    }
+
     fn start(&mut self, steps: Vec<Step>, arrival: Arrival) {
         self.running = Some(Running { player: Player::new(steps), arrival });
     }
 
     /// The curtain follows the menu the player opens or closes, when no plan runs.
     fn observe(&mut self, probe: &MenuProbe<'_>) {
+        // The Item list of a battle is the HD's Items screen: the screen goes over the battle, and the game gets no
+        // buttons until Back or a use.
+        if self.curtain != Curtain::Up && probe.battle_list() && self.keeper.bound() {
+            self.nav = Nav::default();
+            self.nav.enter(Screen::Items);
+            self.curtain = Curtain::Up;
+            self.battle_items = true;
+            return;
+        }
         self.curtain = match self.curtain {
             // A menu that opens always opens on its command window; the screen byte is not set yet
             // then, and it may still hold the last screen of the menu before.
@@ -1130,6 +1450,7 @@ impl State {
         // The battle the Cheats were open over has ended: the next change is the field's again.
         if self.curtain == Curtain::Down {
             self.battle_cheats = false;
+            self.battle_items = false;
         }
     }
 
@@ -1148,6 +1469,7 @@ impl State {
         if self.curtain == Curtain::Down {
             self.nav = Nav::default();
             self.battle_cheats = false;
+            self.battle_items = false;
         }
     }
 }
@@ -1179,6 +1501,13 @@ fn usable_here(object: u8, label: Option<&ObjectLabel>) -> bool {
 /// The story objects whose effects are for battles (`docs/re/data/menus.md`, the effect table): on the map the
 /// original takes no use of them, so the HD does not offer one (Gohan's object, 31, is the one with the map bit).
 const BATTLE_EFFECTS: [u8; 5] = [27, 28, 29, 30, 31];
+
+/// Whether an object can be used over a battle: its battle bit (INT) is set and it is not a story object, which the
+/// menus never use. The original's list of a battle shows every entry: an object without the battle bit gets bit 0
+/// ("can't use") from `01:C535`, so the HD greys it out and refuses it the same way (`docs/re/data/menus.md`).
+fn usable_in_battle(label: Option<&ObjectLabel>) -> bool {
+    label.is_some_and(|label| label.battle && !label.story)
+}
 
 /// Whether an object can be dropped: not a key item (a Dragon Ball or a story object), and not fixed.
 fn droppable(label: Option<&ObjectLabel>, key: bool) -> bool {
@@ -1213,7 +1542,7 @@ fn choice(screen: Screen, entry: Entry, flying: bool, town: bool) -> Option<(Vec
             };
             (row, ORIGINAL_MENU_ROWS, Until::Screen(until), Arrival::Lifted)
         }
-        Screen::Items | Screen::Cheats | Screen::Options => return None,
+        Screen::Items | Screen::Cheats | Screen::Options | Screen::Mods => return None,
     };
     // The original draws what comes next, so the curtain lifts as the last press goes: the HD cursor moved on the
     // rows above, and the HD window does not stay up (with rows the original's own window may not have) while
@@ -1296,6 +1625,8 @@ fn drop_steps(stack: u32) -> Vec<Step> {
 mod tests {
     use super::super::testing::{FakeMenu, held};
     use super::*;
+    use crate::mods::state::{BLOCK, FLAGS_MARKER_AT, MARKER_AT};
+    use ssd_menus::mods_state::{FLAG_BYTES, HIGH_BYTES};
 
     /// One frame: the driver gives the joypad (given the live one), and the fake menu runs it.
     fn frame(driver: &mut Driver, menu: &mut FakeMenu, live: Joypad) -> Joypad {
@@ -1389,6 +1720,164 @@ mod tests {
         assert_eq!(driver.curtain(), Curtain::Down, "cancel at the command window closes the menu");
         assert_eq!(menu.field, 0);
         assert_eq!(driver.last_outcome(), Some(Outcome::Reached));
+    }
+
+    /// The labels of the battle tests: Bulma (battle and map), Scouter (map only), Yajirobe (battle only), and a
+    /// Dragon Ball (a story object, never used from the menu).
+    fn battle_labels() -> Labels {
+        let mut objects = vec![ObjectLabel::default(); 40];
+        objects[2] = ObjectLabel {
+            name: "Bulma".to_owned(),
+            battle: true,
+            field: true,
+            ..ObjectLabel::default()
+        };
+        objects[16] =
+            ObjectLabel { name: "Scouter".to_owned(), field: true, ..ObjectLabel::default() };
+        objects[18] =
+            ObjectLabel { name: "Yajirobe".to_owned(), battle: true, ..ObjectLabel::default() };
+        objects[33] = ObjectLabel {
+            name: "Dragon Ball".to_owned(),
+            battle: true,
+            story: true,
+            ..ObjectLabel::default()
+        };
+        Labels { objects, ..Labels::default() }
+    }
+
+    /// A driver bound to a bag of two Bulmas, a Scouter and a Yajirobe, and the fake menu in a battle, on its command
+    /// window (the bag is bound from a recorded bind, and the fake menu keeps the list the keeper writes).
+    fn battle_with_bag() -> (Driver, FakeMenu) {
+        let mut bag = Bag::new(Rules::default());
+        for object in [2, 2, 16, 18] {
+            bag.add(object, 0, ssd_menus::bag::Class::of(object, false)).unwrap();
+        }
+        let mut driver = Driver::new(battle_labels());
+        let mut menu = FakeMenu::default();
+        menu.battle = true;
+        menu.field = 2;
+        menu.screen = 17;
+        let events = driver.replay_event(BIND_TAG, &bag.to_bytes(), &menu.wram()).unwrap();
+        menu.absorb(&events);
+        (driver, menu)
+    }
+
+    /// The player's presses on the battle's command window: Down to Item and A. The battle's Item list is drawn over
+    /// the next frames, and the HD's Items screen goes over it.
+    fn open_battle_list(driver: &mut Driver, menu: &mut FakeMenu) {
+        assert_eq!(driver.curtain(), Curtain::Down, "the battle's command window is the game's");
+        frame(driver, menu, Joypad { down: true, ..Joypad::default() });
+        frame(driver, menu, Joypad { a: true, ..Joypad::default() });
+        for _ in 0..10 {
+            frame(driver, menu, Joypad::default());
+        }
+        assert_eq!((driver.curtain(), driver.nav().screen()), (Curtain::Up, Screen::Items));
+    }
+
+    #[test]
+    fn the_battle_item_list_opens_the_items_screen_over_the_battle() {
+        let (mut driver, mut menu) = battle_with_bag();
+        open_battle_list(&mut driver, &mut menu);
+        assert_eq!(menu.screen, 2, "the original is on its Item list, under the HD's screen");
+        assert!(driver.state.battle_items, "the screen is the battle's");
+        assert_eq!(
+            driver.bag().map(Bag::units),
+            Some(4),
+            "the bag with its counts is the one shown"
+        );
+    }
+
+    #[test]
+    fn a_pick_on_the_battle_list_stages_its_stack_and_presses_the_originals_use() {
+        let (mut driver, mut menu) = battle_with_bag();
+        open_battle_list(&mut driver, &mut menu);
+        assert_eq!(menu.list.first().map(|entry| entry.0), Some(2), "Bulma is the first row");
+        // The HD cursor on the third row, Yajirobe: A chooses it (Use or Drop), and A on Use is the pick.
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Down, &menu.wram());
+        assert_eq!(driver.nav().cursor(), 2);
+        driver.key(Key::Confirm, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        assert!(driver.busy(), "the use runs as a plan");
+        for _ in 0..200 {
+            let frame = driver.frame(&menu.wram(), None, Joypad::default());
+            menu.tick(frame.pad);
+            menu.absorb(&frame.events);
+            if menu.step == 2 {
+                break;
+            }
+        }
+        assert_eq!(menu.step, 2, "the original's A on its row is the Use or Drop choice");
+        assert_eq!(
+            menu.list.first().map(|entry| entry.0),
+            Some(18),
+            "the picked stack is staged first"
+        );
+        assert_eq!(menu.list.len(), 3, "the staging keeps every stack");
+    }
+
+    /// The frames until the driver has no plan running, with the keeper's list writes taken by the fake menu (as the
+    /// game takes them), so the original's list follows the staging.
+    fn battle_settle(driver: &mut Driver, menu: &mut FakeMenu) {
+        for _ in 0..2_000 {
+            let frame = driver.frame(&menu.wram(), None, Joypad::default());
+            menu.tick(frame.pad);
+            menu.absorb(&frame.events);
+            if !driver.busy() {
+                return;
+            }
+        }
+        panic!("the plan did not end");
+    }
+
+    #[test]
+    fn a_use_on_the_battle_list_takes_the_unit_and_gives_the_battle_its_command_back() {
+        let (mut driver, mut menu) = battle_with_bag();
+        open_battle_list(&mut driver, &mut menu);
+        // Yajirobe, as in the pick test: the staged row is used by the original's own Use, then its message's A.
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        battle_settle(&mut driver, &mut menu);
+        assert_eq!(driver.last_outcome(), Some(Outcome::Reached));
+        assert_eq!((driver.curtain(), menu.screen), (Curtain::Down, 17));
+        assert_eq!(driver.bag().map(|bag| bag.units_of(18)), Some(0), "the used unit is gone");
+        assert_eq!(driver.bag().map(|bag| bag.units_of(2)), Some(2), "the other stacks stay");
+    }
+
+    #[test]
+    fn back_from_the_battle_list_gives_the_battle_its_keys_back_on_its_command_window() {
+        let (mut driver, mut menu) = battle_with_bag();
+        open_battle_list(&mut driver, &mut menu);
+        choose(&mut driver, &mut menu, Key::Cancel);
+        assert_eq!(driver.curtain(), Curtain::Down, "the battle has its keys again");
+        assert_eq!(menu.screen, 17, "the original is on the battle's command window");
+        assert!(!driver.state.battle_items);
+        assert_eq!(driver.last_outcome(), Some(Outcome::Reached));
+    }
+
+    #[test]
+    fn an_object_a_battle_cannot_use_is_refused_on_the_battle_list() {
+        let (mut driver, mut menu) = battle_with_bag();
+        open_battle_list(&mut driver, &mut menu);
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.notice(), Some("This cannot be used or dropped here."));
+        assert!(!driver.busy(), "nothing is staged for a refused object");
+        assert_eq!(menu.step, 1, "the original's list is not touched");
+    }
+
+    #[test]
+    fn a_battle_uses_the_objects_with_its_bit_and_no_story_object() {
+        let labels = battle_labels();
+        assert!(usable_in_battle(label(&labels, 2)), "Bulma works in a battle");
+        assert!(!usable_in_battle(label(&labels, 16)), "the Scouter is for the map");
+        assert!(usable_in_battle(label(&labels, 18)), "Yajirobe works in a battle");
+        assert!(
+            !usable_in_battle(label(&labels, 33)),
+            "a story object is never used from the menu"
+        );
     }
 
     #[test]
@@ -1813,6 +2302,117 @@ mod tests {
         assert!(played.replay_event(CHEATS_TAG, &[0xFF; 3], &menu.wram()).is_err());
     }
 
+    /// A mod state for the tests: the extended flags all `flag`, the high parts all `high`.
+    fn mod_state(flag: u8, high: u8) -> ModState {
+        ModState { flags: Some(vec![flag; FLAG_BYTES]), high: Some(vec![high; HIGH_BYTES]) }
+    }
+
+    /// Writes the writes of `events` into `wram` (a work RAM slice, index `address - $7E:0000`).
+    fn write_into(wram: &mut [u8], events: &[HostEvent]) {
+        for event in events {
+            if let HostEvent::Wram { address, bytes } = event {
+                let at = (*address - 0x7E_0000) as usize;
+                wram[at..at + bytes.len()].copy_from_slice(bytes);
+            }
+        }
+    }
+
+    /// The work RAM of `menu` with `state` in it, its markers included: the run has the state.
+    fn with_mod_state(menu: &FakeMenu, state: &ModState) -> Vec<u8> {
+        let mut wram = menu.wram();
+        write_into(&mut wram, &apply_events(state));
+        wram
+    }
+
+    #[test]
+    fn a_save_of_a_run_with_mod_markers_keeps_its_mod_state_for_the_slot_and_reports_it() {
+        let sram = saved_slots(&[0]);
+        let checksum = checksum_of_slot(&sram, 0);
+        let (mut driver, mut menu) = driver_on_cheats(&sram);
+        let state = mod_state(0x5A, 0x3C);
+        menu.screen = SAVE_SCREEN;
+        menu.step = SAVE_LIST_STEP;
+        driver.frame(&with_mod_state(&menu, &state), Some(&sram), Joypad::default());
+        menu.step = SAVE_DONE_STEP;
+        let frame = driver.frame(&with_mod_state(&menu, &state), Some(&sram), Joypad::default());
+        assert_eq!(frame.saved_mods, Some((0, checksum)), "the Save reports its slot for the file");
+        assert_eq!(driver.mods_sidecar().entry_for(0, checksum), Some(&state));
+    }
+
+    #[test]
+    fn a_save_of_a_run_without_mod_markers_keeps_no_entry_and_the_file_drops_the_old_one() {
+        let sram = saved_slots(&[0]);
+        let checksum = checksum_of_slot(&sram, 0);
+        let (mut driver, mut menu) = driver_on_cheats(&sram);
+        driver.state.mods_sidecar.store(0, checksum, mod_state(0x5A, 0x3C));
+        let frame = save_into(&mut driver, &mut menu, &sram, 0);
+        assert!(driver.mods_sidecar().saves.is_empty(), "a run with no markers keeps nothing");
+        assert_eq!(
+            frame.saved_mods,
+            Some((0, checksum)),
+            "the file is written, so the old entry goes"
+        );
+    }
+
+    #[test]
+    fn a_bind_gives_the_save_s_recorded_mod_state_and_a_replay_writes_the_same_bytes() {
+        let sram = saved_slots(&[0]);
+        let checksum = checksum_of_slot(&sram, 0);
+        let state = mod_state(0x5A, 0x3C);
+        let mut sidecar = ModsSidecar::empty();
+        sidecar.store(0, checksum, state.clone());
+        let mut driver = Driver::new(Labels::default()).with_mods(sidecar);
+        let mut menu = FakeMenu::default();
+        menu.field = 1;
+        menu.screen = 4;
+        let events = driver.frame(&menu.wram(), Some(&sram), Joypad::default()).events;
+        let payload = events.iter().find_map(|event| match event {
+            HostEvent::App { tag, payload } if *tag == MODS_TAG => Some(payload.clone()),
+            _ => None,
+        });
+        let payload = payload.expect("the bind records the mod state as an application event");
+        let writes = driver.replay_event(MODS_TAG, &payload, &menu.wram()).expect("a mod state");
+        assert_eq!(writes, apply_events(&state), "the replay writes what the run applied");
+        let mut wram = menu.wram();
+        write_into(&mut wram, &writes);
+        assert_eq!(capture(&wram), state, "the replay puts the same bytes into work RAM");
+        assert!(driver.replay_event(MODS_TAG, &[0xFF; 3], &menu.wram()).is_err());
+    }
+
+    #[test]
+    fn a_bound_save_without_an_entry_clears_the_markers_only_where_they_are_set() {
+        let sram = saved_slots(&[0]);
+        let checksum = checksum_of_slot(&sram, 0);
+        let mut menu = FakeMenu::default();
+        menu.field = 1;
+        menu.screen = 4;
+        let bind = |wram: &[u8], sidecar: ModsSidecar| {
+            let mut driver = Driver::new(Labels::default()).with_mods(sidecar);
+            driver.frame(wram, Some(&sram), Joypad::default()).events
+        };
+        let no_markers = bind(&menu.wram(), ModsSidecar::empty());
+        assert!(
+            !no_markers.iter().any(
+                |event| matches!(event, HostEvent::Wram { address, .. } if *address == MARKER_AT)
+            ),
+            "no marker is set, so nothing is written to it"
+        );
+        let markers = bind(&with_mod_state(&menu, &mod_state(0, 0)), ModsSidecar::empty());
+        assert!(markers.contains(&HostEvent::Wram { address: MARKER_AT, bytes: vec![0; 4] }));
+        assert!(markers.contains(&HostEvent::Wram { address: FLAGS_MARKER_AT, bytes: vec![0; 4] }));
+        // A save with its flags and no high parts: the block's marker is cleared, so the run's high parts read neutral.
+        let mut sidecar = ModsSidecar::empty();
+        sidecar.store(0, checksum, ModState { flags: Some(vec![1; FLAG_BYTES]), high: None });
+        let partial = bind(&with_mod_state(&menu, &mod_state(0, 0x3C)), sidecar);
+        assert!(partial.contains(&HostEvent::Wram { address: MARKER_AT, bytes: vec![0; 4] }));
+        assert!(
+            !partial
+                .iter()
+                .any(|event| matches!(event, HostEvent::Wram { address, .. } if *address == BLOCK)),
+            "the save keeps no high parts, so none are written"
+        );
+    }
+
     /// A driver on the Options screen of an open menu, bound to `sram`'s first frame.
     fn driver_on_options(sram: &[u8]) -> (Driver, FakeMenu) {
         let mut driver = Driver::new(Labels::default()).with_cheats(CheatSidecar::empty());
@@ -1893,7 +2493,8 @@ mod tests {
     fn the_encounter_row_is_the_cheats_row_and_the_same_cheat_block_is_written() {
         let (mut driver, menu) = driver_on_options(&saved_slots(&[0]));
         driver.key(Key::Tab, &menu.wram());
-        driver.key(Key::Up, &menu.wram()); // wraps to the last row of the page: the encounters
+        driver.key(Key::Up, &menu.wram()); // wraps to the last row of the page: the Data packs button
+        driver.key(Key::Up, &menu.wram()); // the row above it: the encounters
         driver.key(Key::Left, &menu.wram());
         assert_eq!(driver.cheats().index(ssd_menus::cheats::Setting::Encounters), 1, "x1 to x1/2");
         let frame = driver.frame(&menu.wram(), None, Joypad::default());
@@ -2216,5 +2817,177 @@ mod tests {
         assert!(clean.saved_cheats.is_some_and(|saved| !saved.marked), "Normal is clean");
         let kept = driver.option_slots().entry_for(0, checksum).unwrap();
         assert_eq!((kept.get("difficulty.money"), kept.get("difficulty.preset")), (None, None));
+    }
+
+    /// The Data packs of a run: `Alpha` on (with a chapter that is open and one that waits), `Beta` off, `Gamma` refused.
+    fn two_packs() -> Catalog {
+        let chapter = |name: &str, waits: bool| ssd_menus::packs::ChapterInfo {
+            id: format!("{name}-id"),
+            name: name.to_owned(),
+            description: format!("{name} description."),
+            waits,
+        };
+        let pack = |id: &str, on: bool, refusal: Option<&str>| ssd_menus::packs::PackInfo {
+            id: id.to_owned(),
+            name: id.trim_end_matches(".pack").to_owned(),
+            version: "1.0.0".to_owned(),
+            on,
+            refusal: refusal.map(str::to_owned),
+            ..Default::default()
+        };
+        let mut alpha = pack("alpha.pack", true, None);
+        alpha.chapters = vec![chapter("Open", false), chapter("Waits", true)];
+        Catalog {
+            packs: vec![
+                alpha,
+                pack("beta.pack", false, None),
+                pack("gamma.pack", false, Some("made for another ROM")),
+            ],
+            ..Catalog::default()
+        }
+    }
+
+    /// The driver on the Options with the packs of `two_packs`, on the Data packs screen (opened from the Gameplay page).
+    fn driver_on_packs(catalog: Catalog) -> (Driver, FakeMenu) {
+        let (mut driver, menu) = driver_on_options(&saved_slots(&[0]));
+        driver.state.packs = catalog;
+        driver.key(Key::Tab, &menu.wram());
+        for _ in 0..5 {
+            driver.key(Key::Down, &menu.wram());
+        }
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.nav().screen(), Screen::Mods, "the button opens the Data packs");
+        (driver, menu)
+    }
+
+    /// The texts the Data packs screen draws now.
+    fn mods_texts(driver: &Driver, menu: &FakeMenu) -> Vec<String> {
+        driver
+            .scene(&menu.wram())
+            .expect("the screen is up")
+            .texts()
+            .map(|(_, _, text)| text.to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_list_switches_packs_and_applies_the_set_in_its_order_once() {
+        let (mut driver, menu) = driver_on_packs(two_packs());
+        let shown = mods_texts(&driver, &menu);
+        assert!(
+            shown.iter().any(|text| text == "alpha")
+                && shown.iter().any(|text| text == "-- Chapters --")
+        );
+        driver.key(Key::Confirm, &menu.wram());
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        driver.key(Key::Apply, &menu.wram());
+        driver.key(Key::Up, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.take_mods_request(), Some(Request::Apply(vec!["beta.pack".to_owned()])));
+        assert_eq!(driver.take_mods_request(), None, "taken once");
+    }
+
+    #[test]
+    fn apply_with_the_set_in_use_asks_for_nothing_and_says_so() {
+        let (mut driver, menu) = driver_on_packs(two_packs());
+        driver.key(Key::Apply, &menu.wram());
+        driver.key(Key::Up, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.take_mods_request(), None, "the set is the one in use");
+        assert!(mods_texts(&driver, &menu).iter().any(|text| text == UNCHANGED));
+    }
+
+    #[test]
+    fn with_y_held_a_pack_moves_and_the_order_of_the_set_is_the_order_applied() {
+        let (mut driver, menu) = driver_on_packs(two_packs());
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        // Alpha and Beta are on now, in that order: Y held moves Alpha below Beta.
+        driver.set_moving(true);
+        driver.key(Key::Up, &menu.wram());
+        driver.set_moving(false);
+        let shown = mods_texts(&driver, &menu);
+        let first = shown.iter().position(|text| text == "beta").expect("beta is listed");
+        let second = shown.iter().position(|text| text == "alpha").expect("alpha is listed");
+        assert!(first < second, "beta is first now: {shown:?}");
+        driver.key(Key::Apply, &menu.wram());
+        driver.key(Key::Up, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(
+            driver.take_mods_request(),
+            Some(Request::Apply(vec!["beta.pack".to_owned(), "alpha.pack".to_owned()]))
+        );
+    }
+
+    #[test]
+    fn a_chapter_starts_only_when_it_is_open_and_the_list_is_the_set_in_use() {
+        let (mut driver, menu) = driver_on_packs(two_packs());
+        // The lines: Alpha, Beta, Gamma, then the chapters of Alpha: Open (3) and Waits (4, locked).
+        for _ in 0..3 {
+            driver.key(Key::Down, &menu.wram());
+        }
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.nav().mods_ask(), Some((ssd_menus::nav::ModsAsk::Chapter(3), 1)));
+        driver.key(Key::Left, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.take_mods_request(), Some(Request::Chapter("Open-id".to_owned())));
+        // The list is changed and not applied yet: Beta goes on, and the chapter does not start; the screen says why.
+        driver.key(Key::Up, &menu.wram());
+        driver.key(Key::Up, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        driver.key(Key::Left, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.take_mods_request(), None);
+        assert!(
+            mods_texts(&driver, &menu).iter().any(|text| text.starts_with("Apply the packs first"))
+        );
+    }
+
+    #[test]
+    fn a_locked_chapter_says_so_until_the_game_is_completed_or_the_cheat_unlocks_it() {
+        let (mut driver, menu) = driver_on_packs(two_packs());
+        for _ in 0..4 {
+            driver.key(Key::Down, &menu.wram());
+        }
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.nav().mods_ask(), None, "a locked chapter asks nothing");
+        assert!(mods_texts(&driver, &menu).iter().any(|text| text.starts_with("Locked:")));
+        // The cheat "Unlock chapters" offers it: the chapter asks now.
+        driver.state.cheats.set_chapters(true);
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.nav().mods_ask(), Some((ssd_menus::nav::ModsAsk::Chapter(4), 1)));
+        driver.key(Key::Cancel, &menu.wram());
+        // B goes back to the Options, on the button.
+        driver.key(Key::Cancel, &menu.wram());
+        assert_eq!(driver.nav().screen(), Screen::Options);
+        assert_eq!(driver.nav().options_row(), 5);
+    }
+
+    #[test]
+    fn main_game_goes_back_to_the_main_saves_from_a_chapter_session() {
+        let mut catalog = two_packs();
+        catalog.playing = Some("Open".to_owned());
+        let (mut driver, menu) = driver_on_packs(catalog);
+        for _ in 0..3 {
+            driver.key(Key::Down, &menu.wram());
+        }
+        assert!(mods_texts(&driver, &menu).iter().any(|text| text == "Main game"));
+        driver.key(Key::Confirm, &menu.wram());
+        driver.key(Key::Left, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.take_mods_request(), Some(Request::Main));
+    }
+
+    #[test]
+    fn a_notice_the_host_gives_is_shown_until_the_next_key() {
+        let (mut driver, menu) = driver_on_packs(two_packs());
+        driver.set_mods_alert("mods.toml cannot be read.".to_owned());
+        assert!(mods_texts(&driver, &menu).iter().any(|text| text == "mods.toml cannot be read."));
+        driver.key(Key::Down, &menu.wram());
+        assert!(!mods_texts(&driver, &menu).iter().any(|text| text == "mods.toml cannot be read."));
     }
 }

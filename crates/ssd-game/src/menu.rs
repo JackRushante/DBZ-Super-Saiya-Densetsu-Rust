@@ -25,6 +25,10 @@ const SCREEN_COMMANDS: u8 = 0;
 const SCREEN_TOWN: u8 = 13;
 /// The Item screen (screen 2).
 const SCREEN_ITEMS: u8 = 2;
+/// The command window of a battle (screen 17: Atk., Item, Run, Menu). Its Item entry opens the Item screen.
+const SCREEN_BATTLE_COMMAND: u8 = 17;
+/// The battle's action screen (screen 21): a battle item's effect runs on it after its Use (`docs/re/data/menus.md`).
+const SCREEN_BATTLE_EFFECT: u8 = 21;
 /// The Menu list (screen 4): Cards, Status, Order, Text, Save.
 const SCREEN_MENU: u8 = 4;
 /// The Save (screen 10). Its list of save slots is step 1: the cursor (`map_entry_value`, `$0D62`) holds the slot
@@ -100,10 +104,37 @@ impl<'a> MenuProbe<'a> {
         self.byte(d::FIELD_STATE).is_some_and(|state| state != 0)
     }
 
-    /// Whether the menu is opening or open, as opposed to a field hold (a landing, a scene).
+    /// Whether the menu is opening or open, as opposed to a field hold (a landing, a scene). A battle's Item list is
+    /// an open menu too: a battle holds the field (`field_state` 2) while it runs.
     #[must_use]
     pub fn menu_open(&self) -> bool {
         self.byte(d::FIELD_STATE).is_some_and(|state| state == STATE_OPENING || state == STATE_OPEN)
+            || self.battle_list()
+    }
+
+    /// Whether a battle runs: `context_61` is 1 in a battle and 2 in the second kind of battle, and 0 on the map.
+    #[must_use]
+    pub fn in_battle(&self) -> bool {
+        self.byte(d::CONTEXT_61).is_some_and(|context| context != 0)
+    }
+
+    /// Whether the Item list of a battle is open (screen 2 in a battle): the list the HD's Items screen goes over.
+    #[must_use]
+    pub fn battle_list(&self) -> bool {
+        self.in_battle() && self.screen() == Some(SCREEN_ITEMS)
+    }
+
+    /// Whether a battle's item effect runs on its action screen (screen 21 in a battle), after the Use of an item.
+    #[must_use]
+    pub fn battle_effect(&self) -> bool {
+        self.in_battle() && self.screen() == Some(SCREEN_BATTLE_EFFECT)
+    }
+
+    /// Whether the command window of a battle is up and idle (screen 17 in a battle): where the battle's Item list
+    /// returns to with B, and where a use ends.
+    #[must_use]
+    pub fn battle_command(&self) -> bool {
+        self.in_battle() && self.screen() == Some(SCREEN_BATTLE_COMMAND) && !self.busy()
     }
 
     /// Whether the menu is opening (`field_state` is `$0F`): its screen byte is not set yet, and
@@ -194,7 +225,8 @@ impl<'a> MenuProbe<'a> {
         if self.field_free() {
             return true;
         }
-        if !self.menu_open() {
+        // A battle's item effect waits on its action screen (idle, with its own press), as an open menu does.
+        if !self.menu_open() && !self.battle_effect() {
             return false;
         }
         if self.byte(d::MENU_DRAW_DONE).is_none_or(|done| done & DRAW_QUEUE_EMPTY == 0) {
@@ -255,7 +287,9 @@ impl<'a> MenuProbe<'a> {
         let items = self.items()?;
         let selected = match screen {
             Screen::Items => self.selected(&items, cursor, page),
-            Screen::Command | Screen::Menu | Screen::Cheats | Screen::Options => None,
+            Screen::Command | Screen::Menu | Screen::Cheats | Screen::Options | Screen::Mods => {
+                None
+            }
         };
         Some(MenuView {
             bag: None,

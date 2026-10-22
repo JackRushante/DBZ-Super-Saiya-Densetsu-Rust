@@ -15,10 +15,11 @@ use ssd_game::cheats::BLOCK;
 use ssd_game::data as d;
 use ssd_game::menu::driver::{Binding, Curtain, Driver, Frame as HdFrame};
 use ssd_game::menu::{SAVE_LIST_STEP, SAVE_SCREEN};
-use ssd_hd::world::{WideFrame, WideHd, WideRun};
+use ssd_hd::world::{SharedHd, WideFrame, WideHd, WideRun};
 use ssd_menus::bag::Sidecar;
 use ssd_menus::cheats::{CheatSidecar, MARKER, MARKER_BYTES, SUSPENDED};
 use ssd_menus::layout::{self, palette};
+use ssd_menus::mods_state::ModsSidecar;
 use ssd_menus::screens::SlotList;
 use ssd_menus::{Color, DrawList, Key, Language, Op, Picture, Rect};
 use ssd_oracle::{Frame, FrameLog, Joypad};
@@ -29,6 +30,8 @@ use std::path::PathBuf;
 const SIDECAR: &str = "ssd.bag";
 /// The sidecar file of the cheats of the save slots, beside the bags.
 const CHEATS_SIDECAR: &str = "ssd.cheats";
+/// The sidecar file of the mod state of the save slots (the extended flags and the high parts), beside the bags.
+const MODS_SIDECAR: &str = "ssd.mods";
 /// The gate of the cheats in work RAM: the suspended byte of the cheat block (nonzero while a scripted fight
 /// has the battle cheats off).
 const GATE: usize = (BLOCK - 0x7E_0000) as usize + SUSPENDED;
@@ -113,7 +116,7 @@ pub struct Hd {
 impl Hd {
     /// The HD layer for the canonical ROM `rom`: its catalogue gives the names and texts, the bag (of the
     /// ruleset's rules) binds to the saves with the sidecar file of the saves directory, and the cheats of the
-    /// ruleset are kept in their sidecar file the same way.
+    /// ruleset are kept in their sidecar file the same way. The mod state of the saves is kept in its own file.
     ///
     /// # Errors
     ///
@@ -126,6 +129,11 @@ impl Hd {
         let driver = Driver::with_bag(labels.clone(), ruleset.bag(), sidecar);
         let driver =
             if ruleset.cheats() { driver.with_cheats(read_cheats_sidecar()?) } else { driver };
+        // Read whatever the ruleset: a Save writes the file either way, and a driver without the entries would
+        // write the file with the one slot's entry only.
+        let driver = driver.with_mods(read_mods_sidecar()?);
+        // The data packs the Data packs screen lists (empty outside an Enhanced run).
+        let driver = driver.with_packs(crate::packs::catalog());
         let driver =
             driver.with_options(crate::options::read_slots()?, crate::options::read_settings()?);
         let language_saved = Language::from_values(&driver.options().pc);
@@ -150,7 +158,7 @@ impl Hd {
                 backdrop: None,
             },
             wide: {
-                let mut wide = WideRun::new(rom);
+                let mut wide = WideRun::new(&crate::hd_art::world(rom));
                 wide.set_art(crate::hd_art::pack(rom));
                 wide.set_font(crate::hd_art::font(rom));
                 wide
@@ -212,6 +220,15 @@ impl Hd {
     /// The file cannot be written.
     pub fn save_cheats_sidecar(&self) -> anyhow::Result<()> {
         write_beside(&cheats_sidecar_path(), &self.driver.cheat_sidecar().to_bytes())
+    }
+
+    /// Writes the sidecar file of the mod state (after a save wrote one).
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be written.
+    pub fn save_mods_sidecar(&self) -> anyhow::Result<()> {
+        write_beside(&mods_sidecar_path(), &self.driver.mods_sidecar().to_bytes())
     }
 
     /// Writes the options of the save slots (after a save changed one).
@@ -318,6 +335,21 @@ impl Hd {
         self.driver.take_setup_request()
     }
 
+    /// The request the Data packs screen made, once (see [`Driver::take_mods_request`]).
+    pub fn take_mods_request(&mut self) -> Option<ssd_menus::packs::Request> {
+        self.driver.take_mods_request()
+    }
+
+    /// Whether Y is held this frame (see [`Driver::set_moving`]).
+    pub fn set_y_held(&mut self, held: bool) {
+        self.driver.set_moving(held);
+    }
+
+    /// A line the Data packs screen shows until the next key (see [`Driver::set_mods_alert`]).
+    pub fn set_mods_alert(&mut self, text: String) {
+        self.driver.set_mods_alert(text);
+    }
+
     /// The player's press on the field opens the menu (see [`Driver::open`]).
     pub fn open(&mut self) {
         self.driver.open();
@@ -339,15 +371,15 @@ impl Hd {
         self.wide.note(wram, log)
     }
 
-    /// The 16:9 view of the frame that just ran as the Enhanced picture at the scale and look of
-    /// `options`, with the HD art (see [`WideRun::note_hd`]).
-    pub fn note_frame_hd(
+    /// The 16:9 view of the frame that just ran as the Enhanced picture (see [`WideRun::note_hd_shared`]): a frame whose inputs
+    /// are those of the picture before is not drawn again.
+    pub fn note_frame_hd_shared(
         &mut self,
         wram: &[u8],
         log: Option<&FrameLog>,
         options: ssd_hd::HdOptions,
-    ) -> Option<WideHd> {
-        self.wide.note_hd(wram, log, options)
+    ) -> Option<SharedHd> {
+        self.wide.note_hd_shared(wram, log, options)
     }
 
     /// A frame that ran and is not drawn (a fast-forward's frame the window never shows): the 16:9
@@ -356,7 +388,7 @@ impl Hd {
         self.wide.skip(wram);
     }
 
-    /// [`Hd::redraw_frame_hd`] for a fast-forward, which shows its pictures a window frame late:
+    /// The Enhanced picture for a fast-forward, which shows its pictures a window frame late:
     /// the frame is drawn in the background and the picture returned is the one drawn for the
     /// call before (see [`WideRun::redraw_hd_pipelined`]).
     pub fn redraw_frame_hd_pipelined(
@@ -372,19 +404,19 @@ impl Hd {
         self.wide.redraw(log)
     }
 
-    /// [`Hd::redraw_frame`] as the Enhanced picture of [`Hd::note_frame_hd`].
-    pub fn redraw_frame_hd(
+    /// The Enhanced picture of the frame last skipped, sharing its picture (see [`WideRun::redraw_hd_shared`]).
+    pub fn redraw_frame_hd_shared(
         &mut self,
         log: Option<&FrameLog>,
         options: ssd_hd::HdOptions,
-    ) -> Option<WideHd> {
-        self.wide.redraw_hd(log, options)
+    ) -> Option<SharedHd> {
+        self.wide.redraw_hd_shared(log, options)
     }
 
-    /// [`Hd::note_field`] for an Enhanced picture: the backdrop is the picture as it is drawn.
-    pub fn note_field_picture(&mut self, picture: &ssd_hd::HdFrame) {
+    /// [`Hd::note_field`] for an Enhanced picture: the backdrop is the picture as it is drawn (kept, not copied).
+    pub fn note_field_picture(&mut self, picture: &SharedHd) {
         if self.driver.curtain() == Curtain::Down && !self.driver.busy() {
-            self.art.note_field_rgba(picture.width, picture.height, &picture.rgba);
+            self.art.note_field_shared(picture);
         }
     }
 
@@ -403,12 +435,16 @@ impl Hd {
     }
 }
 
-/// The frame the menu opened on, as RGBA pixels, with the generation it was copied at.
+/// The frame the menu opens over: the Enhanced picture it was drawn as (kept by reference, not copied), or the
+/// PPU's frame as RGBA pixels. `generation` names it (serials of [`ssd_hd::world::next_serial`]).
 struct FieldImage {
     generation: u64,
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
+    source: FieldSource,
+}
+
+enum FieldSource {
+    Pixels { width: u32, height: u32, rgba: Vec<u8> },
+    Picture(SharedHd),
 }
 
 /// The pictures of the objects, and the backdrop, as egui textures decoded on first use.
@@ -447,33 +483,43 @@ impl Art {
         for color in frame.pixels {
             rgba.extend_from_slice(&[color.r, color.g, color.b, 255]);
         }
-        self.keep_field(frame.size.width, frame.size.height, rgba);
+        let source =
+            FieldSource::Pixels { width: frame.size.width, height: frame.size.height, rgba };
+        self.keep_field(ssd_hd::world::next_serial(), source);
     }
 
-    /// Copies RGBA pixels (an Enhanced picture) as the backdrop.
-    fn note_field_rgba(&mut self, width: u32, height: u32, rgba: &[u8]) {
-        self.keep_field(width, height, rgba.to_vec());
+    /// Keeps an Enhanced picture as the backdrop: nothing is copied, and a picture that is the backdrop already
+    /// is not kept again (its texture stays).
+    fn note_field_shared(&mut self, picture: &SharedHd) {
+        if self.field.as_ref().is_some_and(|field| field.generation == picture.serial) {
+            return;
+        }
+        self.keep_field(picture.serial, FieldSource::Picture(picture.clone()));
     }
 
-    fn keep_field(&mut self, width: u32, height: u32, rgba: Vec<u8>) {
-        let generation = self.field.as_ref().map_or(1, |field| field.generation + 1);
-        self.field = Some(FieldImage { generation, width, height, rgba });
+    fn keep_field(&mut self, generation: u64, source: FieldSource) {
+        self.field = Some(FieldImage { generation, source });
     }
 
     /// The texture of the backdrop, uploaded if the field changed since it was last painted; `None`
     /// before any field was copied. It is painted over the game picture, in the same rect.
     fn backdrop(&mut self, ctx: &egui::Context) -> Option<egui::TextureId> {
         let field = self.field.as_ref()?;
-        if field.width == 0 || field.height == 0 {
+        let (width, height, rgba) = match &field.source {
+            FieldSource::Pixels { width, height, rgba } => (*width, *height, rgba.as_slice()),
+            FieldSource::Picture(shared) => {
+                let picture = &shared.picture.picture;
+                (picture.width, picture.height, picture.rgba.as_slice())
+            }
+        };
+        if width == 0 || height == 0 {
             return None;
         }
         let stale =
             self.backdrop.as_ref().is_none_or(|(generation, _)| *generation != field.generation);
         if stale {
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [field.width as usize, field.height as usize],
-                &field.rgba,
-            );
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], rgba);
             let texture = ctx.load_texture("field backdrop", image, egui::TextureOptions::NEAREST);
             self.backdrop = Some((field.generation, texture));
         }
@@ -545,14 +591,19 @@ fn hd_picture(pack: &ssd_hd::pack::Pack, portrait: &Portrait) -> Option<egui::Co
     Some(egui::ColorImage::from_rgba_unmultiplied([picture.width, picture.height], &picture.rgba))
 }
 
-/// The sidecar file's path: `ssd.bag` in the saves directory.
+/// The sidecar file's path: `ssd.bag` beside the battery save (the saves directory, or a chapter's folder).
 fn sidecar_path() -> PathBuf {
-    paths::saves_dir().join(SIDECAR)
+    crate::chapter::battery_dir().join(SIDECAR)
 }
 
-/// The sidecar file of the cheats' path: `ssd.cheats` in the saves directory.
+/// The sidecar file of the cheats' path: `ssd.cheats` beside the battery save.
 fn cheats_sidecar_path() -> PathBuf {
-    paths::saves_dir().join(CHEATS_SIDECAR)
+    crate::chapter::battery_dir().join(CHEATS_SIDECAR)
+}
+
+/// The sidecar file of the mod state's path: `ssd.mods` beside the battery save.
+fn mods_sidecar_path() -> PathBuf {
+    crate::chapter::battery_dir().join(MODS_SIDECAR)
 }
 
 /// Writes `bytes` to `path`: beside the file and renamed over it, so a crash never leaves half a file. The writer
@@ -581,6 +632,26 @@ fn read_cheats_sidecar() -> anyhow::Result<CheatSidecar> {
             CheatSidecar::empty()
         })),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(CheatSidecar::empty()),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// The mod state's sidecar: empty when the file does not exist yet, as for the saves made before it existed. A file
+/// that is not a mod state file (damaged, or of another version) is kept aside as `ssd.mods.bad`, and the mod state of
+/// every save starts neutral.
+fn read_mods_sidecar() -> anyhow::Result<ModsSidecar> {
+    let path = mods_sidecar_path();
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(ModsSidecar::from_bytes(&bytes).unwrap_or_else(|error| {
+            keep_damaged(&path, &path.with_extension("mods.bad"), &error);
+            ModsSidecar::empty()
+        })),
+        // A chapter that starts fresh carries the sidecar of its slot, kept in memory by a run that does not persist.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(crate::chapter::fresh("ssd.mods")
+                .and_then(|bytes| ModsSidecar::from_bytes(bytes).ok())
+                .unwrap_or_else(ModsSidecar::empty))
+        }
         Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
 }
@@ -655,6 +726,7 @@ pub fn keys_pressed(previous: Joypad, now: Joypad) -> Vec<Key> {
         (now.l && !previous.l, Key::TabBack),
         (now.y && !previous.y, Key::ResetPage),
         (now.select && !previous.select, Key::ResetAll),
+        (now.x && !previous.x, Key::Apply),
         (now.r && !previous.r, Key::Tab),
     ]
     .into_iter()
@@ -1384,5 +1456,8 @@ mod tests {
         let select = Joypad { select: true, ..Joypad::default() };
         assert_eq!(keys_pressed(none, y), [Key::ResetPage]);
         assert_eq!(keys_pressed(none, select), [Key::ResetAll]);
+        let cross = Joypad { x: true, ..Joypad::default() };
+        assert_eq!(keys_pressed(none, cross), [Key::Apply], "X applies the data packs");
+        assert_eq!(keys_pressed(cross, cross), [], "a held X counts once");
     }
 }

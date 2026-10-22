@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 ssd-oracle = { workspace = true }
+# The pack directory the redirectors read (`mods`): the lookup of a slot in the image.
+ssd-mod = { workspace = true }
 # The menus' names and draw types: the menu probe returns their view (pure Rust, no game code).
 ssd-menus = { workspace = true }
 # The battery save's slots: the keeper of the bag binds to the save the game runs on.

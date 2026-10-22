@@ -24,9 +24,14 @@
 //! emulator keeps but does not interpret. A replay with no mode and no events is written as
 //! format 1, byte for byte as before.
 //!
+//! File layout, format 3 (a run on a pack set, `ssd_mod`): the format 2 layout with, right after the
+//! mode byte, the set's id (`u64`) and the CRC32 of its image (`u32`). A replay with no pack set is
+//! never written as format 3: its bytes are those of format 1 or 2, as before.
+//!
 //! A replay names the ROM, the power-on WRAM fill and the emulator core it was recorded with
 //! ([`CORE_VERSION`]); reading it for another ROM or core, or playing it on a cartridge whose
-//! SRAM does not take its initial SRAM, is an error naming the mismatch.
+//! SRAM does not take its initial SRAM, is an error naming the mismatch. A replay with a pack set
+//! plays only on that set's image ([`Replay::power_on_image`]).
 
 use crate::input::{JOYPAD_USED_BITS, joypad_bits, joypad_from_bits};
 use crate::{AudioSink, Joypad, Machine, MemorySaveStore, OracleError};
@@ -68,6 +73,10 @@ const MAGIC: &[u8; 8] = b"SSDRPLAY";
 const FORMAT_VERSION: u32 = 1;
 /// The layout with the mode and the host events (format 2).
 const FORMAT_HOST: u32 = 2;
+/// The layout with a pack set (format 3): format 2 with the set's id and image CRC32 after the mode.
+const FORMAT_PACKS: u32 = 3;
+/// The length of the ROM a replay is for: 1 MiB, the first part of any pack set's image.
+const ROM_LEN: usize = 0x10_0000;
 /// The mode of the original's rules (`ssd_game::Mode::Classic`): the replays of the reference
 /// suite. Any other mode is written as format 2.
 pub const MODE_CLASSIC: u8 = 0;
@@ -85,10 +94,20 @@ pub enum HostEvent {
     App { tag: u8, payload: Vec<u8> },
 }
 
+/// The pack set a replay was recorded with: the set's id and the CRC32 of its image. The image is not
+/// in the replay: the loader finds the packs and builds it, and it must have this CRC32.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackTag {
+    /// The set's id (`ssd_mod::Image::set_id`).
+    pub set_id: u64,
+    /// CRC32 of the set's image (`ssd_mod::Image::crc32`).
+    pub image_crc32: u32,
+}
+
 /// A session from power-on: the ROM, power-on state and joypad input of every frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Replay {
-    /// CRC32 of the ROM image ([`Machine::rom_crc32`]).
+    /// CRC32 of the original ROM ([`Machine::rom_crc32`]), also for a replay on a pack set's image.
     pub rom_crc32: u32,
     /// Seed of the power-on WRAM fill ([`Machine::wram_seed`]).
     pub wram_seed: u64,
@@ -101,6 +120,8 @@ pub struct Replay {
     pub mode: u8,
     /// The host events of each frame, as long as `inputs`, or empty when there are none.
     pub events: Vec<Vec<HostEvent>>,
+    /// The pack set the run was recorded with, if it was not on the ROM alone (format 3).
+    pub packs: Option<PackTag>,
 }
 
 impl Replay {
@@ -115,6 +136,7 @@ impl Replay {
             inputs: Vec::new(),
             mode: MODE_CLASSIC,
             events: Vec::new(),
+            packs: None,
         }
     }
 
@@ -154,15 +176,71 @@ impl Replay {
     /// initial SRAM (another SRAM size, SRAM where the replay has none or the other way round);
     /// [`OracleError::Load`] if the core rejects the ROM.
     pub fn power_on(&self, rom: Vec<u8>) -> Result<Machine, OracleError> {
+        if let Some(tag) = self.packs {
+            return Err(replay_error(&format!(
+                "the replay was recorded with pack set {:016X} (image {:08X}): it plays on that \
+                 image, not on the ROM alone",
+                tag.set_id, tag.image_crc32
+            )));
+        }
         let rom_crc32 = ssd_rom::crc32(&rom);
         if rom_crc32 != self.rom_crc32 {
             return Err(rom_mismatch(self.rom_crc32, rom_crc32));
         }
+        let machine = Machine::with_wram_seed(rom, Box::new(self.initial_saves()), self.wram_seed)?;
+        self.started(machine)
+    }
+
+    /// The machine at the replay's power-on on a pack set's `image` (`ssd_mod::build`), as
+    /// [`Replay::power_on`] makes it on the ROM: the image's first 1 MiB is the ROM the replay is for,
+    /// and the image must be the one the replay was recorded with ([`Replay::packs`]).
+    ///
+    /// # Errors
+    ///
+    /// [`OracleError::Replay`] if the replay has no pack set, if `image` is shorter than 1 MiB or its
+    /// first 1 MiB is not the replay's ROM, if its CRC32 is not the set's image CRC32, or for the SRAM
+    /// as [`Replay::power_on`]; [`OracleError::Load`] if the core rejects the image.
+    pub fn power_on_image(&self, image: Vec<u8>) -> Result<Machine, OracleError> {
+        let Some(tag) = self.packs else {
+            return Err(replay_error(
+                "the replay was recorded without packs: it plays on the ROM alone, power_on",
+            ));
+        };
+        let Some(rom) = image.get(..ROM_LEN) else {
+            return Err(replay_error("the image is shorter than the 1 MiB ROM"));
+        };
+        let rom_crc32 = ssd_rom::crc32(rom);
+        if rom_crc32 != self.rom_crc32 {
+            return Err(rom_mismatch(self.rom_crc32, rom_crc32));
+        }
+        let image_crc32 = ssd_rom::crc32(&image);
+        if image_crc32 != tag.image_crc32 {
+            return Err(replay_error(&format!(
+                "the replay's pack set is image {:08X}, this image is {image_crc32:08X}",
+                tag.image_crc32
+            )));
+        }
+        let machine = Machine::with_image(
+            image,
+            self.rom_crc32,
+            Box::new(self.initial_saves()),
+            self.wram_seed,
+        )?;
+        self.started(machine)
+    }
+
+    /// The save store a machine at the replay's power-on starts with: its initial SRAM, in memory.
+    fn initial_saves(&self) -> MemorySaveStore {
         let mut saves = MemorySaveStore::default();
         if let Some(sram) = &self.initial_sram {
             saves.0.insert("sav".to_owned(), sram.clone());
         }
-        let machine = Machine::with_wram_seed(rom, Box::new(saves), self.wram_seed)?;
+        saves
+    }
+
+    /// `machine`, powered on for this replay, once its cartridge has been checked against the initial
+    /// SRAM (see [`Replay::power_on`]).
+    fn started(&self, machine: Machine) -> Result<Machine, OracleError> {
         let cartridge = machine.sram().map(<[u8]>::len);
         let replay = self.initial_sram.as_ref().map(Vec::len);
         match (cartridge, replay) {
@@ -211,7 +289,9 @@ impl Replay {
     #[must_use]
     pub fn to_bytes(&self, core_version: &str) -> Vec<u8> {
         let len = |n: usize| u32::try_from(n).expect("replay section longer than u32::MAX");
-        let host = self.mode != MODE_CLASSIC || self.events.iter().any(|events| !events.is_empty());
+        let host = self.packs.is_some()
+            || self.mode != MODE_CLASSIC
+            || self.events.iter().any(|events| !events.is_empty());
         let sram = self.initial_sram.as_deref().unwrap_or_default();
         let mut body =
             Vec::with_capacity(32 + core_version.len() + sram.len() + 2 * self.inputs.len());
@@ -224,6 +304,10 @@ impl Replay {
         body.extend_from_slice(&len(self.inputs.len()).to_le_bytes());
         if host {
             body.push(self.mode);
+        }
+        if let Some(tag) = self.packs {
+            body.extend_from_slice(&tag.set_id.to_le_bytes());
+            body.extend_from_slice(&tag.image_crc32.to_le_bytes());
         }
         for (frame, &input) in self.inputs.iter().enumerate() {
             body.extend_from_slice(&joypad_bits(input).to_le_bytes());
@@ -249,7 +333,13 @@ impl Replay {
             }
         }
 
-        let format = if host { FORMAT_HOST } else { FORMAT_VERSION };
+        let format = if self.packs.is_some() {
+            FORMAT_PACKS
+        } else if host {
+            FORMAT_HOST
+        } else {
+            FORMAT_VERSION
+        };
         let mut out = Vec::with_capacity(body.len() + 16);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&format.to_le_bytes());
@@ -324,9 +414,9 @@ impl Replay {
             return Err(replay_error("not a replay (no SSDRPLAY magic)"));
         }
         let format = r.u32()?;
-        if format != FORMAT_VERSION && format != FORMAT_HOST {
+        if format != FORMAT_VERSION && format != FORMAT_HOST && format != FORMAT_PACKS {
             return Err(OracleError::Replay(format!(
-                "replay format {format}, expected {FORMAT_VERSION} or {FORMAT_HOST}"
+                "replay format {format}, expected {FORMAT_VERSION}, {FORMAT_HOST} or {FORMAT_PACKS}"
             )));
         }
         let crc = r.u32()?;
@@ -351,14 +441,19 @@ impl Replay {
         let sram = r.take(sram_len)?;
         let initial_sram = (sram_len > 0).then(|| sram.to_vec());
         let frames = r.len()?;
-        let (mode, mut events) = if format == FORMAT_HOST {
+        let (mode, packs, mut events) = if format != FORMAT_VERSION {
             let mode = r.u8()?;
             if mode > MODE_ENHANCED {
                 return Err(replay_error(&format!("the replay's mode {mode} is not known")));
             }
-            (mode, Vec::with_capacity(frames.min(r.0.len())))
+            let packs = if format == FORMAT_PACKS {
+                Some(PackTag { set_id: r.u64()?, image_crc32: r.u32()? })
+            } else {
+                None
+            };
+            (mode, packs, Vec::with_capacity(frames.min(r.0.len())))
         } else {
-            (MODE_CLASSIC, Vec::new())
+            (MODE_CLASSIC, None, Vec::new())
         };
         let mut inputs = Vec::with_capacity(frames.min(r.0.len()));
         for frame in 0..frames {
@@ -370,7 +465,7 @@ impl Replay {
                 )));
             }
             inputs.push(joypad_from_bits(bits));
-            if format == FORMAT_HOST {
+            if format != FORMAT_VERSION {
                 let count = r.len()?;
                 let mut frame_events = Vec::with_capacity(count.min(64));
                 for _ in 0..count {
@@ -398,7 +493,7 @@ impl Replay {
         if !r.0.is_empty() {
             return Err(replay_error("trailing bytes after the replay's inputs"));
         }
-        Ok(Self { rom_crc32, wram_seed, initial_sram, inputs, mode, events })
+        Ok(Self { rom_crc32, wram_seed, initial_sram, inputs, mode, events, packs })
     }
 }
 
@@ -433,6 +528,13 @@ impl Recorder {
     #[must_use]
     pub fn in_mode(mut self, mode: u8) -> Self {
         self.replay.mode = mode;
+        self
+    }
+
+    /// Sets the pack set the recording is made with ([`Replay::packs`]); it is set before the first frame.
+    #[must_use]
+    pub fn in_packs(mut self, packs: Option<PackTag>) -> Self {
+        self.replay.packs = packs;
         self
     }
 

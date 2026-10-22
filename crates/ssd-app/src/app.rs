@@ -13,6 +13,7 @@ use crate::options::audio::AudioSettings;
 use crate::options::controls::{self as bindings, Bindings};
 
 use crate::options::video::{Start, VideoSettings};
+use crate::packs;
 use crate::panel::{
     Controls, DebugAction, DivergenceWatch, Effect, FpsCounter, HooksSwitch, KeyRoute, PanelAction,
     PanelState, ReplayAction, Tab, route_key,
@@ -214,7 +215,7 @@ struct WindowState {
     scaled: Option<HdOptions>,
     /// The Enhanced picture of the last frame in the 16:9 view (with `--hd-scale` in Enhanced
     /// mode) and the frame count it was made at.
-    hd_view: Option<(u64, ssd_hd::world::WideHd)>,
+    hd_view: Option<(u64, ssd_hd::world::SharedHd)>,
     /// Where the time of the frame loop went since the counters were last taken (the bench).
     stages: Stages,
     /// The last frames run were a fast-forward's batch (see [`run_frames`]).
@@ -342,7 +343,7 @@ fn hd_frame(
     ensure_cheats(machine);
     hd.note_cheats(machine.wram());
     let frame = hd.frame(machine.wram(), machine.sram(), live);
-    let (write_bags, write_cheats) = sidecar_writes(&frame, playing);
+    let (write_bags, write_cheats, write_mods) = sidecar_writes(&frame, playing);
     let settings = frame.settings.clone().filter(|_| !playing);
     let (pad, events) = match session.playback_at(machine.frame_count()) {
         Some((pad, events)) => {
@@ -357,6 +358,15 @@ fn hd_frame(
         }
         None => (frame.pad, frame.events),
     };
+    // The ending of the game (the event of `ssd_game::mods::chapter`): the `completed` file of the saves folder.
+    for event in &events {
+        if let HostEvent::App { tag, .. } = event
+            && *tag == ssd_game::mods::chapter::COMPLETED_TAG
+            && let Err(error) = crate::chapter::write_completed()
+        {
+            log::warn!("the completion of the game is not recorded: {error:#}");
+        }
+    }
     if write_bags && let Err(error) = hd.save_sidecar() {
         log::warn!("{error:#}");
     }
@@ -378,6 +388,9 @@ fn hd_frame(
         log::warn!("{error:#}");
     }
     if write_cheats && let Err(error) = hd.save_cheats_sidecar() {
+        log::warn!("{error:#}");
+    }
+    if write_mods && let Err(error) = hd.save_mods_sidecar() {
         log::warn!("{error:#}");
     }
     if let Some(values) = frame.video.as_ref() {
@@ -423,19 +436,27 @@ fn forget_language(state: &mut WindowState) {
     }
 }
 
-/// Which sidecar files a frame writes, as (the bags, the cheats): the files of the saves the frame wrote, and none
-/// while a replay plays (the replay's own events carry the bookkeeping, and the saves' sidecars stay as they are).
-fn sidecar_writes(frame: &ssd_game::menu::driver::Frame, playing: bool) -> (bool, bool) {
-    (frame.saved.is_some() && !playing, frame.saved_cheats.is_some() && !playing)
+/// Which sidecar files a frame writes, as (the bags, the cheats, the mod state): the files of the saves the frame
+/// wrote, and none while a replay plays (the replay's own events carry the bookkeeping, and the saves' sidecars stay
+/// as they are).
+fn sidecar_writes(frame: &ssd_game::menu::driver::Frame, playing: bool) -> (bool, bool, bool) {
+    (
+        frame.saved.is_some() && !playing,
+        frame.saved_cheats.is_some() && !playing,
+        frame.saved_mods.is_some() && !playing,
+    )
 }
 
-/// Puts the cheat wrappers into the hook table of `machine` when the table lacks them (see [`hd_frame`]).
+/// Puts the cheat wrappers and the pack redirectors into the hook table of `machine` when the table lacks
+/// them (see [`hd_frame`]). Only the Enhanced run calls it: Classic gets neither.
 fn ensure_cheats(machine: &mut Machine) {
-    if ssd_game::cheats::installed_in(machine.hook_table()) {
+    let table = machine.hook_table();
+    if ssd_game::cheats::installed_in(table) && ssd_game::mods::installed_in(table) {
         return;
     }
     let mut table = machine.hook_table().cloned().unwrap_or_else(ssd_oracle::HookTable::new);
     ssd_game::cheats::install(&mut table);
+    ssd_game::mods::install(&mut table);
     machine.set_hook_table(Some(table));
 }
 
@@ -738,9 +759,11 @@ fn note_view(state: &mut WindowState, machine: &Machine, draw: Draw) {
     if let Some(options) = state.scaled {
         // The Enhanced picture in the 16:9 view; a frame it refuses is drawn as the 256-wide one
         let view = match draw {
-            Draw::Again => hd.redraw_frame_hd(machine.frame_log(), options),
-            Draw::Later => hd.redraw_frame_hd_pipelined(machine.frame_log(), options),
-            _ => hd.note_frame_hd(machine.wram(), machine.frame_log(), options),
+            Draw::Again => hd.redraw_frame_hd_shared(machine.frame_log(), options),
+            Draw::Later => hd
+                .redraw_frame_hd_pipelined(machine.frame_log(), options)
+                .map(ssd_hd::world::SharedHd::new),
+            _ => hd.note_frame_hd_shared(machine.wram(), machine.frame_log(), options),
         };
         if matches!(draw, Draw::Again | Draw::Later) && view.is_none() {
             if draw == Draw::Later {
@@ -753,7 +776,7 @@ fn note_view(state: &mut WindowState, machine: &Machine, draw: Draw) {
         }
         state.hd_view = view.map(|view| (machine.frame_count(), view));
         match current_hd_view(state.hd_view.as_ref(), machine) {
-            Some(view) => hd.note_field_picture(&view.picture),
+            Some(view) => hd.note_field_picture(view),
             None => hd.note_field(&machine.frame()),
         }
         return;
@@ -772,9 +795,9 @@ fn note_view(state: &mut WindowState, machine: &Machine, draw: Draw) {
 
 /// The Enhanced 16:9 view of the machine's frame, if it was made at the frame the machine is at.
 fn current_hd_view<'a>(
-    view: Option<&'a (u64, ssd_hd::world::WideHd)>,
+    view: Option<&'a (u64, ssd_hd::world::SharedHd)>,
     machine: &Machine,
-) -> Option<&'a ssd_hd::world::WideHd> {
+) -> Option<&'a ssd_hd::world::SharedHd> {
     view.filter(|(frame, _)| *frame == machine.frame_count()).map(|(_, view)| view)
 }
 
@@ -1078,17 +1101,27 @@ fn fallback_picture(
 /// the 16:9 view or `picture`), unless a verification shows its two Classic ones; else the 16:9
 /// view of Enhanced mode, else the PPU's own frame.
 fn game_views<'a>(
-    hd_view: Option<&'a (u64, ssd_hd::world::WideHd)>,
+    hd_view: Option<&'a (u64, ssd_hd::world::SharedHd)>,
     view: Option<&'a (u64, WideFrame)>,
     machine: &'a Machine,
     picture: Option<&'a HdFrame>,
     verify: Option<&'a LockstepRun>,
     smooth: bool,
 ) -> Vec<GameView<'a>> {
-    let hd_view = current_hd_view(hd_view, machine);
-    let shown = hd_view.filter(|_| verify.is_none()).map(|view| &view.picture).or(picture);
+    // The 16:9 picture is named by its serial: a picture the window showed last is not uploaded again
+    let shared = current_hd_view(hd_view, machine).filter(|_| verify.is_none());
+    let shown = match shared {
+        Some(shared) => Some((&shared.picture.picture, Some(shared.serial))),
+        None => picture.map(|picture| (picture, None)),
+    };
     match (shown, verify) {
-        (Some(picture), _) => vec![GameView::enhanced(picture, &machine.frame(), smooth)],
+        (Some((picture, serial)), _) => {
+            let view = GameView::enhanced(picture, &machine.frame(), smooth);
+            vec![match serial {
+                Some(serial) => view.with_serial(serial),
+                None => view,
+            }]
+        }
         (None, Some(run)) => vec![
             GameView::classic(&run.machine_a().frame()),
             GameView::classic(&run.machine_b().frame()),
@@ -1525,6 +1558,7 @@ impl Enhanced {
             machine.set_line_log(true);
             return None;
         }
+        self.renderer.set_conditions(ssd_hd::Conditions::of_work_ram(machine.wram()));
         let log = machine.frame_log()?;
         match self.renderer.render_hd(log, self.options) {
             Ok(picture) => Some(picture),
@@ -1711,6 +1745,8 @@ fn windowed_loop(
     let mut pacer = Pacer::new(Duration::from_secs_f64(1.0 / machine.target_fps()));
     let mut stats_start = pacer.next;
     let mut stats_frames = 0_u32;
+    // The Performance Hint session of the window's frames (Android; elsewhere it only keeps its target).
+    let mut perf = crate::perf_hint::Session::new(pacer.frame_time);
     // Android: set between the events that send the app to the background and bring it back. While it is set
     // nothing runs, and the event pump blocks (SDL waits there until the app is in the foreground again).
     #[cfg(target_os = "android")]
@@ -1718,6 +1754,8 @@ fn windowed_loop(
     #[cfg(target_os = "android")]
     let mut setup_hold: Option<Instant> = None;
     'main: loop {
+        // The window frame's work for the Performance Hint session: from here to just before the present.
+        let frame_started = Instant::now();
         for event in events.poll_iter() {
             video.handle_event(&mut ui_input, &event);
             match event {
@@ -1915,11 +1953,25 @@ fn windowed_loop(
         // The keys of the host are the HD's navigation while the HD has the curtain; the game only
         // sees them when it has no curtain (the driver ignores them otherwise).
         if let Some(hd) = state.hd.as_mut() {
+            // Y held moves the pack under the Data packs screen's cursor (see `Nav::key_mods`).
+            hd.set_y_held(pad.y);
             for key in hd::keys_pressed(hd_previous, pad) {
                 hd.key(key, machine.wram());
             }
         }
         hd_previous = pad;
+        // A request of the Data packs screen: the game restarts into the set or the chapter it asks for, and this run ends.
+        // A refusal (a set the checks do not take) stays on the screen.
+        if let Some(request) = state.hd.as_mut().and_then(hd::Hd::take_mods_request) {
+            match packs::carry_out(request) {
+                Ok(()) => break 'main,
+                Err(message) => {
+                    if let Some(hd) = state.hd.as_mut() {
+                        hd.set_mods_alert(message);
+                    }
+                }
+            }
+        }
         // Android: the Options' Game page asks for the setup (Enhanced); in Classic, Select + Start held for two seconds
         // does (Classic has no Options). The game ends and the launch loop shows the page.
         #[cfg(target_os = "android")]
@@ -2026,6 +2078,7 @@ fn windowed_loop(
         let mut hd_art = state.hd.as_mut().map(Hd::art);
         let symbols = env.symbols();
         let shown: &Machine = machine;
+        perf.report_frame(frame_started.elapsed(), pacer.frame_time);
         video.present(&views, &mut ui_input, |ui, games| {
             let view = View {
                 status,
@@ -2217,7 +2270,7 @@ fn draw_snapshot(
         Some(options) if hd_view.is_none() => Enhanced::new(options, rom).picture(machine),
         _ => None,
     };
-    let shown_picture = hd_view.map(|view| &view.picture).or(picture.as_ref());
+    let shown_picture = hd_view.map(|view| &view.picture.picture).or(picture.as_ref());
     let registers = machine.cpu_registers();
     // Nothing is paced here, so the header shows the rate the window runs at.
     let status = header_status(machine, &state.history, machine.target_fps() as f32);
@@ -2367,6 +2420,7 @@ fn run_script_line(
                         MenuShow::Items => Screen::Items,
                         MenuShow::Cheats => Screen::Cheats,
                         MenuShow::Options => Screen::Options,
+                        MenuShow::Mods => Screen::Mods,
                     };
                     let hd = state.hd.as_ref().context("menu lines need --mode enhanced")?;
                     let curtain = hd.driver().curtain();
@@ -2495,12 +2549,21 @@ mod tests {
             events: Vec::new(),
             saved: None,
             saved_cheats: Some(saved),
+            saved_mods: Some((0, 1)),
             saved_options: true,
             settings: None,
             video: None,
         };
-        assert_eq!(sidecar_writes(&frame, false), (false, true), "a live run saves its cheats");
-        assert_eq!(sidecar_writes(&frame, true), (false, false), "a replay keeps the sidecars");
+        assert_eq!(
+            sidecar_writes(&frame, false),
+            (false, true, true),
+            "a live run saves its cheats and mods"
+        );
+        assert_eq!(
+            sidecar_writes(&frame, true),
+            (false, false, false),
+            "a replay keeps the sidecars"
+        );
     }
 
     /// A machine that has run long enough for its SRAM to change, with that change not yet in
@@ -3056,5 +3119,162 @@ mod tests {
         assert!(load_state(&mut machine, 4).is_err(), "missing state is an error, not a panic");
         machine.run_frame(Joypad::default(), &mut NullAudio).unwrap(); // machine still usable
         unsafe { std::env::remove_var("SSD_DATA_DIR") };
+    }
+
+    /// One window frame as `windowed_loop` runs it: the joypad's edges are the HD's keys (`hd::keys_pressed`), then
+    /// the frames run with the joypad held.
+    #[allow(clippy::too_many_arguments)]
+    fn window_step(
+        state: &mut WindowState,
+        machine: &mut Machine,
+        session: &mut Session,
+        env: &Env<'_>,
+        audio: &mut audio::Audio,
+        frames: u32,
+        pad: Joypad,
+        previous: &mut Joypad,
+    ) {
+        if let Some(hd) = state.hd.as_mut() {
+            for key in hd::keys_pressed(*previous, pad) {
+                hd.key(key, machine.wram());
+            }
+        }
+        *previous = pad;
+        window_frames(state, machine, session, env, pad, audio, frames).unwrap();
+    }
+
+    /// The player's presses through the window's own frame path, as the window loop gives them. The replay plays to
+    /// `MENU_FRAME` (on foot, no menu open: frame 3700 of `menus.ssdreplay`, the default). Then each press of
+    /// `MENU_SEQ` (comma separated: a, b, up, down, or - for none) is held for six window frames, and the frames run
+    /// until the HD's choice ends; the first `a` opens the original's command window, which the HD follows. The last
+    /// press must reach `MENU_EXPECT` (command, menu or items). `MENU_FRAMES` is the emulated frames per window frame
+    /// (1 at normal speed, 4 the fast-forward), `MENU_REPLAY` the replay in `.work/replays`, `MENU_HOOKS=rust` runs the
+    /// routines in Rust (the shipped game).
+    #[test]
+    #[ignore = "needs SSD_ROM_PATH and the reference replays (.work/replays)"]
+    fn the_players_presses_reach_the_sub_menu_on_the_window_frame_path() {
+        let rom = std::fs::read(std::env::var("SSD_ROM_PATH").expect("SSD_ROM_PATH")).unwrap();
+        let name = std::env::var("MENU_REPLAY").unwrap_or_else(|_| "menus.ssdreplay".to_owned());
+        let replay = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.work/replays").join(name);
+        let until: u64 =
+            std::env::var("MENU_FRAME").ok().and_then(|value| value.parse().ok()).unwrap_or(3700);
+        let frames: u32 =
+            std::env::var("MENU_FRAMES").ok().and_then(|value| value.parse().ok()).unwrap_or(1);
+        let sequence =
+            std::env::var("MENU_SEQ").unwrap_or_else(|_| "a,down,down,down,down,a".to_owned());
+        let want = match std::env::var("MENU_EXPECT").unwrap_or_default().as_str() {
+            "command" => Screen::Command,
+            "items" => Screen::Items,
+            _ => Screen::Menu,
+        };
+        let hooks_arg = if std::env::var("MENU_HOOKS").is_ok_and(|value| value == "rust") {
+            HooksArg::Rust
+        } else {
+            HooksArg::Original
+        };
+        let ruleset = Ruleset::enhanced();
+        let mut session = Session::new(Some(replay.as_path()), None, &rom).unwrap();
+        enhanced_session(&mut session, ruleset).unwrap();
+        let hooks = crate::hook_setup::prepare(hooks_arg, None, None).unwrap();
+        let switch = HookSwitch::load(None, None).ok();
+        let mut machine = new_machine(rom.clone(), hooks.as_ref(), &mut session).unwrap();
+        let mut state =
+            WindowState::new(Controls::new(hooks_arg, HooksSwitch::Allowed, false, false));
+        state.hd = hd_layer(&rom, ruleset).unwrap();
+        if let Some(hd) = state.hd.as_mut() {
+            hd.set_replaying();
+        }
+        state.scaled = Some(HdOptions { scale: 4, look: ssd_hd::Look::default() });
+        let env = Env { rom: &rom, switch: switch.as_ref(), verify: None };
+        let mut audio = audio::Audio::muted();
+        let idle = Joypad::default();
+        let mut previous = Joypad::default();
+        while machine.frame_count() < until && !session.playback_over(&machine) {
+            window_step(
+                &mut state,
+                &mut machine,
+                &mut session,
+                &env,
+                &mut audio,
+                1,
+                idle,
+                &mut previous,
+            );
+        }
+        session.stop_playback();
+        for token in sequence.split(',').map(str::trim) {
+            let pad = match token {
+                "a" => Joypad { a: true, ..Joypad::default() },
+                "b" => Joypad { b: true, ..Joypad::default() },
+                "up" => Joypad { up: true, ..Joypad::default() },
+                "down" => Joypad { down: true, ..Joypad::default() },
+                "-" => idle,
+                other => panic!("MENU_SEQ: no press named {other}"),
+            };
+            for _ in 0..6 {
+                window_step(
+                    &mut state,
+                    &mut machine,
+                    &mut session,
+                    &env,
+                    &mut audio,
+                    frames,
+                    pad,
+                    &mut previous,
+                );
+            }
+            for _ in 0..12 {
+                window_step(
+                    &mut state,
+                    &mut machine,
+                    &mut session,
+                    &env,
+                    &mut audio,
+                    frames,
+                    idle,
+                    &mut previous,
+                );
+            }
+            for _ in 0..20_000 {
+                if !state.hd.as_ref().unwrap().busy() {
+                    break;
+                }
+                window_step(
+                    &mut state,
+                    &mut machine,
+                    &mut session,
+                    &env,
+                    &mut audio,
+                    frames,
+                    idle,
+                    &mut previous,
+                );
+            }
+            let driver = state.hd.as_ref().unwrap().driver();
+            eprintln!(
+                "press {token}: frame {} curtain {:?} screen {:?} outcome {:?}",
+                machine.frame_count(),
+                driver.curtain(),
+                driver.nav().screen(),
+                driver.last_outcome()
+            );
+        }
+        for _ in 0..30 {
+            window_step(
+                &mut state,
+                &mut machine,
+                &mut session,
+                &env,
+                &mut audio,
+                frames,
+                idle,
+                &mut previous,
+            );
+        }
+        let driver = state.hd.as_ref().unwrap().driver();
+        assert!(
+            driver.curtain() == Curtain::Up && driver.nav().screen() == want,
+            "the last press did not reach {want:?}"
+        );
     }
 }

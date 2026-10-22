@@ -12,8 +12,8 @@
 //! breakpoint <symbol or address>
 //! mode <routine> original|rust|verify
 //! menu open
-//! menu key up|down|left|right|a|b|l|r|y|select
-//! menu show field|menu|items|cheats|options
+//! menu key up|down|left|right|a|b|l|r|y|select|x
+//! menu show field|menu|items|cheats|options|mods
 //! menu battle-cheats
 //! menu press <key>|esc|backspace|pad <button>
 //! menu tab all|allies|tools
@@ -89,6 +89,8 @@ pub enum MenuShow {
     Cheats,
     /// The Options screen.
     Options,
+    /// The Data packs screen.
+    Mods,
 }
 
 /// A line of a script, with its number (from 1).
@@ -189,7 +191,7 @@ fn parse_command(text: &str) -> Result<Command, String> {
 }
 
 /// What a `menu` line takes, for the error message.
-const MENU_USAGE: &str = "menu takes open, key up|down|left|right|a|b, show field|menu|items|cheats, press <key>, or tab all|allies|tools";
+const MENU_USAGE: &str = "menu takes open, key up|down|left|right|a|b|x, show field|menu|items|cheats|options|mods, press <key>, or tab all|allies|tools";
 
 fn menu_tab_named(name: &str) -> Result<BagTab, String> {
     match name {
@@ -212,8 +214,9 @@ fn menu_key_named(name: &str) -> Result<Key, String> {
         "r" => Ok(Key::Tab),
         "y" => Ok(Key::ResetPage),
         "select" => Ok(Key::ResetAll),
+        "x" => Ok(Key::Apply),
         _ => Err(format!(
-            "unknown menu key `{name}`: expected up, down, left, right, a, b, l, r, y or select"
+            "unknown menu key `{name}`: expected up, down, left, right, a, b, l, r, y, select or x"
         )),
     }
 }
@@ -239,8 +242,9 @@ fn menu_screen_named(name: &str) -> Result<MenuShow, String> {
         "items" => Ok(MenuShow::Items),
         "cheats" => Ok(MenuShow::Cheats),
         "options" => Ok(MenuShow::Options),
+        "mods" => Ok(MenuShow::Mods),
         _ => Err(format!(
-            "unknown menu screen `{name}`: expected field, menu, items, cheats or options"
+            "unknown menu screen `{name}`: expected field, menu, items, cheats, options or mods"
         )),
     }
 }
@@ -342,7 +346,10 @@ mod tests {
         assert!(error("menu show submenu").message.contains("unknown menu screen `submenu`"));
         assert_eq!(command("menu show cheats"), Command::Menu(MenuCommand::Show(MenuShow::Cheats)));
         assert_eq!(command("menu battle-cheats"), Command::Menu(MenuCommand::BattleCheats));
-        assert!(error("menu key x").message.contains("unknown menu key `x`"));
+        assert!(error("menu key w").message.contains("unknown menu key `w`"));
+        assert_eq!(command("menu key x"), Command::Menu(MenuCommand::Key(Key::Apply)));
+        assert_eq!(command("menu show mods"), Command::Menu(MenuCommand::Show(MenuShow::Mods)));
+        assert!(error("menu show packs").message.contains("unknown menu screen `packs`"));
     }
 
     #[test]

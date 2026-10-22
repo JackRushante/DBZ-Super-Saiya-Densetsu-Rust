@@ -131,6 +131,7 @@ mod tests {
             inputs: (0..20).map(|f| ssd_oracle::joypad_from_bits((f * 37) & 0x0FFF)).collect(),
             mode: ssd_oracle::MODE_CLASSIC,
             events: Vec::new(),
+            packs: None,
         }
     }
 

@@ -48,7 +48,8 @@ struct Totals {
 /// Plays `replay` on a pure machine and on a standalone one, comparing them after each frame of
 /// B. `verbose` prints a line per stop. With `cheats`, B also has the cheat wrappers of Enhanced mode installed
 /// (`ssd_game::cheats`) at a neutral block: the shipped game with the cheats menu untouched must still equal
-/// the original.
+/// the original. With `mods`, B runs on that pack set's image (the empty set's, zero-padded to 2 MiB) with the
+/// redirectors installed (`ssd_game::mods`): the same must hold.
 ///
 /// # Errors
 ///
@@ -59,6 +60,7 @@ pub fn run(
     replay_path: &Path,
     verbose: bool,
     cheats: bool,
+    mods: Option<&ssd_mod::Image>,
     out: &mut dyn Write,
 ) -> anyhow::Result<Outcome> {
     let replay = read_replay(replay_path, rom)?;
@@ -66,8 +68,18 @@ pub fn run(
     if cheats {
         ssd_game::cheats::install(&mut table);
     }
+    if mods.is_some() {
+        ssd_game::mods::install(&mut table);
+    }
     let mut a = replay.power_on(rom.to_vec())?;
-    let mut b = replay.power_on(rom.to_vec())?;
+    let mut b = match mods {
+        None => replay.power_on(rom.to_vec())?,
+        Some(image) => {
+            let mut on_packs = replay.clone();
+            on_packs.packs = Some(crate::shared::pack_tag(image));
+            on_packs.power_on_image(image.bytes.clone())?
+        }
+    };
     b.set_hook_table(Some(table));
     let name =
         replay_path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());

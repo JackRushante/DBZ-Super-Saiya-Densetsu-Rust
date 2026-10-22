@@ -45,6 +45,9 @@ pub struct Args {
     /// From this frame on the run goes one CPU cycle at a time and each watched write also says
     /// where the CPU was (the program counter after the writing instruction's cycle).
     pub watch_from: Option<u64>,
+    /// Data packs (a folder or a `.ssdpack` each, repeatable): the machine runs the image of those packs with the
+    /// redirectors installed (`ssd_game::mods`), as the Enhanced app does. A pack may hold the ROM's bytes (`--local`).
+    pub mods: Vec<PathBuf>,
     /// Write the battery SRAM (8 KiB) at the end: a save the game wrote itself, when the script
     /// ended with the map menu's Save.
     pub sram_out: Option<PathBuf>,
@@ -52,6 +55,8 @@ pub struct Args {
     /// art: the size the game's window shows. `--state-in` with it is how a saved moment is seen in
     /// HD without a window.
     pub hd_scale: Option<u32>,
+    /// The look of the `--hd-scale` picture: `--enhanced-look crisp|smooth` [default: crisp].
+    pub look: Look,
     /// The HD pack folder of `--hd-scale` [default: the converter's under the cache directory].
     pub hd_pack: Option<PathBuf>,
     /// With `--hd-scale`: write the field, fighter and effect poses the frames show with no art
@@ -60,11 +65,15 @@ pub struct Args {
     /// With `--gaps`: also map this box of the picture, `x,y,w,h` in the wide view's pixels: for
     /// each pixel the layer on top (OAM `O`, BG `U`/`L`/`H`/`B`) and a letter per picture.
     pub box_map: Option<(i32, i32, usize, usize)>,
+    /// Host writes to work RAM, `FRAME:ADDR=HEX` (repeatable): the bytes are written before frame FRAME runs, as the
+    /// Enhanced app's host writes are (`docs/mods/art.md`, the Kaioken's pose variant proof).
+    pub wram: Vec<String>,
 }
 
 /// Parses `<script> [--frames a,b,c] [--every N] [--upto N] [--out dir] [--sheet COLS]
 /// [--no-png] [--peek a,b] [--watch a,b] [--watch-from N] [--state-in f] [--state-out f]
-/// [--wram-out f] [--sram f] [--sram-out f] [--hd-scale N] [--pack DIR] [--gaps DIR]`.
+/// [--wram-out f] [--sram f] [--sram-out f] [--hd-scale N] [--enhanced-look crisp|smooth] [--pack DIR]
+/// [--gaps DIR] [--mods PACK]...`.
 ///
 /// # Errors
 ///
@@ -88,9 +97,12 @@ pub fn parse_args(args: &[&str]) -> Result<Args, String> {
         watch_from: None,
         sram_out: None,
         hd_scale: None,
+        look: Look::Crisp,
         hd_pack: None,
         gaps: None,
         box_map: None,
+        wram: Vec::new(),
+        mods: Vec::new(),
     };
     let number = |flag: &str, v: Option<&&str>| -> Result<u64, String> {
         let v = v.ok_or(format!("{flag} needs a value"))?;
@@ -148,11 +160,24 @@ pub fn parse_args(args: &[&str]) -> Result<Args, String> {
                 let scale = u32::try_from(number(arg, it.next())?).unwrap_or(4).clamp(2, 8);
                 parsed.hd_scale = Some(scale);
             }
+            "--enhanced-look" => {
+                parsed.look = match it.next().copied() {
+                    Some("crisp") => Look::Crisp,
+                    Some("smooth") => Look::Smooth,
+                    _ => return Err("--enhanced-look takes crisp or smooth".to_owned()),
+                };
+            }
             "--pack" => {
                 parsed.hd_pack = Some(PathBuf::from(it.next().ok_or("--pack needs a folder")?));
             }
             "--gaps" => {
                 parsed.gaps = Some(PathBuf::from(it.next().ok_or("--gaps needs a folder")?));
+            }
+            "--mods" => {
+                parsed.mods.push(PathBuf::from(it.next().ok_or("--mods needs a pack")?));
+            }
+            "--wram" => {
+                parsed.wram.push(it.next().ok_or("--wram needs FRAME:ADDR=HEX")?.to_string());
             }
             "--box" => {
                 let v = it.next().ok_or("--box needs x,y,w,h")?;
@@ -289,6 +314,45 @@ fn mesen_timeline(inputs: &dyn Fn(u64) -> Joypad, frames: u64) -> String {
     out
 }
 
+/// A host write to work RAM before a frame (`--wram FRAME:ADDR=HEX`): the bus address `$7E:0000` to `$7F:FFFF` it starts at, and
+/// the bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Poke {
+    frame: u64,
+    address: u32,
+    bytes: Vec<u8>,
+}
+
+/// The host writes of `specs`, each `FRAME:ADDR=HEX` with ADDR a bus address in work RAM (`7E0C36` or `$7E:0C36`) and HEX the
+/// bytes in hexadecimal (`80`, `3B00`).
+///
+/// # Errors
+///
+/// A spec that is not `FRAME:ADDR=HEX`, an address outside work RAM, or bytes that are not hexadecimal pairs.
+fn resolve_pokes(specs: &[String]) -> anyhow::Result<Vec<Poke>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let shape = || format!("`{spec}` is not FRAME:ADDR=HEX");
+            let (frame, rest) = spec.split_once(':').with_context(shape)?;
+            let (address, hex) = rest.split_once('=').with_context(shape)?;
+            let frame: u64 = frame.parse().with_context(shape)?;
+            let address = crate::disasm::parse_address(address)?;
+            if !(0x7E_0000..=0x7F_FFFF).contains(&address) {
+                bail!("`{spec}`: {address:06X} is not in work RAM ($7E:0000 to $7F:FFFF)");
+            }
+            if hex.is_empty() || hex.len() % 2 != 0 {
+                bail!("`{spec}`: the bytes are hexadecimal pairs, such as 80 or 3B00");
+            }
+            let bytes = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).with_context(shape))
+                .collect::<anyhow::Result<Vec<u8>>>()?;
+            Ok(Poke { frame, address, bytes })
+        })
+        .collect()
+}
+
 /// One WRAM byte range to print: its label and bus offset in WRAM.
 struct Peek {
     label: String,
@@ -326,6 +390,51 @@ fn rgba(machine: &Machine) -> (u32, u32, Vec<u8>) {
         bytes.extend_from_slice(&[c.r, c.g, c.b, 0xFF]);
     }
     (frame.size.width, frame.size.height, bytes)
+}
+
+/// The image of the packs at `paths` on `rom`, for `--mods`: checked as `mod-check --local` checks them (a pack
+/// that holds the ROM's bytes is accepted: `shots` is a local tool and its output is never tracked), and the HD art of
+/// the folder packs (a zip's is not read; the note says so).
+///
+/// # Errors
+///
+/// A pack that cannot be read, or a set the checks refuse (each refusal is printed with the error).
+fn pack_image(
+    rom: &[u8],
+    paths: &[PathBuf],
+) -> anyhow::Result<(Vec<u8>, Vec<ssd_hd::pack::Overlay>)> {
+    let packs =
+        paths.iter().map(|path| ssd_mod::Pack::open(path)).collect::<Result<Vec<_>, _>>()?;
+    let options = ssd_mod::CheckOptions { allow_rom_bytes: true };
+    if let Err(errors) = ssd_mod::check_set(rom, &packs, options) {
+        let refused: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        bail!("the packs are refused: {}", refused.join("; "));
+    }
+    let image = ssd_mod::build(rom, &packs)?;
+    let mut overlays = Vec::new();
+    for (pack, path) in packs.iter().zip(paths) {
+        let id = pack.manifest.pack.id.as_str();
+        if path.is_dir() {
+            overlays.push(ssd_hd::pack::Overlay::of_pack(&image, id, path));
+        } else if !pack.manifest.map_art.is_empty() || !pack.manifest.face.is_empty() {
+            eprintln!("the HD art of the zip pack {id} is not drawn: unzip the pack into a folder");
+        }
+    }
+    Ok((image.bytes, overlays))
+}
+
+/// The pack with the HD art of the data packs of the run on top (`--mods`, see [`pack_image`]).
+fn with_overlays(
+    pack: std::sync::Arc<ssd_hd::pack::Pack>,
+    overlays: &[ssd_hd::pack::Overlay],
+) -> std::sync::Arc<ssd_hd::pack::Pack> {
+    if overlays.is_empty() {
+        return pack;
+    }
+    let pack = std::sync::Arc::unwrap_or_clone(pack);
+    std::sync::Arc::new(
+        overlays.iter().fold(pack, |pack, overlay| pack.with_overlay(overlay.clone())),
+    )
 }
 
 /// Half-size copy of an RGBA image (each pixel the average of 2x2).
@@ -450,7 +559,24 @@ pub fn run(
     } else if let Some(sram) = &script.sram {
         saves.0.insert("sav".to_owned(), sram.clone());
     }
-    let mut machine = Machine::new(rom.to_vec(), Box::new(saves))?;
+    // The HD art of the data packs (`--mods`), drawn over the installed pack's with `--hd-scale`
+    let mut overlays: Vec<ssd_hd::pack::Overlay> = Vec::new();
+    // The field of the Enhanced picture is read from the image of the packs (their maps are in its banks)
+    let mut world: Option<Vec<u8>> = None;
+    let mut machine = if args.mods.is_empty() {
+        Machine::new(rom.to_vec(), Box::new(saves))?
+    } else {
+        let (image, found) = pack_image(rom, &args.mods)?;
+        world = Some(image.clone());
+        overlays = found;
+        let original = ssd_rom::crc32(rom);
+        Machine::with_image(image, original, Box::new(saves), ssd_oracle::DEFAULT_WRAM_SEED)?
+    };
+    if !args.mods.is_empty() {
+        let mut table = ssd_oracle::HookTable::new();
+        ssd_game::mods::install(&mut table);
+        machine.set_hook_table(Some(table));
+    }
     if let Some(path) = &args.state_in {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         machine.load_state(&bytes)?;
@@ -461,28 +587,32 @@ pub fn run(
         .unwrap_or(script.frames)
         .max(machine.frame_count());
     let watches = resolve_peeks(symbols, &args.watch)?;
+    let pokes = resolve_pokes(&args.wram)?;
+    if let Some(poke) = pokes.iter().find(|poke| poke.frame >= last) {
+        bail!("`--wram` at frame {} is not reached: the run ends before frame {last}", poke.frame);
+    }
     let mut last_seen: Vec<Option<u8>> = vec![None; watches.len()];
     machine.set_cpu_write_log(!watches.is_empty());
     // `--hd-scale`: draw the Enhanced picture from the pack instead of the PPU frame.
     let mut hd_font: Option<Arc<ssd_hd::Font>> = None;
     let mut hd = match args.hd_scale {
         Some(scale) => {
-            let pack = crate::hd_art_run::open_pack(hd_pack)?;
+            let pack = with_overlays(crate::hd_art_run::open_pack(hd_pack)?, &overlays);
             let font = Arc::new(ssd_hd::Font::standard_with_pack(rom, Some(&pack.dir))?);
             hd_font = Some(Arc::clone(&font));
-            let mut run = WideRun::new(rom);
+            let mut run = WideRun::new(world.as_deref().unwrap_or(rom));
             run.set_art(Some(pack));
             run.set_font(Some(font));
             machine.set_line_log(true);
-            Some((run, HdOptions { scale, look: Look::Crisp }))
+            Some((run, HdOptions { scale, look: args.look }))
         }
         None => None,
     };
     // `--gaps`: a second run that counts what each frame shows, to write the poses with no art.
     let mut gaps_run = match (&args.gaps, args.hd_scale) {
         (Some(_), Some(_)) => {
-            let pack = crate::hd_art_run::open_pack(hd_pack)?;
-            let mut run = WideRun::new(rom);
+            let pack = with_overlays(crate::hd_art_run::open_pack(hd_pack)?, &overlays);
+            let mut run = WideRun::new(world.as_deref().unwrap_or(rom));
             run.set_art(Some(pack));
             run.set_font(hd_font.clone());
             run.set_tally(true);
@@ -491,7 +621,7 @@ pub fn run(
         _ => None,
     };
     let mut gaps_written: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let gaps_options = HdOptions { scale: args.hd_scale.unwrap_or(4), look: Look::Crisp };
+    let gaps_options = HdOptions { scale: args.hd_scale.unwrap_or(4), look: args.look };
     let wanted = |frame: u64| {
         args.frames.contains(&frame)
             || args.every.is_some_and(|n| frame.is_multiple_of(n) && frame > 0)
@@ -500,6 +630,14 @@ pub fn run(
     let mut labels = Vec::new();
     while machine.frame_count() < last {
         let frame = machine.frame_count();
+        for poke in pokes.iter().filter(|poke| poke.frame == frame) {
+            machine.write_wram(poke.address, &poke.bytes)?;
+            let hex = poke.bytes.iter().fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02X}");
+                hex
+            });
+            writeln!(out, "wram {:06X} = {hex} before frame {frame}", poke.address)?;
+        }
         if args.watch_from.is_some_and(|from| frame >= from) && !watches.is_empty() {
             let pad = (script.inputs)(frame);
             loop {
@@ -883,6 +1021,49 @@ mod tests {
     }
 
     #[test]
+    fn a_host_write_is_a_frame_a_work_ram_address_and_hex_bytes() {
+        let pokes =
+            resolve_pokes(&["2400:7E0C36=80".to_owned(), "3000:$7E:0B01=3B00".to_owned()]).unwrap();
+        assert_eq!(
+            pokes,
+            [
+                Poke { frame: 2400, address: 0x7E_0C36, bytes: vec![0x80] },
+                Poke { frame: 3000, address: 0x7E_0B01, bytes: vec![0x3B, 0x00] },
+            ]
+        );
+        for bad in [
+            "2400:0C36=80",
+            "x:7E0C36=80",
+            "2400:7E0C36=8",
+            "2400:7E0C36=",
+            "2400:7E0C36=GG",
+            "2400:7E0C36",
+        ] {
+            assert!(resolve_pokes(&[bad.to_owned()]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn mods_are_repeatable_and_need_a_pack() {
+        let a = parse_args(&[
+            "x.ssdreplay",
+            "--frames",
+            "10",
+            "--mods",
+            "a.ssdpack",
+            "--mods",
+            "folder",
+        ])
+        .unwrap();
+        assert_eq!(a.mods, [PathBuf::from("a.ssdpack"), PathBuf::from("folder")]);
+        assert!(parse_args(&["x", "--frames", "10", "--mods"]).unwrap_err().contains("--mods"));
+        assert!(
+            parse_args(&["x", "--frames", "10"]).unwrap().mods.is_empty(),
+            "no packs by default"
+        );
+    }
+
+    #[test]
     fn a_script_becomes_a_mesen_timeline_of_runs() {
         let pad = |frame: u64| Joypad { a: frame >= 3, start: frame == 1, ..Joypad::default() };
         let text = mesen_timeline(&pad, 5);
@@ -924,5 +1105,16 @@ mod tests {
         assert!(!(script.inputs)(1).a && (script.inputs)(2).a && (script.inputs)(4).start);
         assert!(!(script.inputs)(5).a, "released after the end");
         assert!(load_script("nothing-like-this").is_err());
+    }
+
+    #[test]
+    fn the_enhanced_look_is_crisp_unless_asked_for_smooth() {
+        let crisp = parse_args(&["menus", "--frames", "1", "--hd-scale", "4"]).unwrap();
+        assert_eq!(crisp.look, Look::Crisp);
+        let smooth =
+            parse_args(&["menus", "--frames", "1", "--hd-scale", "4", "--enhanced-look", "smooth"])
+                .unwrap();
+        assert_eq!(smooth.look, Look::Smooth);
+        assert!(parse_args(&["menus", "--frames", "1", "--enhanced-look", "sharp"]).is_err());
     }
 }

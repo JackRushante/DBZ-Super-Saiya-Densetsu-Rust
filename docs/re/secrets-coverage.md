@@ -84,8 +84,9 @@ clearing all (`none`); `lvl` is `<character>.level`; `scene=0` is always set.
   scenes `$43`-`$4C` and the gravity-room maps were not entered. King Kai's planet itself is reached
   (`secret-king-kai-planet`), but Goku's fight against King Kai is the only trial it plays.
 - **S-09, S-10, S-12** (Piccolo's level 9, the deadlines, Piccolo's death): the level rule lives in the map 5
-  routine (code read, not run); the death is inside the Saiyan scene `$11`, which `secret-saiyan-nappa` only
-  starts.
+  routine; it was run on a crafted save (`secret-recruit-krillin` with `piccolo.level=9`: flag `0x1D` set and the recruits
+  gone at the first check, `free-progression.md` section 7); the death is inside the Saiyan scene `$11`, which
+  `secret-saiyan-nappa` only starts.
 - The friendly outcome of the Maima and Tsumuri conversation (TR-04: they join and give the 2-star ball; the
   replay shows the fight) and the Dragon Radar cases (TR-01).
 

@@ -16,8 +16,8 @@
 
 use anyhow::Context;
 use ssd_oracle::{
-    AudioSink, CORE_VERSION, HostEvent, Joypad, MODE_CLASSIC, Machine, OracleError, Recorder,
-    Replay, SaveStore, Stopped, Stops, apply_events,
+    AudioSink, CORE_VERSION, DEFAULT_WRAM_SEED, HostEvent, Joypad, MODE_CLASSIC, Machine,
+    OracleError, PackTag, Recorder, Replay, SaveStore, Stopped, Stops, apply_events,
 };
 use std::path::{Path, PathBuf};
 
@@ -55,6 +55,9 @@ pub struct Session {
     finished: bool,
     /// The mode a recording is made in (`ssd_oracle::MODE_ENHANCED` for the HD menus).
     mode: u8,
+    /// The data packs the run is on (`--mods`): the image a machine is built on, and whose tag a
+    /// recording carries. `None` for a run on the ROM alone.
+    packs: Option<ssd_mod::Image>,
 }
 
 impl Session {
@@ -87,12 +90,19 @@ impl Session {
             recorder: None,
             finished: false,
             mode: MODE_CLASSIC,
+            packs: None,
         })
     }
 
     /// Sets the mode a recording is made in: the replay then carries it (format 2 unless classic).
     pub fn set_mode(&mut self, mode: u8) {
         self.mode = mode;
+    }
+
+    /// Sets the data packs the run is on (`--mods`): the machines are built on `packs`' image, and a
+    /// recording carries its tag. `None` for the ROM alone.
+    pub fn set_packs(&mut self, packs: Option<ssd_mod::Image>) {
+        self.packs = packs;
     }
 
     /// The mode of the replay played, if one is played (classic otherwise).
@@ -140,21 +150,47 @@ impl Session {
         rom: Vec<u8>,
         saves: impl FnOnce() -> anyhow::Result<Box<dyn SaveStore>>,
     ) -> anyhow::Result<Machine> {
-        let machine = match &self.playback {
-            Some(replay) => replay.power_on(rom).map_err(|e| match e {
-                OracleError::Replay(_) => anyhow::Error::new(ReplayRejected(e.into())),
-                other => other.into(),
-            })?,
-            None => Machine::new(rom, saves()?)?,
+        let rejected = |e: OracleError| match e {
+            OracleError::Replay(_) => anyhow::Error::new(ReplayRejected(e.into())),
+            other => other.into(),
+        };
+        let machine = match (&self.playback, &self.packs) {
+            (Some(replay), Some(packs)) if replay.packs.is_some() => {
+                replay.power_on_image(packs.bytes.clone()).map_err(rejected)?
+            }
+            (Some(replay), None) if replay.packs.is_some() => {
+                return Err(anyhow::Error::new(ReplayRejected(anyhow::anyhow!(
+                    "the replay was recorded with data packs: play it with the same --mods"
+                ))));
+            }
+            (Some(replay), Some(_)) if replay.packs.is_none() => {
+                return Err(anyhow::Error::new(ReplayRejected(anyhow::anyhow!(
+                    "the replay was recorded without data packs: play it without --mods"
+                ))));
+            }
+            (Some(replay), _) => replay.power_on(rom).map_err(rejected)?,
+            (None, Some(packs)) => Machine::with_image(
+                packs.bytes.clone(),
+                ssd_rom::crc32(&rom),
+                saves()?,
+                DEFAULT_WRAM_SEED,
+            )?,
+            (None, None) => Machine::new(rom, saves()?)?,
         };
         if let Some(replay) = &self.playback {
             log::info!("playing a replay of {} frames", replay.frames());
         }
         if let Some(path) = &self.record_to {
-            self.recorder = Some(Recorder::start(&machine)?.in_mode(self.mode));
+            let recorder = Recorder::start(&machine)?.in_mode(self.mode).in_packs(self.pack_tag());
+            self.recorder = Some(recorder);
             log::info!("recording to {}", path.display());
         }
         Ok(machine)
+    }
+
+    /// The tag of the data packs the run is on, for a recording ([`Replay::packs`]).
+    fn pack_tag(&self) -> Option<PackTag> {
+        self.packs.as_ref().map(|packs| PackTag { set_id: packs.set_id, image_crc32: packs.crc32 })
     }
 
     /// Whether a replay is played and has no input for the machine's next frame.
@@ -319,6 +355,12 @@ mod tests {
     fn read(path: &Path) -> Replay {
         let crc = ssd_rom::crc32(&sram_counter_rom());
         Replay::from_bytes(&std::fs::read(path).unwrap(), crc, CORE_VERSION).unwrap()
+    }
+
+    /// The replay file at `path`, for `rom` (the tests of the pack sets use the 1 MiB ROM).
+    fn read_of(path: &Path, rom: &[u8]) -> Replay {
+        Replay::from_bytes(&std::fs::read(path).unwrap(), ssd_rom::crc32(rom), CORE_VERSION)
+            .unwrap()
     }
 
     #[test]
@@ -501,5 +543,111 @@ mod tests {
         }));
         assert!(unwound.is_err());
         assert_eq!(read(&path).frames(), 4, "saved while unwinding");
+    }
+
+    /// A pack set of one slot on `rom`, built as the run builds it (`--mods`).
+    fn pack_image(rom: &[u8], byte: u8) -> ssd_mod::Image {
+        let file = "data/script-1.bin".to_owned();
+        let manifest = ssd_mod::Manifest {
+            pack: ssd_mod::PackInfo {
+                id: "test.pack".to_owned(),
+                name: "Test".to_owned(),
+                version: "1.0.0".to_owned(),
+                game: format!("{:08X}", ssd_rom::crc32(rom)),
+                author: String::new(),
+                description: String::new(),
+            },
+            depends: Vec::new(),
+            data: vec![ssd_mod::DataEntry {
+                family: "script".to_owned(),
+                id: 1,
+                file: file.clone(),
+            }],
+            scene: Vec::new(),
+            messages: Vec::new(),
+            map: Vec::new(),
+            triggers: Vec::new(),
+            map_art: Vec::new(),
+            face: Vec::new(),
+            tables: Vec::new(),
+            chapters: Vec::new(),
+            feature: Vec::new(),
+            pose_variant: Vec::new(),
+        };
+        let pack =
+            ssd_mod::Pack { manifest, files: [(file, vec![byte; 64])].into_iter().collect() };
+        ssd_mod::build(rom, &[pack]).unwrap()
+    }
+
+    /// The ROM of the pack tests: the synthetic cartridge, padded to a cartridge's 1 MiB.
+    fn one_mebibyte() -> Vec<u8> {
+        let mut rom = sram_counter_rom();
+        rom.resize(0x10_0000, 0xFF);
+        rom
+    }
+
+    #[test]
+    fn a_recording_on_packs_plays_on_the_same_packs_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("packs.ssdreplay");
+        let rom = one_mebibyte();
+        let image = pack_image(&rom, 0x42);
+        let mut recording = Session::new(None, Some(&path), &rom).unwrap();
+        recording.set_packs(Some(image.clone()));
+        let mut machine = recording.power_on(rom.clone(), shared(&SharedStore::default())).unwrap();
+        assert_eq!(machine.image_crc32(), image.crc32, "the machine runs on the image");
+        assert_eq!(machine.rom_crc32(), ssd_rom::crc32(&rom), "its ROM is the cartridge's");
+        for _ in 0..3 {
+            recording.run_frame(&mut machine, Joypad::default(), &mut NullAudio).unwrap();
+        }
+        recording.finish(Ok(())).unwrap();
+        assert_eq!(
+            read_of(&path, &one_mebibyte()).packs.map(|tag| tag.set_id),
+            Some(image.set_id),
+            "the tag is recorded"
+        );
+
+        let mut same = Session::new(Some(&path), None, &rom).unwrap();
+        same.set_packs(Some(image.clone()));
+        let played = same.power_on(rom.clone(), shared(&SharedStore::default())).unwrap();
+        assert_eq!(played.image_crc32(), image.crc32);
+
+        let mut without = Session::new(Some(&path), None, &rom).unwrap();
+        let message = format!(
+            "{:#}",
+            without.power_on(rom.clone(), shared(&SharedStore::default())).err().unwrap()
+        );
+        assert!(message.contains("--mods"), "{message}");
+
+        let mut other = Session::new(Some(&path), None, &rom).unwrap();
+        other.set_packs(Some(pack_image(&rom, 0x43)));
+        let message = format!(
+            "{:#}",
+            other.power_on(rom.clone(), shared(&SharedStore::default())).err().unwrap()
+        );
+        assert!(message.contains("pack set is image"), "{message}");
+    }
+
+    #[test]
+    fn a_recording_without_packs_is_refused_with_packs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.ssdreplay");
+        let rom = one_mebibyte();
+        let mut recording = Session::new(None, Some(&path), &rom).unwrap();
+        let mut machine = recording.power_on(rom.clone(), shared(&SharedStore::default())).unwrap();
+        recording.run_frame(&mut machine, Joypad::default(), &mut NullAudio).unwrap();
+        recording.finish(Ok(())).unwrap();
+        assert_eq!(
+            read_of(&path, &one_mebibyte()).packs,
+            None,
+            "a run on the ROM alone writes no tag"
+        );
+        let mut packed = Session::new(Some(&path), None, &rom).unwrap();
+        packed.set_packs(Some(pack_image(&rom, 0x42)));
+        let message = format!(
+            "{:#}",
+            packed.power_on(rom.clone(), shared(&SharedStore::default())).err().unwrap()
+        );
+        assert!(message.contains("without data packs"), "{message}");
     }
 }

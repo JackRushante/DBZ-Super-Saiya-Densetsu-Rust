@@ -6,10 +6,10 @@
 //! `page:OFFSET=HEX`) do not.
 
 use anyhow::{Context, bail};
-use ssd_catalogue::{Catalogue, Character, Enemy, RomView};
+use ssd_catalogue::game::{new_record, set_level};
 use ssd_game::scripts;
-use ssd_oracle::{CORE_VERSION, Machine, MemorySaveStore, Replay};
-use ssd_save::{FLAG_BYTES, Item, Position, Record, SaveFile, Slot, SlotStatus};
+use ssd_oracle::{CORE_VERSION, HostEvent, Machine, MemorySaveStore, Replay};
+use ssd_save::{FLAG_BYTES, Item, Position, SaveFile, Slot, SlotStatus};
 
 /// Story flags in a slot.
 const FLAG_BITS: usize = FLAG_BYTES * 8;
@@ -91,9 +91,11 @@ pub struct ReplayArgs {
     pub title: bool,
     /// Write the scripted-loss check's extreme cheats into the cheat block at frame 300, in the enhanced mode.
     pub cheats: bool,
+    /// Record the save's item list as the bag of an enhanced run, bound at this frame (see `replay_from_save`).
+    pub bind: Option<usize>,
 }
 
-/// Parses `<save.sav> <script.txt> <out.ssdreplay> [--slot N] [--title] [--cheats]`.
+/// Parses `<save.sav> <script.txt> <out.ssdreplay> [--slot N] [--title] [--cheats] [--bind FRAME]`.
 ///
 /// # Errors
 ///
@@ -103,19 +105,28 @@ pub fn parse_replay_args(args: &[&str]) -> Result<ReplayArgs, String> {
     let mut slot = 0;
     let mut title = false;
     let mut cheats = false;
+    let mut bind = None;
     let mut it = args.iter();
     while let Some(&arg) = it.next() {
         match arg {
             "--slot" => slot = slot_number(it.next())?,
             "--title" => title = true,
             "--cheats" => cheats = true,
+            "--bind" => bind = Some(frame_number(it.next())?),
             option if option.starts_with("--") => return Err(format!("unknown option `{option}`")),
             path => paths.push(PathBuf::from(path)),
         }
     }
     let [save, script, output] = <[PathBuf; 3]>::try_from(paths)
         .map_err(|_| "needs a save file, a script and an output replay".to_owned())?;
-    Ok(ReplayArgs { save, script, output, slot, title, cheats })
+    Ok(ReplayArgs { save, script, output, slot, title, cheats, bind })
+}
+
+/// The frame number after `--bind`.
+fn frame_number(value: Option<&&str>) -> Result<usize, String> {
+    value
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| "--bind takes a frame number".to_owned())
 }
 
 /// The title screen up to the slot list of Continue (`--title`): Start, Right to Continue, Start.
@@ -132,173 +143,7 @@ fn read_save(path: &Path) -> anyhow::Result<SaveFile> {
 /// load (observed: the emulation hangs), and 32 to 47 all show the same cave.
 const MAP_MAX: u8 = 0x2F;
 
-/// The game's tables the named fields need.
-pub struct Game {
-    catalogue: Catalogue,
-    /// The attribute byte of each object id (`item_attributes`).
-    item_attributes: Vec<u8>,
-}
-
-impl Game {
-    /// The tables from a catalogue and the item attribute bytes.
-    #[must_use]
-    pub fn new(catalogue: Catalogue, item_attributes: Vec<u8>) -> Self {
-        Self { catalogue, item_attributes }
-    }
-
-    /// Reads the tables from the ROM image.
-    ///
-    /// # Errors
-    ///
-    /// The ROM is not a valid image.
-    pub fn from_rom(rom: &[u8]) -> anyhow::Result<Self> {
-        let catalogue = Catalogue::from_rom(rom).context("reading the catalogue")?;
-        let view = RomView::new(rom).context("the ROM image")?;
-        let item_attributes = view
-            .slice(ssd_game::data::ITEM_ATTRIBUTES, ssd_game::data::ITEM_ATTRIBUTES_SIZE as usize)
-            .context("the item attribute table")?
-            .to_vec();
-        Ok(Self::new(catalogue, item_attributes))
-    }
-
-    /// A character by name (any case) or by id.
-    fn character(&self, spec: &str) -> anyhow::Result<&Character> {
-        let found = match spec.parse::<usize>() {
-            Ok(id) => self.catalogue.characters.get(id),
-            Err(_) => self
-                .catalogue
-                .characters
-                .iter()
-                .find(|c| c.name.trimmed().eq_ignore_ascii_case(spec)),
-        };
-        found.with_context(|| {
-            let names: Vec<&str> =
-                self.catalogue.characters.iter().map(|c| c.name.trimmed()).collect();
-            format!("no character `{spec}` (ids 0 to 11 or {})", names.join(", "))
-        })
-    }
-
-    /// A record for a character with no level table, from its unit row.
-    fn unit_record(&self, character: &Character, join_order: u8) -> anyhow::Result<Record> {
-        let unit = character.fixed_stats_unit.unwrap_or(character.unit_id);
-        let enemy = self
-            .catalogue
-            .enemies
-            .get(usize::from(unit))
-            .with_context(|| format!("unit {unit} is not in the unit table"))?;
-        let mut record = Record::blank();
-        record.set_flags(0xC0);
-        record.set_unit_id(character.unit_id);
-        record.set_character_id(character.id);
-        record.0[0x17] = enemy.unknown_09;
-        record.0[0x1B] = join_order;
-        set_from_unit(&mut record, enemy);
-        Ok(record)
-    }
-
-    /// An item by object id, or by name (any case, without the quotes some names have): the
-    /// first object of that name, or the Nth with a suffix `#N` (the table has two `Turtle`s).
-    /// The attribute byte is the one the game keeps for the object.
-    fn item(&self, spec: &str) -> anyhow::Result<Item> {
-        let id = match spec.parse::<u8>() {
-            Ok(id) => id,
-            Err(_) => {
-                let (text, nth) = match spec.split_once('#') {
-                    Some((text, n)) => (text, number::<usize>(spec, n)?.max(1)),
-                    None => (spec, 1),
-                };
-                self.catalogue
-                    .items
-                    .iter()
-                    .filter(|i| i.name.trimmed().trim_matches('"').eq_ignore_ascii_case(text))
-                    .nth(nth - 1)
-                    .with_context(|| format!("no object called `{spec}`"))?
-                    .id
-            }
-        };
-        let attr = *self
-            .item_attributes
-            .get(usize::from(id))
-            .with_context(|| format!("object id {id} is not in the item attribute table"))?;
-        Ok(Item { id, attr })
-    }
-}
-
-/// The values of a record at `level`, the way the game builds one: the battle power and KI of
-/// every row up to the level added, the rest taken from the row of the level.
-struct Stats {
-    bp: u32,
-    max_hp: u16,
-    max_ki: u16,
-    exp: u32,
-    byte_0e: u8,
-}
-
-fn stats_at(character: &Character, level: u8) -> anyhow::Result<Stats> {
-    if character.levels.is_empty() {
-        bail!(
-            "{} has no level table (its stats come from a unit row): set its fields one by one",
-            character.name.trimmed()
-        );
-    }
-    let rows = &character.levels[..usize::from(level).min(character.levels.len())];
-    let Some(last) =
-        rows.last().filter(|_| level >= 1 && usize::from(level) <= character.levels.len())
-    else {
-        bail!(
-            "{}: level {level} is not between 1 and {}",
-            character.name.trimmed(),
-            character.levels.len()
-        );
-    };
-    Ok(Stats {
-        bp: rows.iter().map(|r| r.bp_gain).sum(),
-        max_hp: last.max_hp,
-        max_ki: rows.iter().map(|r| r.ki_gain).sum(),
-        exp: last.exp_start,
-        byte_0e: last.unknown_0a,
-    })
-}
-
-/// Puts the stats of the unit row `enemy` in `record` (HP and KI full): the way the game builds the
-/// records of the characters that have no level table (Nail, Tsumuri and Maima).
-fn set_from_unit(record: &mut Record, enemy: &Enemy) {
-    record.set_level(enemy.level);
-    record.set_bp(enemy.bp);
-    record.set_max_hp(enemy.hp);
-    record.set_hp(enemy.hp);
-    record.set_max_ki(enemy.ki);
-    record.set_ki(enemy.ki);
-    record.set_byte_0e(enemy.unknown_0a);
-}
-
-/// Puts the stats of `level` in `record` (HP and KI full).
-fn set_level(record: &mut Record, character: &Character, level: u8) -> anyhow::Result<()> {
-    let stats = stats_at(character, level)?;
-    record.set_level(level);
-    record.set_bp(stats.bp);
-    record.set_max_hp(stats.max_hp);
-    record.set_hp(stats.max_hp);
-    record.set_max_ki(stats.max_ki);
-    record.set_ki(stats.max_ki);
-    record.set_exp(stats.exp);
-    record.set_byte_0e(stats.byte_0e);
-    Ok(())
-}
-
-/// A record for a character who joins at `level`. Bytes the game sets that this does not
-/// decode: `+17` is 30 in every record seen, `+1B` is 1, 2 and 3 for Goku, Piccolo and Vegeta
-/// (the order they join in: `join_order` is used), and `+14` to `+16` start at zero.
-fn new_record(character: &Character, level: u8, join_order: u8) -> anyhow::Result<Record> {
-    let mut record = Record::blank();
-    record.set_flags(0xC0);
-    record.set_unit_id(character.unit_id);
-    record.set_character_id(character.id);
-    record.0[0x17] = 0x1E;
-    record.0[0x1B] = join_order;
-    set_level(&mut record, character, level)?;
-    Ok(record)
-}
+pub use ssd_catalogue::Game;
 
 fn number<T: std::str::FromStr>(field: &str, value: &str) -> anyhow::Result<T> {
     value.trim().parse().map_err(|_| anyhow::anyhow!("`{field}`: `{value}` is not a number"))
@@ -628,6 +473,23 @@ pub fn replay_from_save(
             })
             .collect();
     }
+    if let Some(frame) = args.bind {
+        // The save's list as the bag of an enhanced run, recorded as its bind: the app binds a replay only from its
+        // recorded bind event. Each entry is a unit with state word 0 (the slot's items keep no state words here).
+        let mut bag = ssd_menus::bag::Bag::new(ssd_menus::bag::Rules::default());
+        for item in file.slot(args.slot)?.items() {
+            let _ = bag.add(item.id, 0, ssd_menus::bag::Class::of(item.id, false));
+        }
+        if replay.events.len() != frames {
+            replay.events = vec![Vec::new(); frames];
+        }
+        replay.mode = ssd_oracle::MODE_ENHANCED;
+        let at = frame.min(frames.saturating_sub(1));
+        replay.events[at].push(HostEvent::App {
+            tag: ssd_game::menu::keeper::BIND_TAG,
+            payload: bag.to_bytes(),
+        });
+    }
     replay.write_to(&args.output, CORE_VERSION)?;
     writeln!(
         out,
@@ -644,10 +506,87 @@ pub fn replay_from_save(
     Ok(())
 }
 
+/// `chapter-save`: the save slot a chapter of the packs starts from (`ssd_mod::chapter::synthesize`, with the game's tables), as
+/// `<out>/ssd.sav`, and, when the chapter sets extended flags, the `ssd.mods` sidecar of that slot beside it. A chapter session
+/// starts from the same two files in its own folder. The tool never overwrites a file.
+///
+/// # Errors
+///
+/// A usage problem, a set of packs the checks refuse, no chapter of that id, a table the game does not give, or a file in `out`
+/// that exists already.
+pub fn chapter_save(args: &[&str], rom: &[u8]) -> anyhow::Result<String> {
+    let mut packs = Vec::new();
+    let mut id = None;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(&arg) = it.next() {
+        match arg {
+            "--chapter" => id = Some((*it.next().context("--chapter takes an id")?).to_owned()),
+            "--out" => out = Some(PathBuf::from(*it.next().context("--out takes a folder")?)),
+            option if option.starts_with("--") => bail!("unknown option `{option}`"),
+            path => packs.push(PathBuf::from(path)),
+        }
+    }
+    let (Some(id), Some(out)) = (id, out) else {
+        bail!("chapter-save takes one or more packs, then --chapter <id> and --out <folder>");
+    };
+    anyhow::ensure!(!packs.is_empty(), "chapter-save needs at least one pack");
+    let packs = packs
+        .iter()
+        .map(|path| ssd_mod::Pack::open(path))
+        .collect::<Result<Vec<_>, _>>()
+        .context("reading the packs")?;
+    if let Err(refused) = ssd_mod::check_set(rom, &packs, ssd_mod::CheckOptions::default()) {
+        let lines: Vec<String> = refused.iter().map(ToString::to_string).collect();
+        bail!("the packs are refused:\n{}", lines.join("\n"));
+    }
+    let mut chapters = Vec::new();
+    for pack in &packs {
+        for entry in &pack.manifest.chapters {
+            chapters.extend(pack.chapters(entry)?.unwrap_or_default());
+        }
+    }
+    let chapter = chapters
+        .into_iter()
+        .find(|chapter| chapter.id == id)
+        .with_context(|| format!("no chapter `{id}` in the packs"))?;
+    let game = Game::from_rom(rom)?;
+    let synthesized = ssd_mod::chapter::synthesize(&game, &chapter)?;
+    std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+    let save = out.join("ssd.sav");
+    anyhow::ensure!(!save.exists(), "{} exists: chapter-save does not overwrite", save.display());
+    std::fs::write(&save, synthesized.save.as_bytes())
+        .with_context(|| format!("writing {}", save.display()))?;
+    let mut text = format!("wrote {} (chapter `{id}`)\n", save.display());
+    if let Some(flagx) = synthesized.flagx {
+        let at = ssd_save::SLOT_BASES[0] + ssd_save::CHECKSUM_OFFSET;
+        let bytes = synthesized.save.as_bytes();
+        let checksum = u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+        let mut sidecar = ssd_menus::mods_state::ModsSidecar::empty();
+        sidecar.store(
+            0,
+            checksum,
+            ssd_menus::mods_state::ModState { flags: Some(flagx), high: None },
+        );
+        let path = out.join("ssd.mods");
+        anyhow::ensure!(
+            !path.exists(),
+            "{} exists: chapter-save does not overwrite",
+            path.display()
+        );
+        std::fs::write(&path, sidecar.to_bytes())
+            .with_context(|| format!("writing {}", path.display()))?;
+        let _ = writeln!(text, "wrote {} (the extended flags of slot 1)", path.display());
+    }
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ssd_catalogue::game::stats_at;
     use ssd_catalogue::{CardRules, LevelRow, Name};
+    use ssd_catalogue::{Catalogue, Character};
 
     fn name(text: &str) -> Name {
         Name { tiles: Vec::new(), text: text.to_owned() }
@@ -987,6 +926,7 @@ mod tests {
             slot: 0,
             title: false,
             cheats: false,
+            bind: None,
         };
         replay_from_save(&rom, &args, &mut Vec::new()).unwrap();
 
@@ -1003,5 +943,48 @@ mod tests {
         assert_eq!(wram[0x1B2], 3);
         assert_eq!(&wram[0x100..0x106], &[0x19_u8, 0xD2, 0x17, 0x44, 2, 0xC8][..]);
         assert_eq!(wram[0x1A0], slot.map_id());
+    }
+
+    #[test]
+    fn chapter_save_names_what_it_lacks_before_it_reads_anything() {
+        let no_pack = chapter_save(&["--chapter", "androids", "--out", "x"], &[]).unwrap_err();
+        assert!(no_pack.to_string().contains("needs at least one pack"), "{no_pack}");
+        let no_id = chapter_save(&["pack", "--out", "x"], &[]).unwrap_err();
+        assert!(no_id.to_string().contains("--chapter <id>"), "{no_id}");
+        let unknown = chapter_save(&["pack", "--fast"], &[]).unwrap_err();
+        assert!(unknown.to_string().contains("unknown option `--fast`"), "{unknown}");
+    }
+
+    /// With the ROM (`SSD_ROM_PATH`): a chapter's party records are the ones `save-edit` makes for the same party and levels (the
+    /// same builder), and the chapter's map, party, positions, flags and money read back with `save-dump`'s own description.
+    #[test]
+    #[ignore = "needs the ROM (SSD_ROM_PATH)"]
+    fn a_chapter_slot_has_the_records_save_edit_makes() {
+        let rom = std::fs::read(std::env::var("SSD_ROM_PATH").expect("SSD_ROM_PATH")).unwrap();
+        let rom = ssd_rom::normalize(&rom, None).unwrap().bytes;
+        let game = Game::from_rom(&rom).unwrap();
+        let text = "[[chapter]]\nid = \"androids\"\nname = \"The Androids\"\nmap = 64\nleader = [1024, 768]\n\
+                    follower = [896, 648]\nparty = [{ character = 0, level = 30 }, { character = 1, level = 20 }]\n\
+                    flags = [3, 29]\nflagx = [1]\nitems = [{ object = 5, count = 3 }]\nzeni = 200\n";
+        let chapter = ssd_mod::chapter::parse(text).unwrap().remove(0);
+        let synthesized = ssd_mod::chapter::synthesize(&game, &chapter).unwrap();
+        let chapter_slot = synthesized.save.slot(0).unwrap();
+        let mut edited = Slot::empty();
+        apply(&mut edited, Some(&game), "party", "goku,gohan").unwrap();
+        apply(&mut edited, Some(&game), "goku.level", "30").unwrap();
+        apply(&mut edited, Some(&game), "gohan.level", "20").unwrap();
+        for id in [0_u8, 1] {
+            assert_eq!(chapter_slot.record(id).unwrap(), edited.record(id).unwrap(), "record {id}");
+        }
+        assert_eq!(chapter_slot.party(), edited.party());
+        let description = describe(&chapter_slot, Some(&game));
+        assert!(
+            description.contains("map 64 leader (1024, 768) follower (896, 648)"),
+            "{description}"
+        );
+        assert!(description.contains("story flags set: 0x03 0x1D"), "{description}");
+        assert!(description.contains("zeni: 200"), "{description}");
+        assert!(description.contains("level 30"), "{description}");
+        assert!(description.contains("level 20"), "{description}");
     }
 }

@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod canvas;
+mod chapter;
 mod debugger;
 mod egui_input;
 mod filter;
@@ -14,8 +15,10 @@ mod lang;
 mod language_pick;
 mod layout;
 mod options;
+mod packs;
 mod panel;
 mod paths;
+mod perf_hint;
 mod replay_io;
 mod replays;
 mod rom_setup;
@@ -57,6 +60,8 @@ const EXIT_HD_PACK: u8 = 7;
 /// The replay cannot be played or recorded as asked: unreadable, not a replay, for another ROM or
 /// emulator version, an initial SRAM the cartridge does not take, or `--record` naming it.
 const EXIT_REPLAY: u8 = 6;
+/// A data pack cannot be read, or the set of packs is refused by its checks (`--mods`).
+const EXIT_PACKS: u8 = 8;
 
 #[derive(Parser)]
 #[command(name = "ssd-recompiled", about = "Dragon Ball Z: Super Saiya Densetsu Recompiled")]
@@ -136,6 +141,19 @@ struct Cli {
     /// recording or playing.
     #[arg(long)]
     replay: Option<PathBuf>,
+    /// Run on these data packs, Enhanced mode only: each a folder with `pack.toml` or a `.ssdpack` zip,
+    /// the option repeated for each pack. The set is checked against the ROM first; a pack that cannot be
+    /// read or a set that is refused prints why and ends the run. A replay recorded with packs plays only
+    /// with the same packs, and one recorded without them only without.
+    #[arg(long, value_name = "PATH", conflicts_with = "no_mods")]
+    mods: Vec<PathBuf>,
+    /// Run on the ROM alone, with no data packs: the default, present so a launcher can say so.
+    #[arg(long)]
+    no_mods: bool,
+    /// Start the chapter `ID` of the data packs (Enhanced mode only, with --mods): the game starts from the chapter's own save,
+    /// in its own folder under `saves/chapters/`, and the main saves are never touched. A folder with a save already continues it.
+    #[arg(long, value_name = "ID", conflicts_with = "no_mods")]
+    chapter: Option<String>,
     /// Time the window's frame loop without a window (the Enhanced picture at --hd-scale, 4 by
     /// default, and the debug panel, drawn offscreen) over these replays, each at the speeds of
     /// --bench-speeds, flat out; prints the emulated frames per second and where the time went.
@@ -223,6 +241,23 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
             )
             .exit();
     }
+    if !cli.mods.is_empty() && cli.mode != ModeArg::Enhanced {
+        Cli::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "--mods needs --mode enhanced: data packs run in the Enhanced mode only",
+            )
+            .exit();
+    }
+    if cli.chapter.is_some() && cli.mode != ModeArg::Enhanced {
+        Cli::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "--chapter needs --mode enhanced: a chapter is part of a data pack, and packs run in the Enhanced mode \
+                 only",
+            )
+            .exit();
+    }
     // Before the ROM, like the symbols: a bad script is a mistake of the command line too.
     let script = cli.ui_script.as_deref().map_or_else(Vec::new, read_script);
     // Before the ROM: a bad symbols file is a mistake of the command line, whatever the data dir.
@@ -256,11 +291,33 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
             return ExitCode::from(EXIT_ROM_REJECTED);
         }
     };
-    let session = match replay_io::Session::new(cli.replay.as_deref(), cli.record.as_deref(), &rom)
-    {
-        Ok(session) => session,
-        Err(e) => return error_exit(&e),
+    let mut session =
+        match replay_io::Session::new(cli.replay.as_deref(), cli.record.as_deref(), &rom) {
+            Ok(session) => session,
+            Err(e) => return error_exit(&e),
+        };
+    let loaded = match load_packs(&cli, &rom) {
+        Ok(loaded) => loaded,
+        Err(code) => return code,
     };
+    if let Some(id) = cli.chapter.as_deref()
+        && loaded.image.is_none()
+    {
+        // A set of packs that is not used (see `load_packs`) has no chapter: the start is an error, not a silent start.
+        let why =
+            loaded.notice.as_deref().map_or_else(String::new, |notice| format!(" ({notice})"));
+        eprintln!("chapter: no chapter `{id}` in the data packs of this run{why}");
+        return ExitCode::from(EXIT_PACKS);
+    }
+    // The Data packs screen's list: the packs of the folder and of the run's set, with the reason the set is not used, if it is not.
+    if cli.mode == ModeArg::Enhanced {
+        let playing =
+            cli.chapter.as_deref().and_then(|id| packs::chapter_name(id, &loaded.applied));
+        packs::configure(packs::build(&rom, &loaded.applied, loaded.notice, playing), &rom);
+    }
+    let image = loaded.image.as_ref().map(|image| image.bytes.clone());
+    let overlays = loaded.overlays;
+    session.set_packs(loaded.image);
     // The HD pack of the ROM, built from the art pack beside the game when the HD picture or the HD
     // menus will draw it (Classic never does)
     let need = if cli.install_hd_pack.is_some() {
@@ -283,10 +340,17 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
         pack: cli.hd_pack.clone(),
         off: cli.no_hd_art,
         font_off: cli.no_hd_font,
+        overlays,
+        image,
     });
     lang::configure(cli.lang.map(ssd_menus::Language::from));
     // Only a windowed run writes the player's files (see `persists`): set before the first read.
     paths::set_persistent(persists(&cli));
+    // The chapter's fresh files: a run that persists writes them, any other keeps them in memory (see `chapter`).
+    if let Err(error) = chapter::write_fresh() {
+        eprintln!("chapter: {error:#}");
+        return ExitCode::from(EXIT_PACKS);
+    }
     touch::force(cli.touch_ui);
     // A windowed Enhanced run takes the scale and the look of the options where no flag gives them; headless
     // runs, snapshots and benchmarks ignore the saved file, so they do not depend on this PC's choices.
@@ -364,10 +428,132 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
             )
         }
     };
-    match result {
+    let code = match result {
         Ok(stats) => ExitCode::from(finish(hooks.as_ref(), &stats)),
         Err(e) => error_exit(&e),
+    };
+    // A set applied, or a chapter asked for, in the window: the game starts again now, after this run has written its files.
+    if let Err(error) = packs::start_next_run() {
+        eprintln!("the game did not restart: {error}");
     }
+    code
+}
+
+/// The data packs of this run, loaded on `rom`: the image they make (`None` without packs), the HD art of the packs to draw
+/// over the installed art, the packs the run uses with their paths, and why a set the data folder enables is not used.
+struct Loaded {
+    image: Option<ssd_mod::Image>,
+    overlays: Vec<ssd_hd::pack::Overlay>,
+    applied: Vec<(PathBuf, ssd_mod::Pack)>,
+    notice: Option<String>,
+}
+
+/// The packs of this run: the `--mods` packs; else, in an Enhanced run that persists, the set `mods/mods.toml` enables; else
+/// none. A `--mods` set the checks refuse is printed in full, and ends the run with the packs' exit code. A set from the file
+/// that is refused or cannot be read is not loaded: the run goes on without packs, and the Data packs screen says why. A
+/// `--chapter` starts that chapter of the set.
+fn load_packs(cli: &Cli, rom: &[u8]) -> Result<Loaded, ExitCode> {
+    let without =
+        |notice| Loaded { image: None, overlays: Vec::new(), applied: Vec::new(), notice };
+    let from_file =
+        cli.mods.is_empty() && !cli.no_mods && cli.mode == ModeArg::Enhanced && persists(cli);
+    let paths = if !cli.mods.is_empty() {
+        cli.mods.clone()
+    } else if from_file {
+        match packs::set_paths() {
+            Ok(paths) => paths,
+            Err(message) => return Ok(without(Some(message))),
+        }
+    } else {
+        Vec::new()
+    };
+    if paths.is_empty() {
+        return Ok(without(None));
+    }
+    let mut packs = Vec::new();
+    let mut errors = Vec::new();
+    for path in &paths {
+        match ssd_mod::Pack::open(path) {
+            Ok(pack) => packs.push(pack),
+            Err(error) => errors.push(error),
+        }
+    }
+    if errors.is_empty()
+        && let Err(refused) = ssd_mod::check_set(rom, &packs, ssd_mod::CheckOptions::default())
+    {
+        errors = refused;
+    }
+    if !errors.is_empty() {
+        if from_file {
+            let text = packs::refusal_text(&errors);
+            log::warn!("the packs of mods.toml are not used: {text}");
+            return Ok(without(Some(text)));
+        }
+        for error in &errors {
+            eprintln!("data pack refused: {error}");
+        }
+        return Err(ExitCode::from(EXIT_PACKS));
+    }
+    let image = match ssd_mod::build(rom, &packs) {
+        Ok(image) => image,
+        Err(error) if from_file => {
+            log::warn!("the packs of mods.toml are not used: {error}");
+            return Ok(without(Some(error.to_string())));
+        }
+        Err(error) => {
+            eprintln!("data packs: {error}");
+            return Err(ExitCode::from(EXIT_PACKS));
+        }
+    };
+    if let Some(id) = cli.chapter.as_deref() {
+        match chapter::start(id, &packs, rom) {
+            Ok(session) => chapter::configure(session),
+            Err(message) => {
+                eprintln!("chapter: {message}");
+                return Err(ExitCode::from(EXIT_PACKS));
+            }
+        }
+    }
+    let overlays = overlays_of(&paths, &packs, &image);
+    Ok(Loaded {
+        image: Some(image),
+        overlays,
+        applied: paths.into_iter().zip(packs).collect(),
+        notice: None,
+    })
+}
+
+/// The HD art of each pack (`paths` are the packs, in the order of `packs`). A folder's art is read from the folder; a zip's
+/// from its files unpacked once into the cache (`packs::unpacked`).
+fn overlays_of(
+    paths: &[PathBuf],
+    packs: &[ssd_mod::Pack],
+    image: &ssd_mod::Image,
+) -> Vec<ssd_hd::pack::Overlay> {
+    paths
+        .iter()
+        .zip(packs)
+        .filter_map(|(path, pack)| {
+            let id = pack.manifest.pack.id.as_str();
+            if path.is_dir() {
+                return Some(ssd_hd::pack::Overlay::of_pack(image, id, path));
+            }
+            let manifest = &pack.manifest;
+            if manifest.map_art.is_empty()
+                && manifest.face.is_empty()
+                && manifest.pose_variant.is_empty()
+            {
+                return None;
+            }
+            match packs::unpacked(path, pack) {
+                Ok(dir) => Some(ssd_hd::pack::Overlay::of_pack(image, id, &dir)),
+                Err(error) => {
+                    log::warn!("the HD art of the zip pack {id} is not drawn: {error:#}");
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Whether this run writes the player's files (see [`paths::persists`]): a windowed run does. A headless run (a UI
@@ -503,6 +689,16 @@ mod tests {
     }
 
     #[test]
+    fn the_pack_options_parse_and_do_not_mix() {
+        let cli = parse(&["--mode", "enhanced", "--mods", "a.ssdpack", "--mods", "pack-dir"]);
+        assert_eq!(cli.mods, [PathBuf::from("a.ssdpack"), PathBuf::from("pack-dir")]);
+        assert!(!cli.no_mods);
+        assert!(parse(&["--no-mods"]).mods.is_empty(), "the default is the ROM alone");
+        let both = ["ssd-recompiled", "--mods", "a.ssdpack", "--no-mods"];
+        assert!(Cli::try_parse_from(both).is_err(), "--mods and --no-mods conflict");
+    }
+
+    #[test]
     fn a_headless_configuration_writes_no_option_file_and_a_windowed_one_does() {
         let _guard = paths::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
@@ -536,6 +732,7 @@ mod tests {
             saves::battery_saves().unwrap().persist("sav", &[0x5A; 8192]).unwrap();
             hd::write_beside(&saves.join("ssd.bag"), b"bags").unwrap();
             hd::write_beside(&saves.join("ssd.cheats"), b"cheats").unwrap();
+            hd::write_beside(&saves.join("ssd.mods"), b"mods").unwrap();
         };
         for args in NOT_PERSISTING {
             write_saves(args);
@@ -544,7 +741,44 @@ mod tests {
         write_saves(&[]);
         assert!(saves.join("ssd.sav").exists(), "a windowed run writes the battery save");
         assert!(saves.join("ssd.bag").exists() && saves.join("ssd.cheats").exists());
+        assert!(saves.join("ssd.mods").exists());
         paths::set_persistent(false);
+        unsafe { std::env::remove_var("SSD_DATA_DIR") };
+    }
+
+    #[test]
+    fn the_set_the_file_enables_loads_in_a_run_that_persists_and_a_refused_one_is_not_used() {
+        let _guard = paths::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: serialised by ENV_LOCK.
+        unsafe { std::env::set_var("SSD_DATA_DIR", data.path()) };
+        let rom = vec![0_u8; ssd_mod::ROM_LEN];
+        let game = format!("{:08X}", ssd_rom::crc32(&rom));
+        let folder = packs::mods_dir().join("plain");
+        std::fs::create_dir_all(&folder).unwrap();
+        let manifest = format!(
+            "[pack]\nid = \"plain.pack\"\nname = \"Plain\"\nversion = \"1.0.0\"\ngame = \"{game}\"\n"
+        );
+        std::fs::write(folder.join("pack.toml"), manifest).unwrap();
+        let windowed = parse(&["--mode", "enhanced"]);
+        paths::set_persistent(true);
+        packs::write_set(&["plain.pack".to_owned()]).unwrap();
+        let Ok(loaded) = load_packs(&windowed, &rom) else { panic!("the enabled set is loaded") };
+        assert_eq!(loaded.applied.len(), 1, "the pack the file enables");
+        assert!(loaded.image.is_some() && loaded.notice.is_none());
+        // A set the folder does not hold is not used: the run goes on without packs, and says why.
+        packs::write_set(&["gone.pack".to_owned()]).unwrap();
+        let Ok(loaded) = load_packs(&windowed, &rom) else { panic!("a refused file set goes on") };
+        assert!(loaded.image.is_none() && loaded.applied.is_empty());
+        assert_eq!(
+            loaded.notice.as_deref(),
+            Some("mods.toml enables `gone.pack`, which is not in the mods folder")
+        );
+        // A run that does not persist reads no set file, as it reads no option file.
+        paths::set_persistent(false);
+        let headless = parse(&["--mode", "enhanced", "--headless-frames", "1"]);
+        let Ok(loaded) = load_packs(&headless, &rom) else { panic!("no packs is not a refusal") };
+        assert!(loaded.image.is_none() && loaded.notice.is_none());
         unsafe { std::env::remove_var("SSD_DATA_DIR") };
     }
 }

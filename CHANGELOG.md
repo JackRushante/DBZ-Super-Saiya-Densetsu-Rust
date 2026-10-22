@@ -1,6 +1,41 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-10-22)
+
+The first release with data packs (mods), the first two mods and the Android APK.
+
+- **Free progression is under test**: it plays through the early chapters in our runs, but the balance of the scaled
+  enemies (a boss can be much harder or much easier than in the original) has not been played end to end yet. Save often
+  and switch it off in Data packs if a fight goes wrong.
+- **Android performance can be improved a lot**: the game runs the original machine cycle by cycle on one core, and the
+  phone's system decides how fast that core may run. On a recent phone x1 is steady, x4 is about 220 frames a second, and a
+  long session warms the phone and drains the battery more than it should.
+
+### Data packs (mods)
+
+- **Data packs** change the game in Remastered mode from files in the `mods` folder (a folder with a `pack.toml`, or a
+  `.ssdpack` zip): maps made in Tiled, scenes and dialogue in a script language, text, units, attacks, encounter groups,
+  the level curve, HD art of faces, maps and poses, chapters with their own saves, and named features. Classic is never
+  changed by a pack, and a pack holds no code. The format is in `docs/mods/`.
+- **Options > Gameplay > Data packs**: the packs of the folder, each on or off, in an order you choose, with their details
+  and the reason a pack is refused (made for another ROM, missing a pack it needs, too big). Apply restarts at the title.
+- **Chapters**: a pack's chapters are listed at the title, each with its own saves; Unlock chapters (Cheats) opens them all.
+- A `.ssdpack` file carries its HD art (unpacked once into the cache). On Android a mod is installed with the HD pack's
+  button (Options > Game > Install the HD pack): the game recognises a data pack and puts it in its mods folder.
+- A save made with packs keeps their state (extended flags, battle power above the original's limit) in a file beside
+  it (`ssd.mods`), so the original save stays readable by Classic.
+
+### The first mods (separate downloads)
+
+- **Super Saiyan Kaioken** (`ssj-kaioken.ssdpack`, not canon): Goku can use the Kaioken while he is a Super Saiyan, up
+  to x10; while both are on, each move costs 10% of his maximum HP. It comes with the Super Saiyan poses redrawn with the
+  red and gold aura.
+- **Free progression** (`free-progression.ssdpack`, **under test**): the story moves on events, never on levels or battle
+  power (Raditz comes after the opening's events, random battles never stop on a level, the recruits wait for the
+  Saiyans, the Super Saiyan and the Ginyu fight follow the story), and every enemy, bosses included, follows your party's
+  level, with a difficulty of easy, normal or hard (the `difficulty` line of the `pack.toml` inside
+  the `.ssdpack`, which is a zip). Fights the story wants you to
+  lose stay lost.
 
 ### New
 
@@ -37,11 +72,18 @@
 
 ### HD art
 
+- **Super Saiyan Goku** is drawn from his own art everywhere: in battle (all of his poses, the ki moves and their
+  close-ups included), on the field and in the menus.
 - The Saiyans' flight toward Earth: Nappa and Vegeta in the burst are drawn in HD (they were the original pixels), and
   Vegeta flying beside Nappa in the scanner scene is redrawn on-model.
 
 ### Fixes
 
+- The bag: Porunga, the card changers and the other state objects stack like any object (a saved bag joins its stacks
+  when it is loaded), and the battle's Item list is the HD bag, with every object and its count.
+- Android: the app tells the system it is a game (game mode, performance mode where the phone has it) and gives it
+  performance hints each frame; the Remastered picture is reused when nothing changed. On the test phone x4 went from about
+  185 to about 225 frames a second.
 - On a phone whose screen lowers its refresh rate when idle, the game keeps its speed (it fell to about 24 fps) and the
   sound no longer crackles: the playback speed is bent by at most 0.5% to keep the sound queue steady.
 - The system bars stay hidden on Android 11 and later.

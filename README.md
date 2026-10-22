@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue.svg"></a>
-  <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg">
+  <img alt="Platform: Windows x64 and Android" src="https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Android-lightgrey.svg">
   <img alt="Rust 2024 edition" src="https://img.shields.io/badge/rust-2024%20edition-orange.svg">
   <img alt="Bring your own ROM" src="https://img.shields.io/badge/ROM-bring%20your%20own-red.svg">
 </p>
@@ -187,7 +187,8 @@ kept for this PC. *Reset this page* (Y) and *Reset all* (Select, with a Yes/No q
 
 ## Getting started
 
-**Requirements.** Windows 10 or 11 (64-bit), a graphics card with Vulkan or DirectX 12, and your own ROM.
+**Requirements.** Windows 10 or 11 (64-bit), a graphics card with Vulkan or DirectX 12, and your own ROM. For Android,
+see [Android](#android) below.
 
 ### 1. Get your ROM
 
@@ -230,9 +231,12 @@ Download from the [Releases](../../releases) page:
 - **`dbz-ssd-recompiled-windows.zip`**: the game. It holds `ssd-recompiled.exe`, `Play Classic.bat`,
   `Play Remastered.bat`, `Set up my ROM.bat`, a quickstart and the licences. It is built without the recompiled
   code (that is made from *your* ROM, [see below](#the-recompiled-build)).
-- **`hd-pack.zip`** (about 393 MB, optional, for the Remastered mode): the HD art, over 10,000
+- **`hd-pack.zip`** (about 460 MB, optional, for the Remastered mode): the HD art, over 10,000
   pictures. Put it **next to
   `ssd-recompiled.exe` without unpacking it**.
+- **`dbz-ssd-recompiled-android.apk`** (optional): the game for Android phones and tablets (64-bit ARM, Android 8 or
+  later), see [Android](#android).
+- **`ssj-kaioken.ssdpack`** and **`free-progression.ssdpack`** (optional): the first two mods, see [Mods](#mods).
 
 ### 4. First launch
 
@@ -249,6 +253,32 @@ debug panel, F12 saves a screenshot as a PNG in your Pictures folder, Esc quits.
 
 **Where things are.** Saves, states and the cached ROM are under `%LOCALAPPDATA%\dbz-ssd-recompiled\`
 (`SSD_DATA_DIR` overrides the folder).
+
+### Android
+
+Install `dbz-ssd-recompiled-android.apk` (allow installs from your browser or file manager when the phone asks). Copy your
+ROM and, for Remastered, `hd-pack.zip` to the phone (the Download folder is fine). The first launch asks for the ROM, the
+mode and the HD pack with the system file picker, and installs the pack (a few minutes on a phone). The touch controls are
+drawn over the game; a gamepad works too. The touch MENU has Save state and Load state with their slot, Cheats, Options,
+Restart and Quit.
+
+Performance on phones can still be improved a lot: see [Known bugs](#known-bugs).
+
+### Mods
+
+A mod (a *data pack*) changes the Remastered game and never Classic. On Windows, put the `.ssdpack` file in the `mods`
+folder of the game's data folder (`%LOCALAPPDATA%\dbz-ssd-recompiled\mods\`, made if missing). On Android, pick the
+`.ssdpack` file with the HD pack's button (Options > Game > Install the HD pack): the game recognises a mod and puts it in
+its mods folder. Then, in Remastered, open **Options > Gameplay > Data packs**, switch the mod on (A) and apply (X); the
+game restarts at the title. Two mods come with this release:
+
+- **Super Saiyan Kaioken** (not canon): Goku can use the Kaioken while he is a Super Saiyan, up to x10; each move made in
+  both costs 10% of his maximum HP. With his Super Saiyan poses redrawn with both auras.
+- **Free progression** (**under test**): the story moves on events, never on levels or battle power, and every enemy
+  follows your party's level, with a difficulty of `easy`, `normal` (the default) or `hard` (the `difficulty` line of the
+  `pack.toml` inside the `.ssdpack`, which is a zip). The balance of the scaled bosses has not been played end to end yet: save often.
+
+Making your own: the format of a pack is in [`docs/mods/`](docs/mods/README.md).
 
 ## Building from source
 
@@ -357,7 +387,11 @@ This is a young project; these are the things we know are not right yet.
 - **Fast-forward**: x8 needs 480 emulated frames a second and holds it on the development machine when nothing else loads it (about 570); on a slower or busy machine it can top out lower (x4 needs 240 and holds).
 - **Japanese Rev 1 plus `--ips`** is implemented and unit-tested, but has not been tried end to end with a real
   Japanese ROM.
-- **Windows only.** Other platforms have not been tried.
+- **Android performance** can be improved a lot. The game runs the original machine cycle by cycle on one core, and the
+  phone's system decides how fast that core may run: x1 is steady on a recent phone, x4 reaches about 220 frames a second,
+  and long sessions warm the phone and use more battery than they should.
+- **Free progression** (mod) is under test: the scaled bosses can be much harder or easier than in the original.
+- **Windows and Android only.** Linux and macOS have not been tried.
 <!-- KNOWN-BUGS:END -->
 
 Found another one? Please open an issue with the ROM's CRC-32, what you did and, if you can, a screenshot.
@@ -382,7 +416,10 @@ goes from polish to new content. Dates are not promised; each milestone ships wh
 | **M8** | **HD polish** | HD art for the last field sprites and the town rooms, story scenes checked by an audit of every replay (flicker, faces, margins, missing art), palette-exact recolouring of every layer, a fast-forward that keeps x8, and the scripted fights checked with cheats. |
 | **M9** | **Android** | The Remastered game on phones and tablets: touch controls in the original's style (a layout you can move, a large or full-screen picture, Restart and Quit), gamepads, your own ROM and the HD pack picked on the device and installed on the first launch, a steady speed and sound on adaptive-refresh screens, a pixel-art launcher icon and a signed release build. |
 
-### M10: Cheats, mod support and data packs
+### M10: Cheats, mod support and data packs (in progress, most of it in 0.3.0)
+
+Done: the item spawner and the zeni multiplier, the data packs and everything below up to the two mods. Left: the
+documentation and acceptance of the pack tools, and the review of the HD art.
 
 - Two more **cheats**: an **item spawner** (every object, with a short description and how many to add; story objects
   such as the Dragon Balls and the Dragon Radar carry a red warning, since spawning them can break the story, so save

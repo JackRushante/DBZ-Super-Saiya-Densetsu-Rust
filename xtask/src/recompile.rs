@@ -45,6 +45,10 @@ pub fn hints(runs: &[Run], symbols: &Symbols, routines_csv: Option<&str>) -> Hin
     for address in ssd_game::cheats::entry_points() {
         h.stops.insert(address & 0x7F_FFFF);
     }
+    // The same for the pack redirectors (`ssd_game::mods`).
+    for address in ssd_game::mods::entry_points() {
+        h.stops.insert(address & 0x7F_FFFF);
+    }
     // Widths at the entries.
     let entries: Vec<u32> = h.entries.iter().chain(&h.stops).copied().collect();
     for entry in entries {

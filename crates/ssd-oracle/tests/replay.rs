@@ -9,8 +9,8 @@ use common::{
 };
 use ssd_oracle::{
     CORE_VERSION, Ctx, DEFAULT_WRAM_SEED, HookAction, HookEntry, HookMode, HookStats, HookTable,
-    Joypad, Machine, MemorySaveStore, NullAudio, ORACLE_REVISION, OracleError, Recorder, Replay,
-    ReturnKind, RoutineFn, joypad_bits, joypad_from_bits,
+    Joypad, MODE_ENHANCED, Machine, MemorySaveStore, NullAudio, ORACLE_REVISION, OracleError,
+    Recorder, Replay, ReturnKind, RoutineFn, joypad_bits, joypad_from_bits,
 };
 
 /// Master cycles of the instructions of the fixture routines (`SlowROM`).
@@ -53,6 +53,7 @@ fn sample() -> Replay {
         initial_sram: Some((0..=255).collect()),
         mode: 0,
         events: Vec::new(),
+        packs: None,
         inputs: (0..40).map(varied_input).collect(),
     }
 }
@@ -85,6 +86,7 @@ fn the_layout_is_the_documented_one() {
         initial_sram: Some(vec![0xAA, 0xBB]),
         mode: 0,
         events: Vec::new(),
+        packs: None,
         inputs: vec![
             Joypad { b: true, ..Joypad::default() },
             Joypad { r: true, ..Joypad::default() },
@@ -145,9 +147,9 @@ fn a_corrupted_byte_anywhere_after_the_checksum_is_caught() {
 fn another_magic_or_format_is_named() {
     let replay = sample();
     let mut bytes = replay.to_bytes(CORE_VERSION);
-    bytes[8] = 3;
+    bytes[8] = 4;
     let message = replay_error(Replay::from_bytes(&bytes, replay.rom_crc32, CORE_VERSION));
-    assert!(message.contains("format 3, expected 1 or 2"), "{message}");
+    assert!(message.contains("format 4, expected 1, 2 or 3"), "{message}");
     bytes[0] = b'X';
     let message = replay_error(Replay::from_bytes(&bytes, replay.rom_crc32, CORE_VERSION));
     assert!(message.contains("not a replay"), "{message}");
@@ -276,6 +278,7 @@ fn power_on_restores_the_initial_sram_and_the_wram_fill() {
         initial_sram: Some(sram.clone()),
         mode: 0,
         events: Vec::new(),
+        packs: None,
         inputs: Vec::new(),
     };
     let m = replay.power_on(rom.clone()).unwrap();
@@ -505,4 +508,174 @@ fn unhooked_run_frame_with_is_run_frame_frame_by_frame() {
         assert_eq!(by_frame.total_master_cycles(), looked_up.total_master_cycles());
         assert!(by_frame.save_state() == looked_up.save_state(), "frame {frame}");
     }
+}
+
+/// A replay without packs serialises to the bytes it had before pack sets existed: format 1 for a
+/// classic replay without host events, format 2 with a mode and events (the expected bytes are
+/// pinned, with a fixed core version string).
+#[test]
+fn a_replay_without_packs_serialises_to_the_same_bytes() {
+    let classic = Replay {
+        rom_crc32: 0x1234_5678,
+        wram_seed: 0xDEAD_BEEF_0123_4567,
+        initial_sram: Some(vec![1, 2, 3]),
+        inputs: vec![joypad_from_bits(0x0001), joypad_from_bits(0x0A50), joypad_from_bits(0x0FFF)],
+        mode: 0,
+        events: Vec::new(),
+        packs: None,
+    };
+    assert_eq!(classic.to_bytes("pinned-core"), PINNED_FORMAT_1);
+    let enhanced = Replay {
+        mode: 1,
+        events: vec![
+            Vec::new(),
+            vec![
+                ssd_oracle::HostEvent::Wram { address: 0x7F_FF00, bytes: vec![0xAA, 0xBB] },
+                ssd_oracle::HostEvent::App { tag: 2, payload: vec![9] },
+            ],
+            Vec::new(),
+        ],
+        ..classic
+    };
+    assert_eq!(enhanced.to_bytes("pinned-core"), PINNED_FORMAT_2);
+}
+
+/// The format 1 bytes of [`a_replay_without_packs_serialises_to_the_same_bytes`].
+const PINNED_FORMAT_1: &[u8] = &[
+    0x53, 0x53, 0x44, 0x52, 0x50, 0x4C, 0x41, 0x59, 0x01, 0x00, 0x00, 0x00, 0x01, 0xC0, 0xA9, 0x4A,
+    0x78, 0x56, 0x34, 0x12, 0x67, 0x45, 0x23, 0x01, 0xEF, 0xBE, 0xAD, 0xDE, 0x0B, 0x00, 0x00, 0x00,
+    0x70, 0x69, 0x6E, 0x6E, 0x65, 0x64, 0x2D, 0x63, 0x6F, 0x72, 0x65, 0x03, 0x00, 0x00, 0x00, 0x01,
+    0x02, 0x03, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x50, 0x0A, 0xFF, 0x0F,
+];
+/// The format 2 bytes of [`a_replay_without_packs_serialises_to_the_same_bytes`].
+const PINNED_FORMAT_2: &[u8] = &[
+    0x53, 0x53, 0x44, 0x52, 0x50, 0x4C, 0x41, 0x59, 0x02, 0x00, 0x00, 0x00, 0x7B, 0x5F, 0xDA, 0x52,
+    0x78, 0x56, 0x34, 0x12, 0x67, 0x45, 0x23, 0x01, 0xEF, 0xBE, 0xAD, 0xDE, 0x0B, 0x00, 0x00, 0x00,
+    0x70, 0x69, 0x6E, 0x6E, 0x65, 0x64, 0x2D, 0x63, 0x6F, 0x72, 0x65, 0x03, 0x00, 0x00, 0x00, 0x01,
+    0x02, 0x03, 0x03, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x0A, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x7F, 0x00, 0x02, 0x00, 0x00, 0x00, 0xAA, 0xBB, 0x01, 0x02,
+    0x01, 0x00, 0x00, 0x00, 0x09, 0xFF, 0x0F, 0x00, 0x00, 0x00, 0x00,
+];
+
+// Pack sets (format 3)
+
+/// A 1 MiB ROM for the pack tests: the synthetic 32 KiB cartridge, then `0xFF` to a cartridge's size.
+fn one_mebibyte(small: Vec<u8>) -> Vec<u8> {
+    let mut rom = small;
+    rom.resize(0x10_0000, 0xFF);
+    rom
+}
+
+/// A pack set's image on `rom`: the ROM, then 1 MiB of extension with one byte of data in it.
+fn image_on(rom: &[u8], data: u8) -> Vec<u8> {
+    let mut image = rom.to_vec();
+    image.resize(0x20_0000, 0);
+    image[0x10_0000] = data;
+    image
+}
+
+/// A replay with a pack set, five frames of input and SRAM.
+fn packed_sample() -> Replay {
+    Replay {
+        packs: Some(ssd_oracle::PackTag {
+            set_id: 0x1122_3344_5566_7788,
+            image_crc32: 0xABCD_0123,
+        }),
+        mode: MODE_ENHANCED,
+        events: (0..40)
+            .map(|frame| {
+                if frame == 1 {
+                    vec![ssd_oracle::HostEvent::App { tag: 1, payload: vec![4] }]
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect(),
+        ..sample()
+    }
+}
+
+#[test]
+fn a_replay_with_packs_is_written_as_format_3_and_reads_back() {
+    let replay = packed_sample();
+    let bytes = replay.to_bytes(CORE_VERSION);
+    assert_eq!(bytes[8..12], 3_u32.to_le_bytes(), "format 3");
+    // The set id and the image CRC32 follow the mode byte, after the core version and the SRAM.
+    let at = 16 + 4 + 8 + 4 + CORE_VERSION.len() + 4 + 256 + 4 + 1;
+    assert_eq!(bytes[at..at + 8], 0x1122_3344_5566_7788_u64.to_le_bytes(), "the set id");
+    assert_eq!(bytes[at + 8..at + 12], 0xABCD_0123_u32.to_le_bytes(), "the image CRC32");
+    assert_eq!(Replay::from_bytes(&bytes, replay.rom_crc32, CORE_VERSION).unwrap(), replay);
+}
+
+#[test]
+fn a_replay_with_packs_keeps_its_section_when_rebased() {
+    let replay = packed_sample();
+    let bytes = replay.to_bytes(CORE_VERSION);
+    let (old, rebased) = Replay::rebase(&bytes, "another-core").unwrap();
+    assert_eq!(old, CORE_VERSION);
+    let read = Replay::from_bytes(&rebased, replay.rom_crc32, "another-core").unwrap();
+    assert_eq!(read, replay, "the same replay, with its pack set");
+}
+
+#[test]
+fn power_on_refuses_a_replay_with_packs_naming_the_set() {
+    let replay = packed_sample();
+    let message = replay_error(replay.power_on(one_mebibyte(sram_counter_rom())));
+    assert!(message.contains("1122334455667788"), "{message}");
+    assert!(message.contains("ABCD0123") || message.contains("abcd0123"), "{message}");
+}
+
+#[test]
+fn power_on_image_needs_packs_the_rom_and_the_image_crc32() {
+    let rom = one_mebibyte(sram_counter_rom());
+    let image = image_on(&rom, 0x5A);
+    let image_crc = ssd_rom::crc32(&image);
+    let rom_crc = ssd_rom::crc32(&rom);
+    // The synthetic cartridge has 2 KiB of SRAM: the replays take a SRAM of that size.
+    let sram = Some(vec![0; 2048]);
+    let plain = Replay { rom_crc32: rom_crc, packs: None, initial_sram: sram, ..packed_sample() };
+    let message = replay_error(plain.power_on_image(image.clone()));
+    assert!(message.contains("recorded without packs"), "{message}");
+
+    let packed =
+        Replay { packs: Some(ssd_oracle::PackTag { set_id: 7, image_crc32: image_crc }), ..plain };
+    let machine = packed.power_on_image(image.clone()).unwrap();
+    assert_eq!((machine.rom_crc32(), machine.image_crc32()), (rom_crc, image_crc));
+    assert_eq!(machine.frame_count(), 0);
+
+    let short = replay_error(packed.power_on_image(rom[..0x8000].to_vec()));
+    assert!(short.contains("shorter than the 1 MiB ROM"), "{short}");
+    let mut other_rom = image.clone();
+    other_rom[0x1000] ^= 1;
+    let wrong_rom = replay_error(packed.power_on_image(other_rom));
+    assert!(wrong_rom.contains(&format!("{rom_crc:08X}")), "{wrong_rom}");
+    let mut other_data = image.clone();
+    other_data[0x10_0000] ^= 1;
+    let wrong_set = replay_error(packed.power_on_image(other_data));
+    assert!(wrong_set.contains("pack set is image"), "{wrong_set}");
+}
+
+#[test]
+fn a_machine_on_an_image_keys_its_save_states_on_the_image() {
+    let rom = one_mebibyte(sram_counter_rom());
+    let image = image_on(&rom, 0x5A);
+    let other = image_on(&rom, 0x3C);
+    let (rom_crc, image_crc) = (ssd_rom::crc32(&rom), ssd_rom::crc32(&image));
+    let on = |bytes: Vec<u8>| {
+        Machine::with_image(bytes, rom_crc, Box::new(MemorySaveStore::default()), DEFAULT_WRAM_SEED)
+            .unwrap()
+    };
+    let packed = on(image.clone());
+    assert_eq!((packed.rom_crc32(), packed.image_crc32()), (rom_crc, image_crc));
+    let state = packed.save_state();
+    assert_eq!(state[16..20], image_crc.to_le_bytes(), "the state's key is the image's CRC32");
+    on(image.clone()).load_state(&state).expect("the same image loads it");
+    assert!(on(other).load_state(&state).is_err(), "another image does not");
+    let mut alone = machine_with(rom.clone());
+    assert!(alone.load_state(&state).is_err(), "the ROM alone does not");
+    assert_eq!(
+        machine_with(rom).save_state()[16..20],
+        rom_crc.to_le_bytes(),
+        "a plain machine is keyed on the ROM"
+    );
 }

@@ -20,6 +20,11 @@ pub enum HookMode {
     Rust,
     /// The original routine runs and the Rust function is checked against it.
     Verify,
+    /// The Rust function patches the machine's state at an instruction boundary and takes no time: it ends with
+    /// `Ctx::resume_at` its own key (the original goes on from there) or with the entry's return, and never calls the
+    /// original. Having no cost, it runs whatever the timing window, so it never falls back: for data redirectors and
+    /// story fixes, which must act on every call.
+    Patch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

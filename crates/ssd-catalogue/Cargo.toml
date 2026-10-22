@@ -7,7 +7,10 @@ publish = false
 [dependencies]
 ssd-game = { workspace = true }   # the addresses of the tables (ssd_game::data, from re/symbols.toml)
 ssd-menus = { workspace = true }   # the labels of the HD menus (menus.rs)
+ssd-mod = { workspace = true }   # game.rs: the chapters' `Tables` trait, which the game's own records implement
+ssd-save = { workspace = true }   # game.rs: the party records are `ssd_save::Record`s
 thiserror = { workspace = true }
+anyhow = { workspace = true }   # game.rs: the errors of the party records (the save tools name the character or the level)
 
 [dev-dependencies]
 ssd-oracle = { workspace = true }   # tests/real_rom.rs: the live game state of the replays

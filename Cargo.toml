@@ -13,6 +13,7 @@ members = [
     "crates/ssd-hd",
     "crates/ssd-menus",
     "crates/ssd-hdpack",
+    "crates/ssd-mod",
     "xtask",
     "third_party/jgenesis/common/jgenesis-common",
     "third_party/jgenesis/common/jgenesis-proc-macros",
@@ -96,6 +97,7 @@ ssd-save = { path = "crates/ssd-save" }
 ssd-hd = { path = "crates/ssd-hd" }
 ssd-menus = { path = "crates/ssd-menus" }
 ssd-hdpack = { path = "crates/ssd-hdpack" }
+ssd-mod = { path = "crates/ssd-mod" }
 
 # Required by the vendored crates (`[lints] workspace = true`); copied from jgenesis.
 [workspace.lints.rust]
@@ -171,3 +173,10 @@ opt-level = 1
 
 [profile.release]
 lto = "thin"
+
+# Test builds for the phone (`android/build-apk.sh --fast`): optimised like a release, without LTO and with incremental
+# compilation, so a change rebuilds and links only what it touched. Releases keep `release`.
+[profile.phone]
+inherits = "release"
+lto = false
+incremental = true

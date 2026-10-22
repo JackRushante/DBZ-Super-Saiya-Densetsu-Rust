@@ -202,8 +202,8 @@ enum Msg {
     Status(Status),
     /// The ROM file was read: accepted, or why not.
     Rom(Result<Vec<u8>, RomProblem>),
-    /// The pack was installed, or why not.
-    Pack(Result<(), String>),
+    /// The pack was installed (`Some`: the file was a mod, put in the mods folder: its name), or why not.
+    Pack(Result<Option<String>, String>),
 }
 
 enum RomProblem {
@@ -312,9 +312,14 @@ fn screens(flow: &mut Flow, dir: &Path, first: Page, note: Option<String>) -> an
                 Msg::Rom(Err(RomProblem::Refused(reason))) => {
                     setup.set_status(Status::Error(format!("This file was not accepted: {reason}")));
                 }
-                Msg::Pack(Ok(())) => {
+                Msg::Pack(Ok(None)) => {
                     flow.pack_done = true;
                     setup.set_status(Status::Done("Installed.".to_owned()));
+                }
+                Msg::Pack(Ok(Some(name))) => {
+                    setup.set_status(Status::Note(format!(
+                        "The mod {name} is installed: switch it on in Options > Gameplay > Data packs."
+                    )));
                 }
                 Msg::Pack(Err(reason)) => {
                     setup.set_status(Status::Error(format!("The HD pack was not installed: {reason}")));
@@ -479,7 +484,9 @@ fn check_patch(uri: &str, dir: &Path) -> Result<Vec<u8>, RomProblem> {
     }
 }
 
-fn install_pack_from(uri: &str, dir: &Path, sender: &Sender<Msg>) -> Result<(), String> {
+/// Installs the HD pack the picker returned; a data pack (a `.ssdpack`) goes to the mods folder instead, and its name is
+/// returned.
+fn install_pack_from(uri: &str, dir: &Path, sender: &Sender<Msg>) -> Result<Option<String>, String> {
     let rom = match rom_setup::resolve_rom(None, None, false) {
         Ok(rom_setup::RomSetup::Ready(bytes)) => bytes,
         _ => return Err("the ROM is not set up".to_owned()),
@@ -493,6 +500,14 @@ fn install_pack_from(uri: &str, dir: &Path, sender: &Sender<Msg>) -> Result<(), 
     })
     .map_err(|e| e.to_string())
     .and_then(|()| {
+        if let Ok(pack) = ssd_mod::Pack::from_zip(&zip) {
+            let mods = crate::packs::mods_dir();
+            let dest = mods.join(format!("{}.ssdpack", pack.manifest.pack.id));
+            std::fs::create_dir_all(&mods)
+                .and_then(|()| std::fs::copy(&zip, &dest))
+                .map_err(|e| format!("the mod cannot be put in the mods folder: {e}"))?;
+            return Ok(Some(pack.manifest.pack.name));
+        }
         let source = install::find_source(Some(&zip), None).ok_or("this is not an HD pack")?;
         let cache = paths::data_dir().join("cache");
         let mut say = |line: &str| {
@@ -510,7 +525,7 @@ fn install_pack_from(uri: &str, dir: &Path, sender: &Sender<Msg>) -> Result<(), 
             }
         };
         match install::install(&rom, &source, &cache, &mut say, false) {
-            Ok(Outcome::Current(_) | Outcome::Installed { .. }) => Ok(()),
+            Ok(Outcome::Current(_) | Outcome::Installed { .. }) => Ok(None),
             Err(error) => Err(format!("{error:#}")),
         }
     });

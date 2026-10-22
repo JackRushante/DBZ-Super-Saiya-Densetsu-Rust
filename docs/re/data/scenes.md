@@ -143,16 +143,17 @@ ran (it keeps them at `$7E:29A0`, image offset `$1A0`), restores their hit point
 this is how Piccolo returns after Porunga (`secret-piccolo-returns`). A save loaded on map 22 does not run that
 set-up, so a crafted save must write the list (`image:1A0=`) itself.
 
-3. **Another scene** (`scene`, or a battle's win address) and **the chapter set-up** (03:EA1E, run when a
-   save is loaded and at every story transition): map 16 and others set `scene_id` and `state_1648`.
+3. **Another scene** (`scene`, or a battle's win address) and **the chapter set-up** (03:EA1E, run at every story
+   transition, not when a save is loaded: `title-chapters.md` 5): map 16 and others set `scene_id` and `state_1648`.
 4. **A landing**: with `$01A1` bit 7 set (a map change is pending) and `landing_spot` 4 or 9, the
    per-frame check starts scene 0 or 4.
 5. **Random battles**: on maps 22 and 24 the counter `$01B0` decides when the forced fights of the Frieza
    chapter come (03:FC93, 02:D2A1, 02:D2F0).
 
-Loading a save runs the chapter set-up of the saved map (03:EA55: one routine per map id, which rebuilds
-the party from the roster flags), then the map's routine decides from the flags and the position whether
-a scene starts by itself, which is why a crafted save can start almost any fight by placing the party.
+Loading a save rebuilds the party from the roster (03:E5FC) and does not run the chapter set-up (03:EA55 is one
+routine per map id, run after a story transition: `title-chapters.md` 5, and `free-progression.md`, which saw it again
+on map 16); the map's routine decides from the flags and the position whether a scene starts by itself, which is why a
+crafted save can start almost any fight by placing the party.
 
 ## Map ids
 

@@ -16,6 +16,9 @@ ssd-rom = { workspace = true }
 ssd-catalogue = { workspace = true }   # the names and pictures of the HD menus
 ssd-menus = { workspace = true }       # the layout, the draw lists and the view of the HD menus
 ssd-hdpack = { workspace = true }      # the first launch installs the shared HD art pack
+zip = { workspace = true }             # the art of a zipped data pack, unpacked once (packs::unpacked)
+ssd-mod = { workspace = true }         # --mods: the data packs of a run (checked, built into an image)
+ssd-save = { workspace = true }        # --chapter: the chapter's save slot and its checksum (the sidecar of that slot)
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 wgpu = { workspace = true }

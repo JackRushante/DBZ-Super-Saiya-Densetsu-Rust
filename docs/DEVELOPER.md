@@ -207,7 +207,10 @@ on it. The Dragon Balls and the story's objects are pinned at the top and cannot
 what it is offered, with a notice. The bag lives in `saves/ssd.bag` beside the battery save (one bag per save slot,
 keyed by the slot's checksum: a save changed by Classic play rebuilds its bag from the game's list; a file that cannot
 be read is kept as `ssd.bag.bad` and the bags are rebuilt). Loading a state rebuilds the bag from the game's list.
-The battle's Item screen keeps the original's look.
+In a battle the Item command opens the same Item screen over the battle: the bag with its counts and pages, the
+stacks a battle can use in full colour and the others greyed out (the original answers "can't use" for those). A use
+stages the chosen stack first on the original's list, which takes it through its own battle item code; Back goes to the
+battle's command window. A battle offers no Drop.
 
 The pictures: a picture box shows its object's picture (the HD art when the pack holds it, the original's pixels
 otherwise), and stays empty, never with a placeholder text, when nothing is under the cursor. The corner portraits are
@@ -231,7 +234,9 @@ L and R turn the page, Y goes back to 1, A adds them to the bag through the keep
 checks, the bag's key items and the "Moon" card and the Dragon Radar, are red, one at a time, and A first asks "Add anyway"
 or "Cancel" with the cursor on Cancel; an add is the application event 3, `SPAWN_TAG`, so a recording replays it, and it
 marks the game, `Cheats::spawned`, whose saves keep the CHEATS badge even after Reset all), random battles on or
-off, how often they come x1/4 to x4, enemies per battle x1/2 to x3 and enemy power x1/2 to x5. A card previews the Z balls
+off, how often they come x1/4 to x4, enemies per battle x1/2 to x3, enemy power x1/2 to x5 and, under Story, Unlock chapters
+(Off or On: every chapter of the data packs is offered, finished game or not; a save with it on is marked like the other
+cheats). A card previews the Z balls
 and an "On: N" box counts the active choices.
 
 Story fix (Remastered, with the cheat wrappers, always on): the level deadline of map 5 (`03:F300`, Piccolo at level 9, or
@@ -265,8 +270,9 @@ zeni, random battles off and the encounter rate, recorded sessions that replay t
 by its keys (rows, wraps, a battle, persistence through Save and Continue, a second Save of the same data: `screen-resave`)
 and the scripted loss of Nail (with `--save`).
 `cheat-spike` plays the `secret-*` replays of a directory in Classic and with extreme cheats (the group verdicts of
-`battle.md`). `replay-from-save` takes `--title` (stop at the title's slot list) and `--cheats` (write extreme cheats into
-the block at frame 300, Enhanced mode), and `menu show cheats` in a UI script checks the screen.
+`battle.md`). `replay-from-save` takes `--title` (stop at the title's slot list), `--cheats` (write extreme cheats into
+the block at frame 300, Enhanced mode) and `--bind FRAME` (the save's item list is recorded as the bag bound at that
+frame, in Enhanced mode, so the bag of a replay is the save's; the units keep state word 0), and `menu show cheats` in a UI script checks the screen.
 
 ### Options (M7)
 
@@ -341,6 +347,37 @@ map drives the game window and the HD menus alike (the menus read the same joypa
 replay records is the SNES buttons after the map, so a replay is the same under any map and plays without it; the map
 is read only by the live window. In a UI script, `menu press <key>` (or `esc`, `backspace`, `pad <button>`) answers a box
 that waits.
+
+### Data packs (M10)
+
+A data pack adds or replaces game data in Enhanced mode: maps, scenes, text, tables, art and chapters. The Classic game is
+never changed by packs, and a pack holds no code. The pack format and its pages are in `docs/mods/README.md`.
+
+To install a pack, put it in the `mods` folder of the data folder: a folder with a `pack.toml` in it, or a `.ssdpack` file.
+In Enhanced mode, Options > Gameplay > Data packs (A opens it) lists every pack of that folder with its version, and a
+box that is filled when the pack is on. A pack the checks refuse (made for another ROM, a file that does not read) is in
+red with a cross, stays off, and its details say why.
+
+On the Data packs screen, A switches a pack on or off; Y held with Up or Down moves the pack in the order (the packs load in
+that order); X asks to apply the set, and Apply writes it to `mods\mods.toml` and restarts the game to the title: save first,
+unsaved progress is lost. A set the checks refuse is not applied, and the screen says why. B goes back to the Options.
+
+    enabled = ["super.kaioken", "free.progression"]
+
+`mods\mods.toml` names the enabled packs by id, in their load order; a missing file enables none. An Enhanced run that persists
+(a windowed run) loads that set at its start; a set the file names that the checks refuse, or a pack it names that is not in
+the folder, is not loaded: the game starts without packs, and the screen says why. The command line overrides the file:
+`--mods <folder-or-.ssdpack>` (repeatable) runs the given packs and `--no-mods` none. A run that does not persist (a headless
+run, a UI snapshot, a benchmark or a `--replay` run) reads no set file.
+
+A pack that offers chapters lists them under "-- Chapters --" when the pack is on. A chapter that waits for the game to be
+finished is grey and says "locked", until the game is completed or the cheat Unlock chapters is on. An open chapter asks
+"Start this chapter?" with the cursor on Cancel; Start restarts the game into the chapter's own saves, under
+`saves\chapters\<id>\`, and the main saves are not touched. In a chapter session the top of that list is "Main game", which
+goes back to the main saves. A chapter starts from the set in use: when the list has changed and is not applied, the screen
+says "Apply the packs first". The command line does the same: `ssd-recompiled --mode enhanced --chapter <id>`.
+
+In a UI snapshot, `menu show mods` checks the screen, and `menu key x` is X (see the list above).
 
 
 ## Debug panel
@@ -506,9 +543,11 @@ Next: a gamepad-aware first launch, a check of the touch controls on a phone
 
 Saves, save states and the ROM cache live in `%LOCALAPPDATA%\dbz-ssd-recompiled\`:
 
-- `saves\` — battery saves
+- `saves\` — battery saves (and `saves\chapters\<id>\`, the saves of a chapter of a data pack)
 - `states\slotN.ssdstate` — save states, one file per slot (N = 1–4)
 - `cache\rom\canonical.sfc` — the identified, normalised ROM
+- `mods\` — the data packs, each a folder with `pack.toml` or a `.ssdpack` zip, and `mods\mods.toml`, which names the enabled
+  packs (see "Data packs (M10)")
 
 The environment variable `SSD_DATA_DIR` overrides that directory (the tests use it).
 
@@ -528,7 +567,7 @@ Only a windowed run writes the saves and states folders. A run that does not per
 benchmark or a `--replay` run) writes none of their files and does not create the folders: its battery save, bag and cheat
 changes and its save states stay in memory for the run. It still reads the battery save, the bag and cheat files and the
 states that exist, so a snapshot shows the player's saves; a replay plays its own SRAM instead. The option files are neither
-read nor written by such a run (see "Options (M7)"). The ROM cache and the HD pack under `cache\` are written by any run that
+read nor written by such a run (see "Options (M7)"), and neither is the pack set file `mods\mods.toml` (see "Data packs (M10)"). The ROM cache and the HD pack under `cache\` are written by any run that
 is given `--rom` or installs a pack: they are caches of the ROM, not saves.
 
 Headless test mode: `ssd-recompiled --headless-frames N --screenshot out.bmp` runs N frames without a window and
@@ -551,8 +590,8 @@ skipped, and a line that is not an action is a usage error (exit 2) that names i
 - `select SYMBOL` (or an address, as the Memory tab's "Go to" field takes it)
 - `breakpoint SYMBOL` (or an address, as the Debugger's field takes it)
 - `mode ROUTINE original`, `mode ROUTINE rust` or `mode ROUTINE verify`
-- `menu open` (A on the field), `menu key up|down|left|right|a|b|l|r|y|select` (the HD menu's keys: a confirms, b cancels, l and r change a page, y and select reset on the options),
-  `menu tab all|allies|tools` (the bag's tab), `menu press <key>` (a raw key or `pad <button>` for a Controls box that waits), `menu battle-cheats` (the Cheats screen over the battle the game is in, as F3 opens it) and `menu show field|menu|items|cheats|options` (checks the HD screen): with
+- `menu open` (A on the field), `menu key up|down|left|right|a|b|l|r|y|select|x` (the HD menu's keys: a confirms, b cancels, l and r change a page, y and select reset on the options, x applies the data packs),
+  `menu tab all|allies|tools` (the bag's tab), `menu press <key>` (a raw key or `pad <button>` for a Controls box that waits), `menu battle-cheats` (the Cheats screen over the battle the game is in, as F3 opens it) and `menu show field|menu|items|cheats|options|mods` (checks the HD screen): with
   `--mode enhanced` only. A menu line plays its choice to its
   end before the next line; a replay still playing stops there, and the menu presses live (`--replay` with
   `--headless-frames` to the field first)
@@ -656,7 +695,7 @@ its declared maximum cost (or without one) counts as a divergence, and a routine
 leaves it unverified; so does, in both modes, a sync point reached inside a dispatch where it would have been an event
 (its `sync_inside_dispatch`, listed with the routines' counters). It takes a few minutes.
 
-    cargo run --release -p xtask -- standalone-diff [--verbose] [--cheats-identity] <replay>...
+    cargo run --release -p xtask -- standalone-diff [--verbose] [--cheats-identity] [--mods-identity] <replay>...
     cargo run --release -p xtask --features recomp -- standalone-diff <replay>...
 
 plays each replay on two free-running machines, the original and the standalone game (`--hooks rust`: every routine of
@@ -670,6 +709,50 @@ exits 1; otherwise one line per replay and exit 0. While a Rust call's charge is
 (`Machine::charge_pending`: a decompression with the screen off spans several frames, and the routine has written all its
 results at once) the registers and work RAM are not compared, everything else is; the line counts those stops. A replay
 recorded for another emulator core is refused, as everywhere (`make-replays`). It takes about 20 seconds per short replay.
+
+With `--mods-identity` the standalone game (B) runs on the zero-padded 2 MiB image of the empty data-pack set, with the
+redirectors of the packs installed (`ssd_game::mods`), so the same replays must come out identical: the check that a
+run on a pack image without packs is the original's. `--cheats-identity` and `--mods-identity` combine. `verify-replays`
+takes the same two flags, with the same meaning for its machine B.
+
+    cargo run --release -p xtask -- mod-build <dir> <out.ssdpack> [--local]
+    cargo run --release -p xtask -- mod-check <pack>... [--local]
+
+check data packs, each a folder with `pack.toml` (and the files its `[[data]]` entries name) or a `.ssdpack` zip of the
+same layout. `mod-check` runs the checks of the set against the cached ROM (the ROM's CRC32 and size, the ids and the
+versions, the file sizes, the slots and the dependencies, the data's fit in the image's banks and directory, and that no
+file holds 16 bytes of the ROM) and prints each refusal, exit 1; else the placement of each slot, the image's size and
+CRC32 and the set id. `mod-build` runs the same checks on one pack and writes it as a `.ssdpack` zip. `--local` allows
+the runs of the ROM's bytes, for a pack that is not tracked.
+
+    cargo run --release -p xtask -- art-derive <hd.png> <face|tiles> <out dir> [--palette <file>]
+
+the SNES art of one HD picture (`ssd_mod::derive`, the code the packs use for their faces): a face (128 x 128 pixels)
+or a map sheet (multiples of 32 pixels). It writes `palette.toml`, `tiles.bin`, `tiles.lz` and `map.toml` into the
+folder, which is under `.work/` when it is in the repository. The HD art of a pack is in `docs/mods/art.md`.
+
+    cargo run --release -p xtask -- kaioken-art <pack dir>
+
+copies the 27 pose variants of the Super Saiyan Kaioken (`battle-goku-ssj-000` to `026`) from `.work/m10/kk-art/variants/` into
+`<pack dir>/art/hd/variants/` (for `examples/ssj-kaioken`). They are made locally from the installed HD art, so the pack's `art/`
+folder is never tracked (`.gitignore`); the pack loads without them. See `docs/mods/art.md`, "Pose variants".
+
+    cargo run --release -p xtask -- scene-check <file.scene>...
+    cargo run --release -p xtask -- scene-dump <scene id hex|all> [--out <dir>]
+
+the scene language of the packs (`ssd_mod::scene`; the commands are in `docs/re/data/scenes.md`). `scene-check` assembles
+each scene file and prints its size and the offsets of its label words, or its error with the line and column (exit 1).
+`scene-dump` decompiles the ROM's story scripts into the language: the 82 scenes, one script per distinct start, to stdout
+or to a folder under `.work/` (or outside the repository); the output is derived from the game and is never tracked. Each
+script is the commands its walk reaches. The round trip of the 82 scenes (each script assembles back to the ROM's bytes
+over those commands) is the ignored test `every_scene_round_trips_through_the_language`, run with `SSD_ROM_PATH` set and
+`cargo test -p xtask -- --ignored`.
+
+The app runs on packs in Enhanced mode: `ssd-recompiled --mode enhanced --mods <folder-or-.ssdpack>` (the option is
+repeated for each pack; without it a windowed run takes the set of `mods\mods.toml`, and `--no-mods` runs without packs).
+A set the checks refuse on the command line prints why and exits 8. A replay recorded
+with packs plays only with the same packs, and one recorded without them only without (exit 6). The redirectors act in
+the window and in UI snapshots; a headless run (`--headless-frames`) does not install them.
 
     cargo run --release -p xtask -- coverage [--exclude name[,name...]] [replay]
 
@@ -726,9 +809,12 @@ times the drawing of the Enhanced picture: each replay (default `battle` and `wa
 the render log on, and every frame is drawn at 1x, at 2x and at 4x (crisp) and at 4x (smooth); only the drawing is
 timed, not the emulation. The last two configurations are the 16:9 view at 4x with the look alone and with the pack's art
 (`--pack DIR` names the pack, by default the converter's under the cache directory). It prints the mean, the 99th
-percentile and the worst frame per replay and configuration, and over the replays together. The default look at 4x is the
-budget of M6: a mean of at most 4 ms a frame, and the same for the 16:9 view with art on the target machine (99th percentile at
-most 8 ms).
+percentile and the worst frame per replay and configuration, and over the replays together. The 16:9 configurations share
+their pictures as the window does (a frame whose inputs are those of the picture before is not drawn again): the `reused`
+column counts those frames. `--check` also draws every frame of the 16:9 configurations afresh, with each table transfer
+applied to each colour as it is drawn, and fails when a shared picture differs from its fresh one. The default look at 4x
+is the budget of M6: a mean of at most 4 ms a frame, and the same for the 16:9 view with art on the target machine (99th
+percentile at most 8 ms).
 
     cargo run --release -p xtask -- hd-skip-check [--frames N] [--pack DIR] [replay|dir...]
 
@@ -1231,7 +1317,7 @@ matched, 1 on a divergence or a cost problem, 2 when no replay called the routin
 
     cargo run --release -p xtask -- shots <script|timeline.txt|replay> [--frames a,b,c | --every N] [--upto N] [--sheet COLS]
         [--peek name,addr,...] [--watch name,addr,... [--watch-from N]] [--sram f.sav] [--sram-out f.sav]
-        [--state-in f] [--state-out f] [--wram-out f] [--mesen-inputs f] [--out dir] [--no-png]
+        [--state-in f] [--state-out f] [--wram-out f] [--mesen-inputs f] [--mods PACK]... [--wram FRAME:ADDR=HEX]... [--out dir] [--no-png]
 
 plays a script from power-on, headless, and writes the screen at the chosen frames as PNGs in `.work/shots/<script>/`
 (or all of them in one half-size contact sheet with `--sheet COLS`, which costs one image to look at instead of
@@ -1249,12 +1335,14 @@ code that changes a variable. `--sram-out` writes the cartridge's SRAM at the en
 the map menu's Save it is a save the game wrote itself, a consistent start for the next experiment. How the menu, landing and save replays were authored: a timeline file, a state
 at the frame before it, and sheets of the frames in between. A timeline that is good goes into
 `crates/ssd-game/scripts/` and gets an entry in `ssd_game::scripts::REPLAYS`, which `make-replays` records.
-With `--hd-scale N` (and `--pack DIR`, else the cached pack) the frames are drawn as the Enhanced picture, so a moment
+With `--hd-scale N` (and `--pack DIR`, else the cached pack) the frames are drawn as the Enhanced picture (`--enhanced-look crisp|smooth` picks its look, crisp by default), so a moment
 saved with F12 (`--state-in`) is seen in HD with no window. `--gaps DIR` then prints, per frame, each pose with its art
 and where the art comes from, the background slots and the line registers, writes the poses with no art into `DIR`,
 and for a frame that shows a Mode 7 plane prints the plane's key and writes what `hd-art m7dump` writes into
 `DIR/m7-<key>/` (the plane's art in `mode7\` is made from it). `--box x,y,w,h` maps a box of the picture, a letter per
-pixel for the layer on top or the picture that draws it.
+pixel for the layer on top or the picture that draws it. `--wram FRAME:ADDR=HEX` (repeatable) is a host write: the bytes
+HEX go into work RAM at the bus address ADDR (`7E0C36=80`, or `$7E:0C36`) before frame FRAME runs, as the Enhanced app's
+host writes do; it stages a state, such as the Kaioken's (`docs/mods/art.md`). FRAME must be before the last frame of the run.
 
     cargo run --release -p xtask -- catalogue [--kind characters|cards|enemies|items|attacks|encounters]
 
@@ -1284,6 +1372,9 @@ own data and is never tracked (`*.sav` is on the forbidden list of `publish-chec
     cargo run --release -p xtask -- save-dump <file.sav>
     cargo run --release -p xtask -- save-edit <in.sav> <out.sav> [--slot N] [--to-slot N] [--set field=value ...]
     cargo run --release -p xtask -- replay-from-save <save.sav> <script.txt> <out.ssdreplay> [--slot N] [--title] [--cheats]
+    cargo run --release -p xtask -- chapter-save <pack>... --chapter <id> --out <folder>
+
+`chapter-save` writes the save slot a chapter of the packs starts from (`<folder>/ssd.sav`, and `<folder>/ssd.mods` when the chapter sets extended flags): the same two files a chapter session starts from, see `docs/mods/chapters.md`. It refuses to overwrite a file.
 
 `save-dump` prints the status of each slot (empty, good, good from the backup, corrupt) and, with the ROM cached,
 the party with names and stats, the items, the zeni, the map and the positions. `save-edit` copies the file and
@@ -1311,6 +1402,9 @@ cached ROM; the raw forms do not):
 frames count from the loaded game). The replay plays like any other (`--replay`, `verify-replays`), and
 `shots <replay.ssdreplay>` plays it headless with its SRAM and writes screenshots, so a crafted save is checked
 by what the game shows after Continue. `shots` also takes `--sram <save.sav>` for a timeline script.
+`--mods <folder-or-.ssdpack>` (repeatable) runs the script on the image of those data packs with their redirectors
+installed, as the Enhanced app does, so a pack's scene or message shows in the screens; a pack built with `--local`
+is accepted. A replay's inputs and save are played as they are; only the data differs.
 
 `tools/saves/secrets.sh BASE.sav [name...]` builds the crafted saves and replays that reach the story's hidden
 and conditional events (Raditz's forced fight, the recruits, bosses of the Namek chapters, Nail against Frieza
@@ -1318,6 +1412,10 @@ and Porunga, Goku's Super Saiyan transformation, the ending and the Super Vegeta
 `save-edit` of the base save (any save with a used slot 1) and a timeline of `tools/saves/secrets/`; the
 results go to `.work/demo/secret-<name>.sav` and `.work/replays/secret-<name>.ssdreplay`.
 `docs/re/secrets-coverage.md` says what each one shows and what could not be reached.
+
+`tools/saves/free-progression.sh [name...]` plays, on the same crafted saves, the gates of the story that read a level, once as
+the original and once with the example pack `examples/free-progression` (`--mods`), and prints what the story did in each
+(`docs/re/data/free-progression.md`, section 7).
 
 `cargo xtask publish-check` and the other gate commands are listed in `CONTRIBUTING.md`.
 

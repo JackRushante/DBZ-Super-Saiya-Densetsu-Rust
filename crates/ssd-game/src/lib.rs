@@ -16,6 +16,7 @@ pub mod data;
 pub mod gameplay;
 pub mod menu;
 pub mod mode;
+pub mod mods;
 mod registry;
 mod routines;
 pub mod scripts;

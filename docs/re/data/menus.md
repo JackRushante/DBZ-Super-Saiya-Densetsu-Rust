@@ -119,7 +119,7 @@ are in use (0 to 24; the screens, the shop and the save read it). The list is **
 are two entries. Slot `n` also has a word at `$7E:2BA0 + 2n` (`item_extra`; 48 bytes, saved with the image): it follows
 the entry when the list is compacted; the objects that read it are the wish-granting object (Porunga: a count of wishes
 left) and the card-changing ones (a mask of the three choices already used, `01:F2C7`). Added by `01:C671` (the id comes from `$1640`; the caller has
-already checked the room), removed and compacted by `01:C639` (called by 12 effect and sale routines).
+already checked the room; it writes the object, the attribute byte and the count, not the state word, so a new entry keeps the word its slot held), removed and compacted by `01:C639` (called by 12 effect and sale routines; the compaction at `01:C654` moves the state words with the entries).
 
 Who adds: the field object pickup (`01:D6D5`: refuses at 24), the battle drop (`05:8F4D`: refuses at 24, up to three drops in
 `$14F6`) and the shop (`03:A914`: refuses at 24 with "you can't carry any more"). The story reads the list too (the Dragon
@@ -310,8 +310,9 @@ so a unit that would only join a stack that has room is refused too.
 **What the keeper does.** It diffs the list it last wrote with the list in work RAM (a longest common
 subsequence over object and state word): an added entry is a unit for the bag, a removed one is a unit gone from
 its stack (a use, a drop, a sale, the story). The list is then written back as the bag projects it, with the
-stack the HD staged first. The state word of an entry (`item_extra`, `$7E:2BA0`) travels with its stack; the
-objects 9 to 13 (card changers) and 15 (Porunga) keep one stack per unit, since their word is their own state.
+stack the HD staged first. The state word of an entry (`item_extra`, `$7E:2BA0`) travels with its stack. The
+objects 9 to 13 (card changers) and 15 (Porunga) stack by their word: a unit joins a stack that holds the same word, and a
+unit whose word changes (a wish used, a card choice) leaves its stack; the keeper takes that unit off its stack and adds it with the new word.
 Dragon Balls (33 to 39) and the story objects (attribute bit 5) are key items: listed first, never dropped.
 
 **The original's Use, from the Item list (seen with `menu-test items`).** Choose the entry (A on the list, the
@@ -335,6 +336,16 @@ Radar is a keepsake (attribute `%01000100`: usable on the map, cannot be dropped
 entry, so it stays in the bag. The HD's plan therefore takes the Use when the effect runs on step 2, waits for the
 screen to be drawn and leaves it with B. Bubbles also runs from step 2 (`$073B` goes `$80`, then `$C0` while its message
 shows) and the menu closes back to the command window or the field by itself.
+
+**The battle's Item list (M10 fix, found with `xtask disasm`, `shots --watch` and a crafted save).** A battle sets
+`context_61` (`$61`) to 1 and holds the field (`field_state` is 2 while it runs). Its command window is screen 17 (Atk.,
+Item, Run, Menu; the cursor is on Item after the choice). Choosing Item writes screen 2 at `01:A4E6` (the program counter
+of that write) and the list's step 1 at `01:8AAB`: the Item screen of the field, with `$61` = 1. The list shows every entry, not only the battle's: an object without the battle bit (INT, bit 7) gets
+bit 0 from `01:C535` and answers "can't use", so the list is not filtered. A (Use or Drop, step 2), then Use: the
+effect runs on screen 21 (the battle's action screen), idle and waiting for one A; that A runs the effect, removes the
+entry (`01:C639`; Yajirobe's count went from 3 to 2) and the battle is back on screen 17. B on the list goes back to
+screen 17. The HD's battle use (`Driver`, the Items screen over a battle) follows the field's Use steps and reads the
+effect's screen as taken.
 
 **Stale `menu_screen` while the menu opens.** `menu_screen` (`$0D5F`) is not cleared when a menu closes: the Radar's
 exit leaves it at 2, and the next opening shows `$25` = `$0F` with that 2 for a couple of frames before it is set to 0. A
@@ -361,7 +372,7 @@ replay is re-played with the same keeper; the final state (work RAM and the bag)
   and 24 to 31).
 - The kanji mark of the price box of the objects with no price (tile `$2F`, drawn by `01:CACB`) and the run-time slots of the
   help texts (`$FC`, `$43`, filled in by messages): the menu shows nothing and an ellipsis there.
-- The effects of ids 27 to 31 and the battle side of the Item screen (`$61` = 1, screens 17 and `$15`).
+- The effects of ids 27 to 31.
 - What the second kanji-like icon in the price box means for each object (a "no price" mark, seen on the Dragon Balls,
   Gohan and Korin).
 

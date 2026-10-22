@@ -73,6 +73,12 @@ pub fn replay_files(paths: &[PathBuf], default_dir: &Path) -> anyhow::Result<Vec
     Ok(files)
 }
 
+/// The pack-set tag of `image` (a replay's [`Replay::packs`] for it).
+#[must_use]
+pub fn pack_tag(image: &ssd_mod::Image) -> ssd_oracle::PackTag {
+    ssd_oracle::PackTag { set_id: image.set_id, image_crc32: image.crc32 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

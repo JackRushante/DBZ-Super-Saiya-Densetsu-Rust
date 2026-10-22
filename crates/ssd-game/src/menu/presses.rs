@@ -66,6 +66,9 @@ pub enum Until {
     Moved,
     /// The field is free, or the menu is open on its command window (the field's or a town's).
     Settled,
+    /// The command window of a battle is up and idle (screen 17 in a battle), where B from the battle's Item list
+    /// goes.
+    BattleCommand,
 }
 
 /// One step of a plan.
@@ -392,6 +395,7 @@ fn satisfied(probe: &MenuProbe<'_>, until: Until) -> bool {
         }
         Until::UseTaken => {
             probe.effect_runs()
+                || probe.battle_effect()
                 || (probe.menu_open()
                     && probe.screen() == Some(2)
                     && matches!(probe.step(), Some(3 | 5 | 9)))
@@ -404,6 +408,7 @@ fn satisfied(probe: &MenuProbe<'_>, until: Until) -> bool {
         Until::Closed => probe.field_free(),
         Until::ItemAnswered => {
             probe.field_free()
+                || probe.battle_command()
                 || (probe.menu_open()
                     && !probe.busy()
                     && (matches!(probe.screen(), Some(0 | 13))
@@ -417,8 +422,11 @@ fn satisfied(probe: &MenuProbe<'_>, until: Until) -> bool {
         }
         Until::Moved => !satisfied(probe, Until::ItemMessage),
         Until::Settled => {
-            probe.field_free() || (probe.menu_open() && matches!(probe.screen(), Some(0 | 13)))
+            probe.field_free()
+                || probe.battle_command()
+                || (probe.menu_open() && matches!(probe.screen(), Some(0 | 13)))
         }
+        Until::BattleCommand => probe.battle_command(),
     }
 }
 

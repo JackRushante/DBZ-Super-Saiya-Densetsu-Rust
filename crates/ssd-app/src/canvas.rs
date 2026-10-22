@@ -32,6 +32,9 @@ pub struct GameView<'a> {
     /// Where the original window lies in the picture (x, y, width, height in its pixels), when the picture is
     /// wider than it: the 4:3 view shows only this part.
     pub logical: Option<[u32; 4]>,
+    /// The serial of the picture (see [`ssd_hd::world::SharedHd`]), when the view names one: a texture that holds
+    /// the picture of this serial already is not uploaded again.
+    pub serial: Option<u64>,
 }
 
 impl<'a> GameView<'a> {
@@ -45,7 +48,14 @@ impl<'a> GameView<'a> {
             pixel_aspect: pixel_aspect(frame),
             smooth: false,
             logical: None,
+            serial: None,
         }
+    }
+
+    /// The view names its picture by `serial` (see [`GameView::serial`]).
+    #[must_use]
+    pub fn with_serial(self, serial: u64) -> Self {
+        Self { serial: Some(serial), ..self }
     }
 
     /// The Enhanced picture `picture`, shown with the pixel aspect of `frame`, the machine's frame
@@ -66,6 +76,7 @@ impl<'a> GameView<'a> {
                 picture.logical.width,
                 picture.logical.height,
             ]),
+            serial: None,
         }
     }
 }
@@ -85,6 +96,8 @@ struct GameTexture {
     width: u32,
     height: u32,
     smooth: bool,
+    /// The serial of the picture the texture was last uploaded with (`None`: a picture without one).
+    serial: Option<u64>,
 }
 
 /// One run of the interface: tessellated, waiting to be painted (or discarded).
@@ -259,24 +272,29 @@ impl Canvas {
                 }
                 None => self.renderer.register_native_texture(&self.device, &view, filter),
             };
-            self.games[slot] = Some(GameTexture { texture, id, width, height, smooth });
+            self.games[slot] =
+                Some(GameTexture { texture, id, width, height, smooth, serial: None });
         }
-        let game = self.games[slot].as_ref().expect("created above");
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &game.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            view.rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * width),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-        );
+        let game = self.games[slot].as_mut().expect("created above");
+        // A picture the texture holds already (the same serial) is not uploaded again
+        if view.serial.is_none() || game.serial != view.serial {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &game.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                view.rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * width),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            game.serial = view.serial;
+        }
         GameImage { id: game.id, width, height, pixel_aspect: view.pixel_aspect }
     }
 

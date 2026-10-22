@@ -1,0 +1,17 @@
+[package]
+name = "ssd-mod"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }   # tiled: the Tiled maps (JSON)
+toml = { workspace = true }
+zip = { workspace = true }
+ssd-rom = { workspace = true }   # crc32: the ROM check, the image and the set id
+ssd-save = { workspace = true }   # chapter: the synthesized save slot a chapter session starts from
+png = { workspace = true }   # the HD picture of a face or a map tile, read at load (`derive`)
+
+[lints]
+workspace = true

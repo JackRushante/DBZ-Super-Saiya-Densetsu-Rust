@@ -50,6 +50,7 @@ fn config(table: impl Into<Option<HookTable>>, sync: u32) -> LockstepConfig {
         table: table.into(),
         sync_keys: vec![sync],
         budget_frames: DEFAULT_BUDGET_FRAMES,
+        b_packs: None,
     }
 }
 
@@ -766,6 +767,7 @@ fn real_rom_reference_replays_stay_in_lockstep_with_every_routine_in_rust() {
         table: Some(table),
         sync_keys: symbols.sync_points().iter().map(|point| point.address).collect(),
         budget_frames: DEFAULT_BUDGET_FRAMES,
+        b_packs: None,
     };
     // The replays `make-replays` records: the scripts from power-on, blank SRAM.
     for (name, frames, script) in [

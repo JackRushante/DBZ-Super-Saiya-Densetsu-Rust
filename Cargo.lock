@@ -2275,6 +2275,7 @@ dependencies = [
  "libc",
  "log",
  "pollster",
+ "rayon",
  "sdl3",
  "snes-config",
  "ssd-catalogue",
@@ -2282,8 +2283,10 @@ dependencies = [
  "ssd-hd",
  "ssd-hdpack",
  "ssd-menus",
+ "ssd-mod",
  "ssd-oracle",
  "ssd-rom",
+ "ssd-save",
  "wgpu",
 ]
 
@@ -2306,20 +2309,26 @@ dependencies = [
  "ssd-hd",
  "ssd-hdpack",
  "ssd-menus",
+ "ssd-mod",
  "ssd-oracle",
  "ssd-rom",
+ "ssd-save",
  "tempfile",
  "wgpu",
+ "zip",
 ]
 
 [[package]]
 name = "ssd-catalogue"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ssd-game",
  "ssd-menus",
+ "ssd-mod",
  "ssd-oracle",
  "ssd-rom",
+ "ssd-save",
  "thiserror",
 ]
 
@@ -2329,6 +2338,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "ssd-menus",
+ "ssd-mod",
  "ssd-oracle",
  "ssd-recomp",
  "ssd-recomp-gen",
@@ -2351,6 +2361,7 @@ dependencies = [
  "serde",
  "sha1_smol",
  "ssd-catalogue",
+ "ssd-mod",
  "ssd-oracle",
  "ssd-rom",
  "tempfile",
@@ -2380,6 +2391,19 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "serde",
+]
+
+[[package]]
+name = "ssd-mod"
+version = "0.1.0"
+dependencies = [
+ "png",
+ "serde",
+ "serde_json",
+ "ssd-rom",
+ "ssd-save",
+ "toml",
+ "zip",
 ]
 
 [[package]]
@@ -3265,6 +3289,7 @@ dependencies = [
  "ssd-hd",
  "ssd-hdpack",
  "ssd-menus",
+ "ssd-mod",
  "ssd-oracle",
  "ssd-recomp",
  "ssd-recomp-gen",

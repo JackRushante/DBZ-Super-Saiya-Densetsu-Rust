@@ -69,7 +69,15 @@ pub fn shape<'a>(view: GameView<'a>, shape: Shape, buffer: &'a mut Vec<u8>) -> G
     // How many pixels one line of the game is tall: the HD scale (1 for a Classic frame).
     let scale = (height / 224).max(1);
     apply(shape.filters, buffer, width, height, scale);
-    GameView { rgba: buffer, width: width as u32, height: height as u32, logical: None, ..view }
+    // The pixels are the filters' of the shape as well as the picture's: the view names no picture of its own
+    GameView {
+        rgba: buffer,
+        width: width as u32,
+        height: height as u32,
+        logical: None,
+        serial: None,
+        ..view
+    }
 }
 
 /// Filters `rgba` (`width` x `height` pixels, `scale` pixels per line of the game) in place. Off changes nothing.
@@ -192,7 +200,7 @@ mod tests {
     }
 
     fn view(rgba: &[u8], width: u32, height: u32, logical: Option<[u32; 4]>) -> GameView<'_> {
-        GameView { rgba, width, height, pixel_aspect: 1.0, smooth: true, logical }
+        GameView { rgba, width, height, pixel_aspect: 1.0, smooth: true, logical, serial: None }
     }
 
     #[test]

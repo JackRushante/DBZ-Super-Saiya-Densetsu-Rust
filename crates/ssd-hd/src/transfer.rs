@@ -17,6 +17,7 @@
 //!   than its reference, and sampled once into a 3-D lookup table that is read with trilinear
 //!   interpolation.
 
+use crate::Image;
 use rustc_hash::FxHashMap;
 
 /// How many 8-bit levels a pair may differ in a channel and still be "the same colour".
@@ -61,6 +62,11 @@ impl Pairs {
     /// The pixel whose colour was `reference` where the art was made and is `current` now.
     pub(crate) fn add(&mut self, reference: [u8; 3], current: [u8; 3]) {
         *self.counts.entry((reference, current)).or_default() += 1;
+    }
+
+    /// Whether every pair keeps its colour: the transfer is the identity ([`Transfer::Same`]).
+    pub(crate) fn is_identity(&self) -> bool {
+        self.counts.keys().all(|(reference, current)| same(*reference, *current))
     }
 
     /// The transfer of these pairs.
@@ -120,6 +126,48 @@ impl Transfer {
             Self::Table(table) => table.apply(art),
         }
     }
+}
+
+/// The distinct colours of a picture of art, in order of first appearance, and the colour's number of every pixel
+/// (the colour of its red, green and blue, alpha not counted). A transfer is a function of the colour, so it is
+/// applied to each of these colours once, and each pixel takes the transferred colour of its number.
+pub(crate) struct Colours {
+    pub(crate) list: Vec<[u8; 3]>,
+    pub(crate) number: Vec<u16>,
+}
+
+impl Colours {
+    /// The colours of `image`, or `None` when it has more than `u16::MAX` distinct colours (a photograph, not palette art,
+    /// is transferred pixel by pixel).
+    pub(crate) fn of(image: &Image) -> Option<Self> {
+        let mut seen: FxHashMap<[u8; 3], u16> = FxHashMap::default();
+        let mut list = Vec::new();
+        let mut number = Vec::with_capacity(image.rgba.len() / 4);
+        for pixel in image.rgba.as_chunks::<4>().0 {
+            let colour = [pixel[0], pixel[1], pixel[2]];
+            let next = u16::try_from(list.len()).ok()?;
+            let at = *seen.entry(colour).or_insert_with(|| {
+                list.push(colour);
+                next
+            });
+            number.push(at);
+        }
+        Some(Self { list, number })
+    }
+
+    /// Each of the colours transferred by `transfer`, in the order of [`Colours::list`].
+    pub(crate) fn transferred(&self, transfer: &Transfer) -> Vec<[u8; 3]> {
+        self.list.iter().map(|&colour| transfer.apply(colour)).collect()
+    }
+}
+
+/// How the colours of a layer's art are transferred when it is drawn: not at all, each colour as it is drawn (a fade,
+/// or a picture with too many colours to number), or by the transferred colours of the art's own colours (see
+/// [`Colours`]).
+pub(crate) enum Colouring {
+    Same,
+    Each(Transfer),
+    Numbered { colours: std::sync::Arc<Colours>, transferred: Vec<[u8; 3]> },
 }
 
 /// A fade: every colour scaled towards black by `keep` and lightened towards white by `lift`
@@ -351,5 +399,25 @@ mod tests {
         let transfer = cave_pairs().transfer();
         let out = transfer.apply([80, 110, 190]);
         assert!(out.iter().zip([190, 110, 40]).all(|(a, b)| a.abs_diff(b) <= 25), "{out:?}");
+    }
+
+    #[test]
+    fn a_numbered_picture_is_the_colours_transferred_one_by_one() {
+        let transfer = cave_pairs().transfer();
+        let (width, height) = (5_usize, 3_usize);
+        // Palette-like art: a few colours, each pixel one of them (and one colour of a pixel of no alpha)
+        let palette = [[15_u8, 25, 60], [160, 190, 240], [90, 40, 200], [7, 7, 7]];
+        let mut rgba = Vec::new();
+        for i in 0..width * height {
+            let [r, g, b] = palette[i * 7 % palette.len()];
+            rgba.extend_from_slice(&[r, g, b, if i % 4 == 0 { 0 } else { 255 }]);
+        }
+        let image = Image::new(width, height, rgba.clone());
+        let colours = Colours::of(&image).expect("a few colours");
+        assert_eq!(colours.list.len(), palette.len());
+        let mapped = colours.transferred(&transfer);
+        for (pixel, &number) in rgba.as_chunks::<4>().0.iter().zip(&colours.number) {
+            assert_eq!(mapped[usize::from(number)], transfer.apply([pixel[0], pixel[1], pixel[2]]));
+        }
     }
 }

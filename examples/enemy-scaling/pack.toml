@@ -1,0 +1,12 @@
+# Enemy scaling: every enemy follows the party's level (Enhanced mode only, off unless the pack is enabled).
+# The design and its numbers are in docs/mods/free-progression.md, the feature in docs/mods/features.md.
+[pack]
+id = "enemy.scaling"
+name = "Enemy scaling"
+version = "1.0.0"
+game = "A8CF4F2A"
+description = "Each enemy is set to the strength it would have if it had been made for the party's level, and pays the EXP of that strength. The difficulty moves that level: easy is lower, hard is higher."
+
+[[feature]]
+name = "enemy_scaling"
+difficulty = "normal"

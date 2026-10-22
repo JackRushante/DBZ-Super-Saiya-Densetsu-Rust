@@ -31,6 +31,8 @@ pub enum Key {
     ResetPage,
     /// The Select button: on the options, Reset all.
     ResetAll,
+    /// The X button: on the Data packs screen, Apply the set.
+    Apply,
 }
 
 /// An entry of the command window or of the Menu list.
@@ -179,6 +181,50 @@ pub enum Action {
     OptionsOpen(Opens),
     /// On the options screen, "Apply video changes?" was answered: Keep (`true`) or Revert (`false`).
     OptionsVideo { keep: bool },
+    /// On the Data packs screen, the pack at place `at` of the list is switched on or off.
+    PackToggle(usize),
+    /// On the Data packs screen, the pack at place `at` moves by `by` places (-1 up, 1 down) in the order.
+    PackMove { at: usize, by: i8 },
+    /// On the Data packs screen, Apply was confirmed: the set is applied.
+    PacksApply,
+    /// On the Data packs screen, the chapter on the line `line` of the list is started (the question was confirmed).
+    ChapterStart(usize),
+    /// On the Data packs screen, "Main game" was confirmed: the main saves are back.
+    ChapterMain,
+}
+
+/// A question the Data packs screen asks. Its choice is 0 for the confirm button and 1 for Cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModsAsk {
+    /// "Apply the packs?"
+    Apply,
+    /// "Start this chapter?", for the chapter on the list's line with this index.
+    Chapter(usize),
+    /// "Back to the main game?"
+    Main,
+}
+
+/// A line of the Data packs screen's list, as the cursor moves through it: the packs first, then "Main game" (in a chapter
+/// session) and the chapters of the packs that are on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModsLine {
+    /// An installed pack. A refused pack cannot be switched on.
+    Pack { refused: bool },
+    /// "Main game": the main saves, from a chapter session.
+    Main,
+    /// A chapter: locked until its condition holds.
+    Chapter { locked: bool },
+}
+
+/// The cursor, the question and the held Y of the Data packs screen (see [`Nav::key_mods`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ModsNav {
+    /// The line under the cursor: an index of the lines of the list.
+    cursor: usize,
+    /// The question on the screen, and the choice under the cursor (0 the confirm button, 1 Cancel).
+    ask: Option<(ModsAsk, u8)>,
+    /// Y is held: Up and Down move the pack under the cursor in the order, instead of the cursor.
+    moving: bool,
 }
 
 /// The cursors of the HD screens: the command window, the Menu list, the bag and the cheats.
@@ -194,7 +240,14 @@ pub struct Nav {
     options: OptionsNav,
     /// The Cheats screen was opened from the options, and goes back there.
     cheats_from_options: bool,
+    /// The Data packs screen's cursor and question.
+    mods: ModsNav,
 }
+
+/// The line A shows on a refused pack: it stays off.
+const REFUSED_PACK: &str = "A refused pack stays off.";
+/// The line A shows on a locked chapter.
+const LOCKED_CHAPTER: &str = "Locked: the game must be finished first.";
 
 /// A key the Controls page refused: where the cursor was, the action that holds the key, and the frames the
 /// row still flashes.
@@ -290,8 +343,32 @@ impl Nav {
             Screen::Items => self.bag.cursor % PAGE_SIZE,
             Screen::Cheats => self.cheats,
             Screen::Options => self.options_row(),
+            Screen::Mods => self.mods.cursor,
         };
         u8::try_from(row).unwrap_or(0)
+    }
+
+    /// The cursor of the Data packs screen: an index of its lines (see [`ModsLine`]).
+    #[must_use]
+    pub const fn mods_cursor(&self) -> usize {
+        self.mods.cursor
+    }
+
+    /// The question the Data packs screen shows, and the choice under its cursor.
+    #[must_use]
+    pub const fn mods_ask(&self) -> Option<(ModsAsk, u8)> {
+        self.mods.ask
+    }
+
+    /// Whether Y is held on the Data packs screen (see [`Nav::key_mods`]).
+    #[must_use]
+    pub const fn mods_moving(&self) -> bool {
+        self.mods.moving
+    }
+
+    /// The host tells the Data packs screen whether Y is held this frame.
+    pub fn set_mods_moving(&mut self, moving: bool) {
+        self.mods.moving = moving;
     }
 
     /// The page of the bag the cursor is on (0 on the other screens).
@@ -299,7 +376,7 @@ impl Nav {
     pub fn page(&self) -> u8 {
         match self.screen {
             Screen::Items => u8::try_from(self.bag.cursor / PAGE_SIZE).unwrap_or(0),
-            Screen::Command | Screen::Menu | Screen::Cheats | Screen::Options => 0,
+            Screen::Command | Screen::Menu | Screen::Cheats | Screen::Options | Screen::Mods => 0,
         }
     }
 
@@ -328,7 +405,7 @@ impl Nav {
                     spawner.confirm = None;
                     Action::None
                 }
-                Key::ResetPage | Key::ResetAll => Action::None,
+                Key::ResetPage | Key::ResetAll | Key::Apply => Action::None,
             };
         }
         let objects = u16::from(SPAWNER_OBJECTS);
@@ -357,7 +434,7 @@ impl Nav {
                 spawner.open = false;
                 spawner.confirm = None;
             }
-            Key::ResetAll => {}
+            Key::ResetAll | Key::Apply => {}
         }
         spawner.count = spawner.count.max(1).min(max(spawner.object));
         Action::None
@@ -537,6 +614,7 @@ impl Nav {
                 self.cheats_from_options = false;
             }
             Screen::Options => self.options = OptionsNav::default(),
+            Screen::Mods => self.mods = ModsNav::default(),
         }
     }
 
@@ -580,7 +658,8 @@ impl Nav {
                     | Key::Tab
                     | Key::TabBack
                     | Key::ResetPage
-                    | Key::ResetAll => {}
+                    | Key::ResetAll
+                    | Key::Apply => {}
                 }
             }
             Screen::Menu => match key {
@@ -593,7 +672,8 @@ impl Nav {
                 | Key::Tab
                 | Key::TabBack
                 | Key::ResetPage
-                | Key::ResetAll => {}
+                | Key::ResetAll
+                | Key::Apply => {}
             },
             // The bag is driven by `key_bag`, which has the stacks.
             Screen::Items => {
@@ -616,11 +696,95 @@ impl Nav {
                 }
                 Key::Right | Key::Confirm => return adjust(self.cheats_row(), 1),
                 Key::Cancel => return Action::Back,
-                Key::Tab | Key::TabBack | Key::ResetPage | Key::ResetAll => {}
+                Key::Tab | Key::TabBack | Key::ResetPage | Key::ResetAll | Key::Apply => {}
             },
             Screen::Options => return self.key_options(key),
+            // The Data packs screen's keys are given by `key_mods`, with the list of its lines.
+            Screen::Mods => {}
         }
         Action::None
+    }
+
+    /// What `key` does on the Data packs screen, whose list has the lines `lines` (the packs, then "Main game" and the
+    /// chapters). Up and Down move the cursor (wrapping); with Y held they move the pack under the cursor in the order.
+    /// Left and Right do nothing. A switches a pack on or off (a refused pack says why it stays off), asks to start a
+    /// chapter or to go back to the main game (a locked chapter says why it cannot start), and X asks to apply the set.
+    /// B goes back. A question takes the keys: Left, Right, Up and Down change its choice, A chooses (the confirm button,
+    /// choice 0, does the question; Cancel, choice 1, only closes it), and B closes it.
+    pub fn key_mods(&mut self, key: Key, lines: &[ModsLine]) -> Action {
+        if let Some((ask, choice)) = self.mods.ask {
+            return match key {
+                Key::Up | Key::Down | Key::Left | Key::Right | Key::Tab | Key::TabBack => {
+                    self.mods.ask = Some((ask, choice ^ 1));
+                    Action::None
+                }
+                Key::Confirm => {
+                    self.mods.ask = None;
+                    match (choice, ask) {
+                        (0, ModsAsk::Apply) => Action::PacksApply,
+                        (0, ModsAsk::Chapter(line)) => Action::ChapterStart(line),
+                        (0, ModsAsk::Main) => Action::ChapterMain,
+                        _ => Action::None,
+                    }
+                }
+                Key::Cancel => {
+                    self.mods.ask = None;
+                    Action::None
+                }
+                Key::Apply | Key::ResetPage | Key::ResetAll => Action::None,
+            };
+        }
+        let at = self.mods.cursor.min(lines.len().saturating_sub(1));
+        let packs = lines.iter().take_while(|line| matches!(line, ModsLine::Pack { .. })).count();
+        match key {
+            Key::Up | Key::Down if self.mods.moving => {
+                // Y held: the pack under the cursor moves to the place beside it, if that place is a pack too.
+                let by: i8 = if key == Key::Up { -1 } else { 1 };
+                let to = at.checked_add_signed(isize::from(by));
+                match to {
+                    Some(to) if at < packs && to < packs => {
+                        self.mods.cursor = to;
+                        Action::PackMove { at, by }
+                    }
+                    _ => Action::None,
+                }
+            }
+            Key::Up if !lines.is_empty() => {
+                self.mods.cursor = previous(at, lines.len());
+                Action::None
+            }
+            Key::Down if !lines.is_empty() => {
+                self.mods.cursor = next(at, lines.len());
+                Action::None
+            }
+            Key::Confirm => match lines.get(at) {
+                Some(ModsLine::Pack { refused: true }) => Action::Notice(REFUSED_PACK),
+                Some(ModsLine::Pack { refused: false }) => Action::PackToggle(at),
+                Some(ModsLine::Main) => {
+                    self.mods.ask = Some((ModsAsk::Main, 1));
+                    Action::None
+                }
+                Some(ModsLine::Chapter { locked: true }) => Action::Notice(LOCKED_CHAPTER),
+                Some(ModsLine::Chapter { locked: false }) => {
+                    self.mods.ask = Some((ModsAsk::Chapter(at), 1));
+                    Action::None
+                }
+                None => Action::None,
+            },
+            Key::Apply => {
+                self.mods.ask = Some((ModsAsk::Apply, 1));
+                Action::None
+            }
+            Key::Cancel => Action::Back,
+            Key::Up
+            | Key::Down
+            | Key::Left
+            | Key::Right
+            | Key::Tab
+            | Key::TabBack
+            | Key::ResetPage
+            | Key::ResetAll => Action::None,
+        }
     }
 
     /// What `key` does on the options screen: Up and Down move the row, Left and Right (or A) change it, L and R
@@ -634,7 +798,7 @@ impl Nav {
                 }
                 Key::Confirm => Action::OptionsVideo { keep: choice == 0 },
                 Key::Cancel => Action::OptionsVideo { keep: false },
-                Key::ResetPage | Key::ResetAll => Action::None,
+                Key::ResetPage | Key::ResetAll | Key::Apply => Action::None,
             };
         }
         if let Some(choice) = self.options.confirm {
@@ -649,7 +813,7 @@ impl Nav {
                     }
                 }
                 Key::Cancel => self.options.confirm = None,
-                Key::ResetPage | Key::ResetAll => {}
+                Key::ResetPage | Key::ResetAll | Key::Apply => {}
             }
             return Action::None;
         }
@@ -702,7 +866,7 @@ impl Nav {
             Key::ResetPage => return Action::OptionsResetPage(category),
             Key::ResetAll => self.options.confirm = Some(1),
             Key::Cancel => return Action::Back,
-            Key::Up | Key::Down => {}
+            Key::Up | Key::Down | Key::Apply => {}
         }
         Action::None
     }
@@ -793,9 +957,13 @@ impl Nav {
                 Key::Cancel => Action::Back,
                 Key::Confirm => Action::Notice(EMPTY_TAB),
                 Key::Tab | Key::TabBack => self.tab_key(key),
-                Key::Up | Key::Down | Key::Left | Key::Right | Key::ResetPage | Key::ResetAll => {
-                    Action::None
-                }
+                Key::Up
+                | Key::Down
+                | Key::Left
+                | Key::Right
+                | Key::ResetPage
+                | Key::ResetAll
+                | Key::Apply => Action::None,
             };
         };
         let bag = &mut self.bag;
@@ -806,7 +974,7 @@ impl Nav {
                 Key::Left => bag.cursor = bag.cursor.saturating_sub(COLUMN),
                 Key::Right => bag.cursor = (bag.cursor + COLUMN).min(last),
                 Key::Tab | Key::TabBack => return self.tab_key(key),
-                Key::ResetPage | Key::ResetAll => {}
+                Key::ResetPage | Key::ResetAll | Key::Apply => {}
                 Key::Cancel => return Action::Back,
                 Key::Confirm => {
                     if !row.usable && !row.droppable {
@@ -840,7 +1008,8 @@ impl Nav {
                 | Key::Tab
                 | Key::TabBack
                 | Key::ResetPage
-                | Key::ResetAll => {}
+                | Key::ResetAll
+                | Key::Apply => {}
             },
             Sheet::Confirm => match key {
                 Key::Up | Key::Down | Key::Left | Key::Right => bag.choice ^= 1,
@@ -857,7 +1026,7 @@ impl Nav {
                     // No: back to the Use or Drop choice, which still shows Drop.
                     bag.sheet = Sheet::Choose;
                 }
-                Key::Tab | Key::TabBack | Key::ResetPage | Key::ResetAll => {}
+                Key::Tab | Key::TabBack | Key::ResetPage | Key::ResetAll | Key::Apply => {}
             },
         }
         Action::None
@@ -1004,7 +1173,7 @@ mod tests {
         assert_eq!(key(&mut nav, Key::Up), Action::None);
         assert_eq!(nav.options_row(), 0);
         assert_eq!(key(&mut nav, Key::Up), Action::None);
-        assert_eq!(nav.options_row(), 4, "Up wraps to the last of the five rows");
+        assert_eq!(nav.options_row(), 5, "Up wraps to the last of the six rows");
         assert_eq!(key(&mut nav, Key::Down), Action::None);
         assert_eq!(nav.options_row(), 0, "the rows wrap");
         assert_eq!(key(&mut nav, Key::Down), Action::None);
@@ -1511,5 +1680,100 @@ mod tests {
         assert_eq!(nav.cursor(), 0);
         nav.enter(Screen::Command);
         assert_eq!(nav.cursor(), 2, "the command window keeps its row");
+    }
+
+    #[test]
+    fn the_data_packs_list_switches_packs_and_asks_before_a_chapter_or_the_main_game() {
+        // Two packs (the second refused), a chapter session's Main game, an open chapter and a locked one.
+        let lines = [
+            ModsLine::Pack { refused: false },
+            ModsLine::Pack { refused: true },
+            ModsLine::Main,
+            ModsLine::Chapter { locked: false },
+            ModsLine::Chapter { locked: true },
+        ];
+        let mut nav = Nav::default();
+        nav.enter(Screen::Mods);
+        assert_eq!(nav.cursor(), 0, "the first pack");
+        assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::PackToggle(0));
+        nav.key_mods(Key::Down, &lines);
+        assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::Notice(REFUSED_PACK), "stays off");
+        nav.key_mods(Key::Down, &lines);
+        assert_eq!(nav.mods_cursor(), 2, "the cursor crosses from the packs into the chapters");
+        assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::None);
+        assert_eq!(
+            nav.mods_ask(),
+            Some((ModsAsk::Main, 1)),
+            "Main game asks, the cursor on Cancel"
+        );
+        assert_eq!(nav.key_mods(Key::Left, &lines), Action::None);
+        assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::ChapterMain);
+        assert_eq!(nav.mods_ask(), None, "the question is over");
+        nav.key_mods(Key::Down, &lines);
+        assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::None);
+        assert_eq!(nav.mods_ask(), Some((ModsAsk::Chapter(3), 1)), "the open chapter asks");
+        assert_eq!(nav.key_mods(Key::Cancel, &lines), Action::None, "B closes the question only");
+        assert_eq!(nav.mods_ask(), None);
+        nav.key_mods(Key::Down, &lines);
+        assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::Notice(LOCKED_CHAPTER));
+        nav.key_mods(Key::Down, &lines);
+        assert_eq!(nav.mods_cursor(), 0, "down from the last line wraps to the first");
+        assert_eq!(nav.key_mods(Key::Cancel, &lines), Action::Back);
+    }
+
+    #[test]
+    fn apply_asks_first_with_the_cursor_on_cancel_and_applies_only_when_confirmed() {
+        let lines = [ModsLine::Pack { refused: false }];
+        let mut nav = Nav::default();
+        nav.enter(Screen::Mods);
+        assert_eq!(nav.key_mods(Key::Apply, &lines), Action::None);
+        assert_eq!(nav.mods_ask(), Some((ModsAsk::Apply, 1)), "X asks, the cursor on Cancel");
+        assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::None, "Cancel closes the question");
+        assert_eq!(nav.mods_ask(), None);
+        nav.key_mods(Key::Apply, &lines);
+        nav.key_mods(Key::Up, &lines);
+        assert_eq!(nav.mods_ask(), Some((ModsAsk::Apply, 0)), "Up moves the choice to Apply");
+        assert_eq!(nav.key_mods(Key::Confirm, &lines), Action::PacksApply);
+        nav.key_mods(Key::Apply, &lines);
+        assert_eq!(nav.key_mods(Key::Cancel, &lines), Action::None, "B closes it too");
+        assert_eq!(nav.key_mods(Key::Cancel, &lines), Action::Back, "and the next B goes back");
+    }
+
+    #[test]
+    fn with_y_held_up_and_down_move_a_pack_in_the_order_and_never_into_the_chapters() {
+        let lines = [
+            ModsLine::Pack { refused: false },
+            ModsLine::Pack { refused: false },
+            ModsLine::Chapter { locked: false },
+        ];
+        let mut nav = Nav::default();
+        nav.enter(Screen::Mods);
+        nav.set_mods_moving(true);
+        assert_eq!(nav.key_mods(Key::Down, &lines), Action::PackMove { at: 0, by: 1 });
+        assert_eq!(nav.mods_cursor(), 1, "the cursor follows the pack");
+        assert_eq!(nav.key_mods(Key::Down, &lines), Action::None, "the last pack stays");
+        assert_eq!(nav.key_mods(Key::Up, &lines), Action::PackMove { at: 1, by: -1 });
+        assert_eq!(nav.key_mods(Key::Up, &lines), Action::None, "the first pack stays");
+        nav.set_mods_moving(false);
+        assert_eq!(nav.key_mods(Key::Down, &lines), Action::None);
+        assert_eq!(nav.mods_cursor(), 1, "without Y the cursor moves alone");
+    }
+
+    #[test]
+    fn the_data_packs_button_of_the_options_opens_the_screen_and_back_keeps_the_options_row() {
+        let mut nav = Nav::default();
+        nav.enter(Screen::Options);
+        nav.key(Key::Tab, false, false, 0);
+        assert_eq!(nav.options_category(), Category::Gameplay);
+        for _ in 0..5 {
+            nav.key(Key::Down, false, false, 0);
+        }
+        assert_eq!(nav.options_row(), 5, "the Data packs button is the last row");
+        assert_eq!(nav.key(Key::Confirm, false, false, 0), Action::OptionsOpen(Opens::Packs));
+        nav.enter(Screen::Mods);
+        assert_eq!(nav.mods_cursor(), 0, "the screen opens on its first line");
+        assert_eq!(nav.key_mods(Key::Cancel, &[]), Action::Back);
+        nav.resume(Screen::Options);
+        assert_eq!(nav.options_row(), 5, "back on the Options, on the button");
     }
 }

@@ -3,6 +3,7 @@
 //! [`crate::screens`] draw it; nothing here reads the game or the ROM.
 
 use crate::cheats::{Cheats, Row};
+use crate::nav::ModsAsk;
 use crate::options::Category;
 
 /// The names and texts the view needs, by id: the characters (by character id) and the objects
@@ -74,6 +75,57 @@ pub enum Screen {
     Cheats,
     /// The options: the categories and their rows (M7).
     Options,
+    /// The data packs: the installed packs, the set the game runs with, and the chapters (M10).
+    Mods,
+}
+
+/// The Data packs screen as it shows: the packs, then the chapters of the packs that are on (with "Main game" first in a
+/// chapter session), the cursor, the question under way and the notice of the foot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModsView {
+    pub packs: Vec<PackLine>,
+    pub chapters: Vec<ChapterLine>,
+    /// The line under the cursor: an index of the packs, then of the chapters.
+    pub cursor: usize,
+    /// Y is held: the pack under the cursor moves in the order.
+    pub moving: bool,
+    /// The question under way and its choice (0 the confirm button, 1 Cancel).
+    pub ask: Option<(ModsAsk, u8)>,
+    /// A line for the foot: why a change was refused, or why the set is not in use.
+    pub notice: Option<String>,
+}
+
+/// A pack of the Data packs screen: its name and identity, its details and its state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackLine {
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub description: String,
+    pub needs: String,
+    /// The size in bytes.
+    pub size: u64,
+    pub state: PackState,
+    /// Why the pack is refused (the reason shown in its details).
+    pub reason: Option<String>,
+}
+
+/// Whether a pack of the list is on, off, or refused by its checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackState {
+    On,
+    Off,
+    Refused,
+}
+
+/// A chapter, or "Main game" (`main`), of the Data packs screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChapterLine {
+    pub name: String,
+    pub description: String,
+    /// Locked: its condition does not hold yet.
+    pub locked: bool,
+    pub main: bool,
 }
 
 /// The Cheats screen as it shows: the choices of the run, the row under the cursor, and the names of the

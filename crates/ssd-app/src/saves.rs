@@ -12,14 +12,17 @@ use std::path::PathBuf;
 ///
 /// The saves folder cannot be created, in a run that persists.
 pub fn battery_saves() -> anyhow::Result<Box<dyn SaveStore>> {
+    // A chapter session keeps its battery save in the chapter's folder (see `chapter`).
+    let dir = crate::chapter::battery_dir();
     if paths::persists() {
-        return Ok(Box::new(FsSaveStore::new(paths::saves_dir(), "ssd")?));
+        return Ok(Box::new(FsSaveStore::new(dir, "ssd")?));
     }
-    Ok(Box::new(RunSaves {
-        dir: paths::saves_dir(),
-        stem: "ssd",
-        written: MemorySaveStore::default(),
-    }))
+    // A run that does not persist starts a chapter from its fresh slot in memory, and writes nothing.
+    let mut written = MemorySaveStore::default();
+    if let Some(sram) = crate::chapter::fresh("ssd.sav") {
+        written.persist("sav", sram)?;
+    }
+    Ok(Box::new(RunSaves { dir, stem: "ssd", written }))
 }
 
 /// The saves of a run that does not persist: a file of the saves folder is read as [`FsSaveStore`] reads it, and a

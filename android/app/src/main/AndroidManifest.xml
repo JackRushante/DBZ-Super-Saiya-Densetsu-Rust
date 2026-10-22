@@ -10,7 +10,10 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:allowBackup="false"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:appCategory="game"
+        android:isGame="true">
+        <meta-data android:name="android.game_mode_config" android:resource="@xml/game_mode_config" />
         <activity
             android:name=".GameActivity"
             android:exported="true"
