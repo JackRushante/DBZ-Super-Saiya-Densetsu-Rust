@@ -22,6 +22,7 @@ ssd-menus = { workspace = true }
 ssd-hdpack = { workspace = true }
 ssd-mod = { workspace = true }   # the app's sources (main.rs, replay_io.rs) are compiled here: the --mods options
 ssd-save = { workspace = true }  # the app's chapter sessions (chapter.rs): the slot and its checksum
+zip = { workspace = true }       # the art of a zipped data pack, unpacked once (packs.rs)
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 wgpu = { workspace = true }

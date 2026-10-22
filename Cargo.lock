@@ -2288,6 +2288,7 @@ dependencies = [
  "ssd-rom",
  "ssd-save",
  "wgpu",
+ "zip",
 ]
 
 [[package]]
