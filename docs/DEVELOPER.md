@@ -198,9 +198,11 @@ and it never changes what the game does.
 
 The Item screen is a bag of 60 slots with up to 99 units in a stack (both options later), two columns with `x NN`
 counts, the tabs All, Allies and Tools, the picture, the Pt price and the help of the object under the cursor. A use
-takes one unit, as the original takes it, with no quantity and no fighter list on the map: the object is used at once,
-and the original decides what it does. From then the curtain lifts, so the original's own use window, messages and
-effects are what the player sees, and the Dragon Radar's screen stays up until B leaves it. An object the original
+takes one unit, as the original takes it, with no quantity: the HD stages the stack on the original's list and presses
+the original's own Use, and that is all it presses. From then the curtain lifts and whatever the use asks next is the
+player's, on the original's own screens: the fighter it is for, a card to change, a wish, the lines of a message, the
+effect; the Dragon Radar's screen stays up until B leaves it. The HD's Item screen comes back when the original is on
+its item list again, and goes when the menu closes. An object the original
 refuses (Saiba) is greyed out; one refused at the moment of use (Mr. Popo or Puar at full KI) keeps its unit and the
 menu stays open for the player. Drop asks Yes or No and drops one unit. A tab with no stack says so when A is pressed
 on it. The Dragon Balls and the story's objects are pinned at the top and cannot be dropped, and a full bag refuses
@@ -209,8 +211,9 @@ keyed by the slot's checksum: a save changed by Classic play rebuilds its bag fr
 be read is kept as `ssd.bag.bad` and the bags are rebuilt). Loading a state rebuilds the bag from the game's list.
 In a battle the Item command opens the same Item screen over the battle: the bag with its counts and pages, the
 stacks a battle can use in full colour and the others greyed out (the original answers "can't use" for those). A use
-stages the chosen stack first on the original's list, which takes it through its own battle item code; Back goes to the
-battle's command window. A battle offers no Drop.
+stages the chosen stack first on the original's list, which takes it through its own battle item code, and the steps
+after the Use (the fighter, the messages, the effect's A) are the player's, as on the map; the battle's command window
+coming back ends it. Back goes to the battle's command window. A battle offers no Drop.
 
 The pictures: a picture box shows its object's picture (the HD art when the pack holds it, the original's pixels
 otherwise), and stays empty, never with a placeholder text, when nothing is under the cursor. The corner portraits are
@@ -1173,7 +1176,7 @@ each choice with the HD driver and checks that its joypad words (its presses), r
 the same work RAM, every byte, and that the hand-written Classic presses of the same choice reach the same game state
 (items, money, party, travel, map and position). `items` plays the bag on saves it crafts from `<file.sav>` (any save with a party, with the window's hooks installed):
 the original's own Bubbles, Escape and Dragon Radar; a use of Bulma from a stack of 5 (one unit, the first fighter
-healed); the Radar on its own (its screen is left to the player with B, and it stays in the bag); a healing item
+healed: the scenarios answer the original's screens with A, as a player does); the Radar on its own (its screen is left to the player with B, and it stays in the bag); a healing item
 (Roshi) on the first fighter with the second left alone; Vegeta on the Allies tab, greyed on the map (A says why);
 `kinds`, every object the HD offers for use from its own bag with the party hurt (each use is taken and its stack is
 consumed, a card's list and the Radar's screen are left to the player, and no use is refused); `dead-input`, the Item

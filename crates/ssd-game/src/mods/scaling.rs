@@ -267,6 +267,7 @@ fn stats_wrapper(ctx: &mut Ctx<'_>) {
     if let Some((difficulty, party)) = active(ctx) {
         let first = u32::from(ctx.peek8(ENEMY_COUNT) & 1 == 0);
         let mut highs = [0_u16; ENEMY_SLOTS as usize];
+        let mut shown = Vec::new();
         for slot in first..ENEMY_SLOTS {
             let base = enemy_record(slot);
             let level = ctx.peek8(base + LEVEL);
@@ -274,6 +275,7 @@ fn stats_wrapper(ctx: &mut Ctx<'_>) {
                 continue;
             }
             let ratio = ratio(party, difficulty, level);
+            let before = (ctx.peek16(base + MAX_HP), peek24(ctx, base + BP));
             for at in [HP, MAX_HP] {
                 let scaled = scale_hp(ctx.peek16(base + at), ratio);
                 ctx.write16(base + at, scaled);
@@ -286,7 +288,21 @@ fn stats_wrapper(ctx: &mut Ctx<'_>) {
             write24(ctx, base + BP, low);
             highs[slot as usize] = high;
             ctx.write8(base + LEVEL, scaled_level(party, difficulty));
+            shown.push(format!(
+                "unit {:#04x} L{level}->{} HP {}->{} BP {}->{}",
+                ctx.peek8(base + UNIT),
+                scaled_level(party, difficulty),
+                before.0,
+                ctx.peek16(base + MAX_HP),
+                before.1,
+                u64::from(peek24(ctx, base + BP)) | u64::from(high) << 24,
+            ));
         }
+        log::info!(
+            "enemy scaling ({difficulty:?}, party level {:.1}): {}",
+            f64::from(party) / 6.0,
+            shown.join("; ")
+        );
         // The high parts: written when the block is live (zero for a BP that fits), and the block made live for the first
         // part that does not. A block that nothing needs is left alone.
         if highs.iter().any(|&high| high != 0) && !live(ctx) {

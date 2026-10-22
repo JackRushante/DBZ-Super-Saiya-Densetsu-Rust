@@ -345,7 +345,8 @@ bit 0 from `01:C535` and answers "can't use", so the list is not filtered. A (Us
 effect runs on screen 21 (the battle's action screen), idle and waiting for one A; that A runs the effect, removes the
 entry (`01:C639`; Yajirobe's count went from 3 to 2) and the battle is back on screen 17. B on the list goes back to
 screen 17. The HD's battle use (`Driver`, the Items screen over a battle) follows the field's Use steps and reads the
-effect's screen as taken.
+effect's screen as taken; from the Use on, the original's screens are the player's (the HD covers the battle's list only on
+its step 1, not on the use-on list of step 5).
 
 **Stale `menu_screen` while the menu opens.** `menu_screen` (`$0D5F`) is not cleared when a menu closes: the Radar's
 exit leaves it at 2, and the next opening shows `$25` = `$0F` with that 2 for a couple of frames before it is set to 0. A

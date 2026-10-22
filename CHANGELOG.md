@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.4 (2026-10-22)
+
+### Fixes
+
+- **Using an object from the HD Item screen** (on the map and in a battle): the HD presses only the original's Use, and
+  whatever the object asks next is yours, on the game's own screens: the fighter it is for (Turtle, ChiChi, Oolong, the
+  healers), a card to change, Porunga's wishes, the lines of a message (Launch, Korin, Guru, Shenron). Before, the HD
+  answered those by itself and covered the game's screens again: in a battle the use stood still for 10 to 25 seconds or
+  never ended.
+
 ## 0.3.3 (2026-10-22)
 
 ### Fixes

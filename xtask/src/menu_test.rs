@@ -27,6 +27,9 @@ use std::path::{Path, PathBuf};
 const WRAM_BASE: u32 = 0x7E_0000;
 /// Frames a choice may run before the test calls it stuck.
 const CHOICE_LIMIT: u32 = 6_000;
+/// The most presses of A [`Harness::answer`] gives a use, and the frames between two of them.
+const ANSWER_PRESSES: u32 = 40;
+const ANSWER_GAP: u32 = 40;
 /// Idle frames after a comparison point, before the states are compared.
 const SETTLE: u32 = 240;
 /// Frames a message runs before it takes A (its text is drawn letter by letter).
@@ -188,6 +191,22 @@ impl Harness {
             self.frame(Joypad::default())?;
         }
         bail!("a choice did not end in {CHOICE_LIMIT} frames (curtain {:?})", self.driver.curtain())
+    }
+
+    /// The player's part after a use: the original's screens (the fighter the use is for, its messages, its effect) are
+    /// answered with A, one press a window apart, while the curtain is lifted and the menu is open. Returns the presses.
+    pub(crate) fn answer(&mut self) -> anyhow::Result<u32> {
+        for presses in 0..ANSWER_PRESSES {
+            if self.driver.curtain() != Curtain::Lifted
+                || self.driver.busy()
+                || self.byte(d::FIELD_STATE) == 0
+            {
+                return Ok(presses);
+            }
+            self.press(a())?;
+            self.frames(ANSWER_GAP)?;
+        }
+        bail!("the use was not over after {ANSWER_PRESSES} presses of A")
     }
 
     /// The HD's key, and the frames of its choice.
@@ -1160,6 +1179,8 @@ fn bag_use(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
     r.check(h.driver.nav().sheet() == Sheet::Choose, "Use or Drop for the stack");
     h.key(Key::Confirm)?;
     h.until_idle()?;
+    // The fighter and the message are the player's, on the original's screens.
+    h.answer()?;
     h.frames(SETTLE)?;
     let (stacks, _) = bag_summary(h);
     r.check(
@@ -1412,6 +1433,8 @@ fn bag_heal(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
     r.check(h.driver.nav().sheet() == Sheet::Choose, "Use or Drop for the stack");
     h.key(Key::Confirm)?;
     h.until_idle()?;
+    // The player takes the first fighter of the original's use-on list (its cursor's row), and its message.
+    h.answer()?;
     h.frames(SETTLE)?;
     let after: Vec<u16> = (0..party as u8).map(|row| member_hp(h, row)).collect();
     r.check(
@@ -1505,6 +1528,10 @@ fn bag_kinds(_h: &mut Harness, r: &mut Report, rom: &[u8], base: &[u8]) -> anyho
         open_items(&mut h)?;
         h.key(Key::Confirm)?;
         let trace = key_traced(&mut h, Key::Confirm)?;
+        // A card's list and the Radar's screen stay the player's; any other use is answered as a player does.
+        if !label.card && id != DRAGON_RADAR_ID {
+            h.answer()?;
+        }
         h.frames(SETTLE)?;
         r.check(
             !trace.contains(&(2, 8)),
@@ -1910,8 +1937,11 @@ fn original_items(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
         h.key(Key::Confirm)?;
         h.key(Key::Confirm)?;
         h.until_idle()?;
-        h.frames(SETTLE)?;
         let kept = name == "D.Radar";
+        if !kept {
+            h.answer()?;
+        }
+        h.frames(SETTLE)?;
         if kept {
             r.check(
                 h.driver.curtain() == Curtain::Lifted,

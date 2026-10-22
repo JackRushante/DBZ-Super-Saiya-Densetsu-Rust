@@ -2337,6 +2337,7 @@ dependencies = [
 name = "ssd-game"
 version = "0.1.0"
 dependencies = [
+ "log",
  "serde",
  "ssd-menus",
  "ssd-mod",

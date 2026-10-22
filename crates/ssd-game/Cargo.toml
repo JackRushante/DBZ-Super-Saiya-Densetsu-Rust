@@ -13,6 +13,8 @@ ssd-menus = { workspace = true }
 # The battery save's slots: the keeper of the bag binds to the save the game runs on.
 ssd-save = { workspace = true }
 thiserror = { workspace = true }
+# A line of the log for each battle the enemy scaling scales (the numbers before and after).
+log = { workspace = true }
 # The recompiled code (`cargo run --release -p xtask -- recompile`), registered as routines.
 ssd-recomp = { workspace = true, optional = true }
 ssd-recomp-gen = { workspace = true, optional = true }

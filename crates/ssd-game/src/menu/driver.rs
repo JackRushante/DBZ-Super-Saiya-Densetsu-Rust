@@ -104,8 +104,6 @@ struct Context {
     flying: bool,
     /// The party is in a town: the command window has no Fly.
     town: bool,
-    /// The party size.
-    party: usize,
 }
 
 /// The state of the HD menu: everything but the labels, which the probe reads alongside it.
@@ -633,7 +631,7 @@ impl State {
         self.notice = None;
         self.mods_alert = None;
         let screen = self.nav.screen();
-        let Context { flying, town, party } = context(probe);
+        let Context { flying, town } = context(probe);
         let action = match screen {
             Screen::Items => {
                 let rows = self.rows(labels);
@@ -726,21 +724,8 @@ impl State {
                     }
                 }
             }
-            Action::Use { stack } => {
-                let object = self.keeper.bag().and_then(|bag| bag.stack(stack)).map(|s| s.object);
-                let card = object.is_some_and(|object| {
-                    labels.objects.get(usize::from(object)).is_some_and(|label| label.card)
-                });
-                let kind = match object {
-                    _ if card => UseKind::Card,
-                    Some(DRAGON_RADAR) => UseKind::Radar,
-                    _ => UseKind::Plain,
-                };
-                let steps = use_steps(stack, kind, party);
-                // A card's choice and the Dragon Radar's screen are the original's: they stay up for the player.
-                let stays = matches!(kind, UseKind::Card | UseKind::Radar);
-                self.start(steps, if stays { Arrival::Lifted } else { Arrival::Closed });
-            }
+            // What the use asks after its Use is the player's, on the original's screens.
+            Action::Use { stack } => self.start(use_steps(stack), Arrival::Lifted),
             Action::Drop { stack } => {
                 let steps = drop_steps(stack);
                 self.start(steps, Arrival::Show(Screen::Items));
@@ -1080,7 +1065,7 @@ impl State {
         if self.nav.screen() == Screen::Mods {
             return Some(screens::mods_screen(&self.mods_view()));
         }
-        let Context { flying, town, .. } = context(probe);
+        let Context { flying, town } = context(probe);
         let mut view: MenuView = probe.view_as(
             self.nav.screen(),
             town,
@@ -1434,12 +1419,38 @@ impl State {
     /// The curtain follows the menu the player opens or closes, when no plan runs.
     fn observe(&mut self, probe: &MenuProbe<'_>) {
         // The Item list of a battle is the HD's Items screen: the screen goes over the battle, and the game gets no
-        // buttons until Back or a use.
-        if self.curtain != Curtain::Up && probe.battle_list() && self.keeper.bound() {
+        // buttons until Back or a use. Only the list itself (step 1): the steps of a use (the fighter it is for, its
+        // message) are the original's, and the player answers them there.
+        if self.curtain != Curtain::Up
+            && probe.battle_list()
+            && probe.step() == Some(1)
+            && self.keeper.bound()
+        {
             self.nav = Nav::default();
             self.nav.enter(Screen::Items);
             self.curtain = Curtain::Up;
             self.battle_items = true;
+            return;
+        }
+        // After a use the player answered on the original's screens: its item list on the map is the HD's again.
+        if self.curtain == Curtain::Lifted
+            && !probe.in_battle()
+            && probe.menu_open()
+            && probe.screen() == Some(2)
+            && probe.step() == Some(1)
+            && !probe.busy()
+            && self.keeper.bound()
+        {
+            self.nav.enter(Screen::Items);
+            self.curtain = Curtain::Up;
+            return;
+        }
+        // The battle took its command back after a use: the battle is the game's.
+        if self.curtain == Curtain::Lifted && probe.battle_command() {
+            self.nav = Nav::default();
+            self.curtain = Curtain::Down;
+            self.battle_cheats = false;
+            self.battle_items = false;
             return;
         }
         self.curtain = match self.curtain {
@@ -1491,10 +1502,10 @@ impl State {
 }
 
 /// What the menu of `probe` has: the command window's rows (the town has no Fly, the flying party has
-/// Land) and the party's size.
+/// Land).
 fn context(probe: &MenuProbe<'_>) -> Context {
     let town = probe.town();
-    Context { flying: probe.flying() && !town, town, party: probe.party_size() }
+    Context { flying: probe.flying() && !town, town }
 }
 
 /// The label of an object, if the labels have it.
@@ -1580,50 +1591,21 @@ const SETTLE_WINDOW: u32 = 120;
 /// that chooses Use or Drop.
 const SETTLE_CHOICE: u32 = 8;
 
-/// The object id of the Dragon Radar: its effect is a screen of its own, which only B leaves, and
-/// which does not consume the object (`01:8C9F`, effect 23 at `01:EBE4`; `docs/re/data/menus.md`).
-const DRAGON_RADAR: u8 = 23;
-
-/// What the original does when an object is used, as far as the plan's presses differ.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UseKind {
-    /// A party list or a message, then the effect.
-    Plain,
-    /// The original's card screen: the curtain lifts there.
-    Card,
-    /// The effect runs at once on its own screen (the Dragon Radar).
-    Radar,
-}
-
-/// The steps of using one unit of the stack `stack`, from the Item list the HD shows: the original's own Use takes
-/// the unit, and the original asks for nothing (it takes no fighter on the map: its effect has its own target). The
-/// curtain lifts on its use window, so the player sees the original's message, effect and answer from there. The
-/// answer is the original's: a refused use (a fighter at full HP, say) leaves the object in the list and the
-/// original's menu on its screen for the player; a use that is taken closes the menu.
-fn use_steps(stack: u32, kind: UseKind, party: usize) -> Vec<Step> {
-    let mut steps = vec![
+/// The steps of using one unit of the stack `stack`, from the Item list the HD shows: the unit is staged first on the
+/// original's list and the original's own Use is pressed. From there the original is the player's: the curtain lifts on
+/// its use window, and whatever the use asks next (the fighter it is for, a card to change, a wish, the lines of a
+/// message, the battle's target) the player answers on the original's own screens. The HD comes back when the original
+/// is on its item list again (see `State::observe`), or goes when its menu closes or the battle takes its command back.
+fn use_steps(stack: u32) -> Vec<Step> {
+    vec![
         Step::Stage { id: stack },
         Step::Press { button: Button::A, until: Until::ItemChoice },
         Step::Lift,
         Step::Wait { until: Until::Ready },
         Step::Pause { frames: SETTLE_CHOICE },
         Step::Row { row: 0, rows: 2 },
-    ];
-    if kind == UseKind::Card {
-        // The card screen is the original's: the player chooses the card there.
-        steps.push(Step::Press { button: Button::A, until: Until::ItemReply });
-        return steps;
-    }
-    steps.push(Step::Press { button: Button::A, until: Until::UseTaken });
-    if kind == UseKind::Radar {
-        // The radar's own screen stays up: its A changes the view and its B leaves it, which is the player's.
-        return steps;
-    }
-    // A party list, if the original ever shows one for the object, takes the first fighter.
-    steps.push(Step::MemberIf { row: 0, rows: party as u8 });
-    steps.push(Step::Press { button: Button::A, until: Until::ItemEffect });
-    steps.push(Step::Answer);
-    steps
+        Step::Press { button: Button::A, until: Until::UseTaken },
+    ]
 }
 
 /// The steps of dropping one unit of the stack `stack`: the unit is staged on the list, its Drop is chosen and
@@ -1856,13 +1838,23 @@ mod tests {
     fn a_use_on_the_battle_list_takes_the_unit_and_gives_the_battle_its_command_back() {
         let (mut driver, mut menu) = battle_with_bag();
         open_battle_list(&mut driver, &mut menu);
-        // Yajirobe, as in the pick test: the staged row is used by the original's own Use, then its message's A.
+        // Yajirobe, as in the pick test: the staged row is used by the original's own Use; the effect's A is the player's.
         driver.key(Key::Down, &menu.wram());
         driver.key(Key::Down, &menu.wram());
         driver.key(Key::Confirm, &menu.wram());
         driver.key(Key::Confirm, &menu.wram());
         battle_settle(&mut driver, &mut menu);
         assert_eq!(driver.last_outcome(), Some(Outcome::Reached));
+        assert_eq!(
+            (driver.curtain(), menu.screen),
+            (Curtain::Lifted, 21),
+            "the effect waits for the player's A on the original's screen"
+        );
+        frame(&mut driver, &mut menu, Joypad { a: true, ..Joypad::default() });
+        frame(&mut driver, &mut menu, Joypad { a: true, ..Joypad::default() });
+        for _ in 0..30 {
+            frame(&mut driver, &mut menu, Joypad::default());
+        }
         assert_eq!((driver.curtain(), menu.screen), (Curtain::Down, 17));
         assert_eq!(driver.bag().map(|bag| bag.units_of(18)), Some(0), "the used unit is gone");
         assert_eq!(driver.bag().map(|bag| bag.units_of(2)), Some(2), "the other stacks stay");
@@ -2076,8 +2068,8 @@ mod tests {
     }
 
     #[test]
-    fn the_use_plan_stages_one_unit_and_lifts_the_curtain_on_the_original_use_window() {
-        let steps = use_steps(7, UseKind::Plain, 2);
+    fn the_use_plan_stages_one_unit_presses_use_and_leaves_the_rest_to_the_player() {
+        let steps = use_steps(7);
         let stages = steps.iter().filter(|s| matches!(s, Step::Stage { id: 7 })).count();
         assert_eq!(stages, 1, "one unit is staged: the use takes one unit, no quantity");
         let choice =
@@ -2087,28 +2079,13 @@ mod tests {
             choice.is_some() && lift.is_some() && choice < lift,
             "the curtain lifts on the Use or Drop window"
         );
-        let closes =
-            steps.iter().filter(|s| matches!(s, Step::Press { until: Until::Closed, .. })).count();
-        // The answer is the original's: no close is pressed by the plan, the menu closes or stays where it is.
-        assert_eq!(closes, 0);
-        assert!(steps.iter().any(|s| matches!(s, Step::Answer)));
-    }
-
-    #[test]
-    fn the_radar_and_the_card_screens_are_left_to_the_player_after_their_use() {
-        let radar = use_steps(9, UseKind::Radar, 2);
         assert!(
-            !radar.iter().any(|s| matches!(s, Step::Press { button: Button::B, .. })),
-            "B is the player's"
+            matches!(steps.last(), Some(Step::Press { button: Button::A, until: Until::UseTaken })),
+            "the Use is the plan's last press"
         );
         assert!(
-            !radar.iter().any(|s| matches!(s, Step::MemberIf { .. })),
-            "the radar asks for no member"
-        );
-        let card = use_steps(10, UseKind::Card, 2);
-        assert!(
-            matches!(card.last(), Some(Step::Press { until: Until::ItemReply, .. })),
-            "the card screen is the original's"
+            !steps.iter().any(|s| matches!(s, Step::MemberIf { .. } | Step::Answer)),
+            "the fighter, the card, the messages are the player's"
         );
     }
 
