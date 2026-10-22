@@ -239,7 +239,7 @@ Steps of `$0D68` (seen from the watch of the variable; handlers in the table at 
 | Step | What |
 |---|---|
 | 0 | opens the windows: the list, the label, the portrait, the Zeni window, the help window |
-| 1 | the list: up/down move `$0D62` (8 rows a page, `$0D63` the page, page edges in the table at `01:8B74`: 8, 16, 24 entries), A chooses the entry (stores `$0D7C` = id, `$0C3F` = row, `$0D63`) and asks Use or Drop (set 4), B leaves |
+| 1 | the list: up/down move `$0D62` (8 rows a page, `$0D63` the page, page edges in the table at `01:8B74`: 8, 16, 24 entries); a move stores the entry under the cursor (`$0D7C` = id from `item_list`, `$0C3F` = row, at `01:8AF4`), and A takes that id as it is (an entry written under the cursor without a move is not read: the HD's stage moves the cursor with Up, or Down and Up); A asks Use or Drop (set 4), B leaves |
 | 2 | the Use/Drop choice (`$0D62` 0 = Use, 1 = Drop). Use: refused with "can't use" if bit 0 is set (step 8), else bit 3 goes to the member list (`01:F202` walks the party from the last member down, `$20` bytes a step) or bit 4 to the card choice (`01:F22F` walks the five cards of the hand, six bytes a step), otherwise the effect runs at once (`$073B` = `$80`). Drop: refused if bit 2 is set; else the "Drop item?" Yes/No (step 6) |
 | 3 | the message after a use, then back to step 1 |
 | 4 | an effect is running (`$073B` bit 7); the screen waits |

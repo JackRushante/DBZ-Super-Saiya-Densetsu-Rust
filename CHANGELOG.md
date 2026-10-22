@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.5 (2026-10-22)
+
+### Fixes
+
+- **Every object used from the HD Item screen was the first one of the bag** (Turtle, for example): the game reads the
+  object under its own cursor when the cursor moves, not when A is pressed. The HD now moves the game's cursor onto the
+  object it chose before Use, with the game's own arrows, on the map and in a battle.
+
 ## 0.3.4 (2026-10-22)
 
 ### Fixes

@@ -1599,6 +1599,7 @@ const SETTLE_CHOICE: u32 = 8;
 fn use_steps(stack: u32) -> Vec<Step> {
     vec![
         Step::Stage { id: stack },
+        Step::ListTop,
         Step::Press { button: Button::A, until: Until::ItemChoice },
         Step::Lift,
         Step::Wait { until: Until::Ready },
@@ -1614,7 +1615,7 @@ fn use_steps(stack: u32) -> Vec<Step> {
 fn drop_steps(stack: u32) -> Vec<Step> {
     vec![
         Step::Stage { id: stack },
-        Step::Row { row: 0, rows: 2 },
+        Step::ListTop,
         Step::Press { button: Button::A, until: Until::ItemChoice },
         Step::Wait { until: Until::Ready },
         Step::Pause { frames: SETTLE_CHOICE },

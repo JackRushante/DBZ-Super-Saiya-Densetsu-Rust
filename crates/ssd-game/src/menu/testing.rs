@@ -120,6 +120,7 @@ impl FakeMenu {
     /// One frame with `pad` held: the presses of the frame, then the frame's timed changes.
     pub(crate) fn tick(&mut self, pad: Joypad) {
         let down = pad.down && !self.last.down;
+        let up = pad.up && !self.last.up;
         let a = pad.a && !self.last.a;
         let b = pad.b && !self.last.b;
         self.last = pad;
@@ -141,14 +142,15 @@ impl FakeMenu {
                 }
             }
             1 | 5 => self.menu(down, a, b),
-            2 if self.battle => self.battle_menu(down, a, b),
+            2 if self.battle => self.battle_menu(Edges { down, up, a, b }),
             _ => {}
         }
     }
 
     /// The presses on a battle: its command window (screen 17: Atk., Item, Run, Menu), and its Item list (screen 2),
     /// where A takes the row under the cursor to its Use or Drop choice (step 2) and B goes back to the command window.
-    fn battle_menu(&mut self, down: bool, a: bool, b: bool) {
+    fn battle_menu(&mut self, edges: Edges) {
+        let Edges { down, up, a, b } = edges;
         match (self.screen, self.step) {
             (17, _) => {
                 if down {
@@ -163,8 +165,12 @@ impl FakeMenu {
                 }
             }
             (2, 1) => {
+                let rows = self.list.len().max(1) as u8;
                 if down {
-                    self.cursor = (self.cursor + 1) % self.list.len().max(1) as u8;
+                    self.cursor = (self.cursor + 1) % rows;
+                }
+                if up {
+                    self.cursor = (self.cursor + rows - 1) % rows;
                 }
                 if b {
                     self.screen = 17;
@@ -303,10 +309,20 @@ impl FakeMenu {
     }
 }
 
+/// The buttons pressed on a frame (down this frame, up the frame before).
+#[derive(Debug, Clone, Copy)]
+struct Edges {
+    down: bool,
+    up: bool,
+    a: bool,
+    b: bool,
+}
+
 /// The joypad of `button` held, for the tests.
 pub(crate) fn held(button: Button) -> Joypad {
     let mut pad = Joypad::default();
     match button {
+        Button::Up => pad.up = true,
         Button::Down => pad.down = true,
         Button::A => pad.a = true,
         Button::B => pad.b = true,

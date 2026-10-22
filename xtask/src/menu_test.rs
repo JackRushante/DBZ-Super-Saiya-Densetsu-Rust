@@ -1201,6 +1201,34 @@ fn bag_use(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Use the second stack of the bag (Bulma, under a Roshi): the original uses Bulma, not the first entry of its list. The
+/// original reads the entry under its cursor when the cursor moves, so the plan moves it onto the staged entry.
+fn bag_use_second(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+    let hp_before = first_member_hp(h);
+    open_items(h)?;
+    h.key(Key::Down)?;
+    h.key(Key::Confirm)?;
+    h.key(Key::Confirm)?;
+    h.until_idle()?;
+    r.check(
+        h.byte(d::MENU_ITEM_ID) == 2,
+        &format!("the original uses Bulma: object {}", h.byte(d::MENU_ITEM_ID)),
+    );
+    h.answer()?;
+    h.frames(SETTLE)?;
+    let hp_after = first_member_hp(h);
+    r.check(
+        hp_after == hp_before + 25,
+        &format!("Bulma heals 25, not Roshi's 50: {hp_before} to {hp_after}"),
+    );
+    let (stacks, _) = bag_summary(h);
+    r.check(
+        stacks.contains(&(1, 1)) && !stacks.iter().any(|&(object, _)| object == 2),
+        &format!("Bulma leaves the bag and Roshi stays: {stacks:?}"),
+    );
+    Ok(())
+}
+
 /// A pickup while 21 stacks are held lands in the bag: the original's list keeps its 21 entries and
 /// the 22nd stack is in the bag.
 fn bag_pickup(h: &mut Harness, r: &mut Report, rom: &[u8]) -> anyhow::Result<()> {
@@ -1755,9 +1783,10 @@ fn pictures_check(rom: &[u8], out: &mut String) -> anyhow::Result<bool> {
 /// The bag's scenarios from the base save: each builds its own crafted start.
 type BagScenario = fn(&mut Harness, &mut Report, &[u8], &[u8]) -> anyhow::Result<()>;
 
-const BAG_SCENARIOS: [(&str, BagScenario); 13] = [
+const BAG_SCENARIOS: [(&str, BagScenario); 14] = [
     ("original-items", |h, r, _, _| original_items(h, r)),
     ("use-bulma", |h, r, _, _| bag_use(h, r)),
+    ("use-second", |h, r, _, _| bag_use_second(h, r)),
     ("radar", |h, r, _, _| bag_radar(h, r)),
     ("heal", |h, r, _, _| bag_heal(h, r)),
     ("ally", |h, r, _, _| bag_ally(h, r)),
@@ -1827,6 +1856,7 @@ fn bag_scenario(
 ) -> anyhow::Result<()> {
     let ids: Vec<u8> = match name {
         "use-bulma" => vec![2, 2, 2, 2, 2],
+        "use-second" => vec![1, 2],
         "ally" => vec![19],
         "heal" => vec![1, 1, 1],
         "radar" => vec![23],
@@ -1837,7 +1867,7 @@ fn bag_scenario(
         "drop" => vec![2, 2, 16],
         _ => Vec::new(),
     };
-    let hp = (name == "use-bulma").then_some(30);
+    let hp = matches!(name, "use-bulma" | "use-second").then_some(30);
     let starts = bag_start(rom, base, name, &ids, hp)?;
     let sidecar = if name == "bag-full" { full_sidecar(rom, base)? } else { Sidecar::empty() };
     let mut h = bag_harness(rom, &starts, &sidecar)?;

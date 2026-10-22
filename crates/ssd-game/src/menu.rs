@@ -184,6 +184,12 @@ impl<'a> MenuProbe<'a> {
         self.byte(d::MAP_ENTRY_VALUE)
     }
 
+    /// The page of the item list the cursor is on (`map_entry_0d63`; eight rows a page).
+    #[must_use]
+    pub fn page(&self) -> Option<u8> {
+        self.byte(d::MAP_ENTRY_0D63)
+    }
+
     /// Whether the game is in the field or in a town (`game_mode` is the field's or the town's): a
     /// save is loaded, or a new game is played, and the bag may bind to it.
     #[must_use]

@@ -12,9 +12,13 @@
 use super::MenuProbe;
 use ssd_oracle::Joypad;
 
+/// The rows of a page of the original's item list (`map_entry_value` 0 to 7; `map_entry_0d63` is the page).
+const LIST_ROWS: u8 = 8;
+
 /// The buttons a plan presses: the menus read these, and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
+    Up,
     Down,
     A,
     B,
@@ -77,6 +81,11 @@ pub enum Step {
     /// Presses Down until the cursor is on `row` of a list of `rows` rows. Down wraps around, as the
     /// menu's own lists do, so pressing Down alone reaches every row.
     Row { row: u8, rows: u8 },
+    /// Moves the cursor of the original's item list to its first entry (row 0 of page 0) with the original's own Up,
+    /// after a stage put the chosen stack there. The original reads the id of the entry under its cursor
+    /// (`menu_item_id`) when the cursor moves, not when A is pressed, so the cursor moves even when it is on the first
+    /// entry already (Down, then Up), unless the list holds one entry.
+    ListTop,
     /// Presses `button`, then waits for `until`.
     Press { button: Button, until: Until },
     /// Waits for `until` without pressing anything.
@@ -169,13 +178,23 @@ pub struct Player {
     retries: u8,
     /// Frames the answer step has waited for the original's answer.
     answering: u32,
+    /// The list's cursor has moved during the current [`Step::ListTop`].
+    moved: bool,
 }
 
 impl Player {
     /// A plan of `steps`, not started yet.
     #[must_use]
     pub fn new(steps: Vec<Step>) -> Self {
-        Self { steps, index: 0, phase: Phase::Start, reason: "", retries: 0, answering: 0 }
+        Self {
+            steps,
+            index: 0,
+            phase: Phase::Start,
+            reason: "",
+            retries: 0,
+            answering: 0,
+            moved: false,
+        }
     }
 
     /// The next frame of the plan, given the menu state after the frame before it.
@@ -241,6 +260,23 @@ impl Player {
                         self.steps.splice(self.index..=self.index, replaced);
                         self.phase = Phase::Ready { waited: 0 };
                     }
+                    Step::ListTop => match (probe.cursor(), probe.page()) {
+                        (Some(0), Some(0)) if self.moved || probe.item_count() <= 1 => {
+                            self.advance();
+                        }
+                        (Some(0), Some(0)) => {
+                            self.moved = true;
+                            let until = Until::Cursor(1);
+                            self.phase = Phase::Holding { button: Button::Down, until, held: 0 };
+                        }
+                        (Some(row), Some(_)) => {
+                            self.moved = true;
+                            // Up from a page's first row goes to the last row of the page before.
+                            let until = Until::Cursor(row.checked_sub(1).unwrap_or(LIST_ROWS - 1));
+                            self.phase = Phase::Holding { button: Button::Up, until, held: 0 };
+                        }
+                        _ => self.abort("the list has no cursor"),
+                    },
                     Step::Row { row, rows } => match probe.cursor() {
                         Some(cursor) if cursor == row => self.advance(),
                         // The cursor moves down one row per press, and the list wraps.
@@ -288,7 +324,7 @@ impl Player {
                 Phase::Settle { until, waited } => {
                     if satisfied(probe, until) {
                         // A row step is not done until its cursor is on the row: check again.
-                        if matches!(self.steps[self.index], Step::Row { .. }) {
+                        if matches!(self.steps[self.index], Step::Row { .. } | Step::ListTop) {
                             self.phase = Phase::Ready { waited: 0 };
                         } else {
                             self.advance();
@@ -305,6 +341,11 @@ impl Player {
                             } if self.retries < PRESS_RETRIES && again == until => {
                                 self.retries += 1;
                                 self.phase = Phase::Holding { button, until, held: 0 };
+                            }
+                            // The list's cursor press is repeated the same way.
+                            Step::ListTop if self.retries < PRESS_RETRIES => {
+                                self.retries += 1;
+                                self.phase = Phase::Ready { waited: 0 };
                             }
                             // The original does not take the use (a refusal, such as a fighter at full KI): its
                             // menu stays open on its use window, for the player.
@@ -354,6 +395,7 @@ impl Player {
     fn advance(&mut self) {
         self.index += 1;
         self.retries = 0;
+        self.moved = false;
         self.phase = Phase::Ready { waited: 0 };
     }
 
@@ -365,7 +407,10 @@ impl Player {
 
     /// Whether the step at `index` presses a button, and so needs the menu ready first.
     fn needs_ready(&self) -> bool {
-        matches!(self.steps.get(self.index), Some(Step::Row { .. } | Step::Press { .. }))
+        matches!(
+            self.steps.get(self.index),
+            Some(Step::Row { .. } | Step::ListTop | Step::Press { .. })
+        )
     }
 }
 
@@ -434,6 +479,7 @@ fn satisfied(probe: &MenuProbe<'_>, until: Until) -> bool {
 fn pad(button: Option<Button>) -> Joypad {
     let mut joypad = Joypad::default();
     match button {
+        Some(Button::Up) => joypad.up = true,
         Some(Button::Down) => joypad.down = true,
         Some(Button::A) => joypad.a = true,
         Some(Button::B) => joypad.b = true,
