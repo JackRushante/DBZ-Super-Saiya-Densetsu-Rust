@@ -190,6 +190,13 @@ impl<'a> MenuProbe<'a> {
         self.byte(d::MAP_ENTRY_0D63)
     }
 
+    /// The encounter group of the battle (`encounter_group_index`), 0 when the snapshot does not hold it: the
+    /// attribute of an object on the item list may depend on it (`01:C535`, the keeper's `attribute_now`).
+    #[must_use]
+    pub fn encounter_group(&self) -> u8 {
+        self.byte(d::ENCOUNTER_GROUP_INDEX).unwrap_or(0)
+    }
+
     /// Whether the game is in the field or in a town (`game_mode` is the field's or the town's): a
     /// save is loaded, or a new game is played, and the bag may bind to it.
     #[must_use]

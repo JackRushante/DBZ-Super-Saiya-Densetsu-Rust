@@ -11,7 +11,7 @@
 //! A use or a drop of the bag stages its stack in the original's list and then presses the original's
 //! own keys, one unit at a time, so the original takes the unit and the bag follows the list.
 
-use super::keeper::{BIND_TAG, Keeper, SPAWN_TAG, good_checksum};
+use super::keeper::{BIND_TAG, Keeper, SPAWN_TAG, good_checksum, label_now};
 use super::presses::{Button, Next, Outcome, Player, Step, Until};
 use super::{MenuProbe, PORUNGA, SAVE_DONE_STEP, SAVE_LIST_STEP, SAVE_SCREEN};
 use crate::cheats::{CHEATS_TAG, block_events, frame_events, hand_events, settings_events};
@@ -701,7 +701,7 @@ impl State {
         let Context { flying, town } = context(probe);
         let action = match screen {
             Screen::Items => {
-                let rows = self.rows(labels);
+                let rows = self.rows(labels, probe.encounter_group());
                 self.nav.key_bag(key, &rows)
             }
             Screen::Cheats if self.nav.spawner().is_some() => {
@@ -1141,8 +1141,8 @@ impl State {
             self.nav.page(),
         )?;
         if view.screen == Screen::Items {
-            view.bag = self.bag_view(labels);
-            view.selected = self.selected(labels);
+            view.bag = self.bag_view(labels, probe.encounter_group());
+            view.selected = self.selected(labels, probe.encounter_group());
         }
         let unbound = view.screen == Screen::Items && view.bag.is_none();
         let mut list = screens::scene(&view);
@@ -1241,14 +1241,16 @@ impl State {
         !self.battle_items && droppable(label, key)
     }
 
-    /// The bag's rows of the tab the Item screen shows, as the navigation reads them.
-    fn rows(&self, labels: &Labels) -> Vec<ItemRow> {
+    /// The bag's rows of the tab the Item screen shows, as the navigation reads them; `group` is the encounter group
+    /// of the battle, which an object's attribute may depend on ([`label_now`]).
+    fn rows(&self, labels: &Labels, group: u8) -> Vec<ItemRow> {
         let Some(bag) = self.keeper.bag() else { return Vec::new() };
         bag.stacks()
             .iter()
             .filter(|stack| self.nav.tab().shows(ally(labels, stack.object)))
             .map(|stack| {
-                let label = label(labels, stack.object);
+                let label = label_now(labels, stack.object, group);
+                let label = label.as_deref();
                 ItemRow {
                     id: stack.id,
                     usable: self.usable(stack.object, label),
@@ -1258,8 +1260,8 @@ impl State {
             .collect()
     }
 
-    /// The bag as the Item screen shows it, once the bag is bound.
-    fn bag_view(&self, labels: &Labels) -> Option<BagView> {
+    /// The bag as the Item screen shows it, once the bag is bound; `group` as for [`Self::rows`].
+    fn bag_view(&self, labels: &Labels, group: u8) -> Option<BagView> {
         let bag = self.keeper.bag()?;
         let tab = self.nav.tab();
         let stacks: Vec<StackView> = bag
@@ -1267,7 +1269,8 @@ impl State {
             .iter()
             .filter(|stack| tab.shows(ally(labels, stack.object)))
             .map(|stack| {
-                let label = label(labels, stack.object);
+                let label = label_now(labels, stack.object, group);
+                let label = label.as_deref();
                 StackView {
                     id: stack.id,
                     object: stack.object,
@@ -1295,7 +1298,7 @@ impl State {
     }
 
     /// The object under the Item screen's cursor: its picture, price and help.
-    fn selected(&self, labels: &Labels) -> Option<Selected> {
+    fn selected(&self, labels: &Labels, group: u8) -> Option<Selected> {
         let bag = self.keeper.bag()?;
         let tab = self.nav.tab();
         let stack = bag
@@ -1303,7 +1306,7 @@ impl State {
             .iter()
             .filter(|stack| tab.shows(ally(labels, stack.object)))
             .nth(self.nav.bag_cursor())?;
-        let label = label(labels, stack.object)?;
+        let label = label_now(labels, stack.object, group)?;
         Some(Selected {
             object: stack.object,
             name: label.name.clone(),
@@ -1961,6 +1964,85 @@ mod tests {
         assert_eq!(driver.notice(), Some("This cannot be used or dropped here."));
         assert!(!driver.busy(), "nothing is staged for a refused object");
         assert_eq!(menu.step, 1, "the original's list is not touched");
+    }
+
+    /// The battle labels with the story's Gohan (26) as the catalogue has him: attribute `$25`, a story object that
+    /// cannot be dropped.
+    fn gohan_labels() -> Labels {
+        let mut labels = battle_labels();
+        labels.objects[26] = ObjectLabel {
+            name: "Gohan".to_owned(),
+            attribute: 0x25,
+            story: true,
+            fixed: true,
+            ..ObjectLabel::default()
+        };
+        labels
+    }
+
+    /// A driver bound to a bag of Gohan and a Bulma, and the fake menu in a battle of the encounter group `group`, on
+    /// its command window, with the battle's Item list open under the HD's Items screen. The HD cursor is on Gohan.
+    fn gohan_on_the_battle_list(group: u8) -> (Driver, FakeMenu) {
+        let mut bag = Bag::new(Rules::default());
+        bag.add(26, 0, ssd_menus::bag::Class::of(26, true)).unwrap();
+        bag.add(2, 0, ssd_menus::bag::Class::of(2, false)).unwrap();
+        let mut driver = Driver::new(gohan_labels());
+        let mut menu = FakeMenu::default();
+        menu.battle = true;
+        menu.field = 2;
+        menu.screen = 17;
+        menu.group = group;
+        let events = driver.replay_event(BIND_TAG, &bag.to_bytes(), &menu.wram()).unwrap();
+        menu.absorb(&events);
+        open_battle_list(&mut driver, &mut menu);
+        let stacks = driver.state.bag_view(&gohan_labels(), group).unwrap().stacks;
+        let row = stacks.iter().position(|stack| stack.object == 26).expect("Gohan is listed");
+        for _ in 0..row {
+            driver.key(Key::Down, &menu.wram());
+        }
+        (driver, menu)
+    }
+
+    /// Whether the Items screen shows Gohan as usable in a battle of the encounter group `group`.
+    fn gohan_shown_usable(driver: &Driver, group: u8) -> bool {
+        let view = driver.state.bag_view(&gohan_labels(), group).unwrap();
+        view.stacks.iter().find(|stack| stack.object == 26).unwrap().usable
+    }
+
+    #[test]
+    fn gohan_is_usable_on_the_list_of_the_first_raditz_battle() {
+        let (mut driver, mut menu) = gohan_on_the_battle_list(5);
+        assert!(gohan_shown_usable(&driver, 5), "01:C535 gives him INT in encounter group 5");
+        assert!(
+            driver.state.selected(&gohan_labels(), 5).is_some_and(|selected| selected.battle),
+            "his box shows the battle arrow"
+        );
+        driver.key(Key::Confirm, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        assert_eq!(driver.notice(), None, "the use is not refused");
+        assert!(driver.busy(), "the use runs as a plan");
+        battle_settle(&mut driver, &mut menu);
+        assert_eq!(driver.last_outcome(), Some(Outcome::Reached));
+        assert_eq!(
+            (driver.curtain(), menu.screen),
+            (Curtain::Lifted, 21),
+            "the original's own Use took him: its effect waits on the battle's action screen"
+        );
+    }
+
+    #[test]
+    fn gohan_stays_greyed_out_on_the_list_of_another_battle() {
+        for group in [0, 4, 6] {
+            let (mut driver, menu) = gohan_on_the_battle_list(group);
+            assert!(!gohan_shown_usable(&driver, group), "group {group}: a story object");
+            driver.key(Key::Confirm, &menu.wram());
+            assert_eq!(
+                driver.notice(),
+                Some("This cannot be used or dropped here."),
+                "group {group}"
+            );
+            assert!(!driver.busy(), "group {group}: nothing is staged");
+        }
     }
 
     #[test]
