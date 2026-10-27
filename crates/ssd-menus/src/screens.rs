@@ -1122,13 +1122,9 @@ fn choices(
     middle: f32,
     on_colour: Color,
 ) {
-    let widths: Vec<f32> = texts
-        .iter()
-        .map(|text| (SMALL_TEXT * text.chars().count() as f32 + CHOICE_PADDING).max(CHOICE_MIN))
-        .collect();
-    let total = widths.iter().sum::<f32>() + LINE_GAP * widths.len().saturating_sub(1) as f32;
-    let mut x = right - total;
-    for (index, (text, width)) in texts.iter().zip(widths).enumerate() {
+    let mut x = right - choices_width(texts);
+    for (index, text) in texts.iter().enumerate() {
+        let width = choice_width(text);
         let rect = Rect::new(x, middle - CHOICE_HEIGHT / 2.0, width, CHOICE_HEIGHT);
         let on = index == chosen;
         if on {
@@ -1139,6 +1135,17 @@ fn choices(
         list.text(rect.x + width / 2.0, middle, text, SMALL_TEXT, colour, Align::Centre);
         x += width + LINE_GAP;
     }
+}
+
+/// The width of one choice of [`choices`].
+fn choice_width(text: &str) -> f32 {
+    (SMALL_TEXT * text.chars().count() as f32 + CHOICE_PADDING).max(CHOICE_MIN)
+}
+
+/// The width of the choices `texts` side by side ([`choices`]).
+fn choices_width(texts: &[String]) -> f32 {
+    texts.iter().map(|text| choice_width(text)).sum::<f32>()
+        + LINE_GAP * texts.len().saturating_sub(1) as f32
 }
 
 /// A cycler: an arrow to the left, the value between two 4 px gaps, and an arrow to the right, the value
@@ -1656,6 +1663,19 @@ pub(crate) fn option_row_list(
                 choices(list, &texts, chosen, right, middle, palette::BLACK);
             }
             Kind::Cycle(_) => cycler(list, row.text(chosen), right, middle, OPT_CYCLER_VALUE),
+            Kind::Languages => {
+                let names: Vec<String> = crate::options::offered_languages()
+                    .into_iter()
+                    .map(|locale| locale.name)
+                    .collect();
+                let room = right - (left + 26.0 + text_width(row.label, OPT_LABEL_TEXT) + 16.0);
+                if choices_width(&names) <= room {
+                    choices(list, &names, chosen, right, middle, palette::BLACK);
+                } else {
+                    let name = names.get(chosen).map_or("", String::as_str);
+                    cycler(list, name, right, middle, OPT_CYCLER_VALUE);
+                }
+            }
 
             Kind::Slider { steps } => slider(list, chosen, steps, right, middle),
 

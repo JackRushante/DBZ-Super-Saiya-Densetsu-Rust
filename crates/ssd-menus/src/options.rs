@@ -9,6 +9,7 @@
 //! value that lives elsewhere (the cheat block, the original's text speed), so there is one truth.
 
 use crate::cheats::{Cheats, Setting};
+use crate::language::{Language, Locale};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -36,8 +37,13 @@ pub enum Category {
 #[cfg(test)]
 pub(crate) static GAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The tests that set the languages offered hold this lock.
+#[cfg(test)]
+pub(crate) static LANGUAGES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 static GAME_PAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static LANGUAGE_ROW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The translations the player has, besides English, sorted by code (see [`offer_languages`]).
+static LANGUAGES: std::sync::Mutex<Vec<Locale>> = std::sync::Mutex::new(Vec::new());
 static GAME_INFO: std::sync::Mutex<(String, String)> =
     std::sync::Mutex::new((String::new(), String::new()));
 
@@ -47,16 +53,36 @@ pub fn show_game_page(on: bool) {
     GAME_PAGE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Shows (or hides) the Accessibility page's Language row: the app turns it on where the player has a translation
-/// (its files in the data folder). Off by default, so without one the page is as it was.
-pub fn show_language_row(on: bool) {
-    LANGUAGE_ROW.store(on, std::sync::atomic::Ordering::Relaxed);
+/// Offers the translations the player has (their files in the data folder): the app sets them. With one or more,
+/// the Accessibility page shows the Language row and the first launch asks, both offering English and these sorted
+/// by code; with none (the default) the page is as it was and nothing is asked. English and a code given twice are
+/// left out.
+pub fn offer_languages(mut locales: Vec<Locale>) {
+    locales.retain(|locale| !locale.language.is_english());
+    locales.sort_by_key(|locale| locale.language);
+    locales.dedup_by(|a, b| a.language == b.language);
+    *LANGUAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = locales;
+}
+
+/// The languages offered: English first, then the translations the player has, sorted by code.
+#[must_use]
+pub fn offered_languages() -> Vec<Locale> {
+    let locales = LANGUAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::iter::once(Locale::english()).chain(locales.iter().cloned()).collect()
 }
 
 /// Whether the player has a translation: the Language row shows, and the language can be chosen.
 #[must_use]
 pub fn language_row_shown() -> bool {
-    LANGUAGE_ROW.load(std::sync::atomic::Ordering::Relaxed)
+    !LANGUAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
+}
+
+/// The choice of the Language row that shows the stored language among `offered`: English (the first) when none is
+/// stored or the stored one is not offered (its files are gone).
+fn language_choice(values: &Values, offered: &[Locale]) -> usize {
+    Language::from_values(values)
+        .and_then(|language| offered.iter().position(|locale| locale.language == language))
+        .unwrap_or(0)
 }
 
 /// The texts of the Game page's two read-only rows: the current mode, and the HD pack's state.
@@ -189,6 +215,9 @@ impl Category {
 pub enum Kind {
     /// The options side by side, the current one highlighted; Left and Right move it, wrapping.
     Choice(&'static [&'static str]),
+    /// The languages offered ([`offered_languages`]), by their names: side by side as a [`Kind::Choice`] where
+    /// they fit, else as a [`Kind::Cycle`].
+    Languages,
     /// An arrow, the value and an arrow; Left and Right move it, wrapping.
     Cycle(&'static [&'static str]),
     /// A button that opens something (`A`); the text is on the button.
@@ -223,6 +252,9 @@ pub enum Opens {
 pub enum Source {
     /// A small stored number (the index of the choice), under the row's key, in the category's file.
     Stored { default: u8 },
+    /// The language of the text: the choices are the languages offered ([`offered_languages`]), the value stored
+    /// is the language's code (`Language::store`), English by default.
+    Language,
     /// The original's text speed (`$01D0`, five speeds): the same setting as the Menu's Text entry.
     TextSpeed,
     /// The encounter rate of the Cheats: Off is "random battles off", the rest the rate x1/4 to x4.
@@ -302,9 +334,10 @@ impl RowDef {
 
     /// The number of values the row has.
     #[must_use]
-    pub const fn count(&self) -> usize {
+    pub fn count(&self) -> usize {
         match self.kind {
             Kind::Choice(labels) | Kind::Cycle(labels) => labels.len(),
+            Kind::Languages => offered_languages().len(),
             Kind::Slider { steps } => steps as usize,
             Kind::Button(_) | Kind::Info | Kind::Note(_) => 1,
             Kind::Key => 256,
@@ -317,7 +350,8 @@ impl RowDef {
         match self.kind {
             Kind::Choice(labels) | Kind::Cycle(labels) => labels.get(index).copied().unwrap_or("?"),
             Kind::Button(text) | Kind::Note(text) => text,
-            Kind::Slider { .. } | Kind::Info | Kind::Key => "",
+            // The names are the player's files' (see `offered_languages`).
+            Kind::Languages | Kind::Slider { .. } | Kind::Info | Kind::Key => "",
         }
     }
 
@@ -331,6 +365,7 @@ impl RowDef {
                 .get(self.key)
                 .and_then(|value| usize::try_from(value).ok())
                 .unwrap_or(usize::from(default)),
+            Source::Language => language_choice(values, &offered_languages()),
             Source::TextSpeed => usize::from(TEXT_SPEED_LAST - text_speed.min(TEXT_SPEED_LAST)),
             Source::Encounters => {
                 if cheats.random_battles_off() {
@@ -362,7 +397,9 @@ impl RowDef {
             Source::TextSpeed => usize::from(TEXT_SPEED_LAST - TEXT_SPEED_DEFAULT),
             Source::Encounters => ENCOUNTERS_NEUTRAL,
             Source::Preset => difficulty::NORMAL,
-            Source::View(_) | Source::Opens(_) | Source::Info | Source::None => 0,
+            Source::Language | Source::View(_) | Source::Opens(_) | Source::Info | Source::None => {
+                0
+            }
         }
     }
 
@@ -372,6 +409,11 @@ impl RowDef {
         match self.source {
             Source::Stored { .. } | Source::Key { .. } => {
                 values.set(self.key, index as i64);
+                Effect::Stored
+            }
+            Source::Language => {
+                let offered = offered_languages();
+                offered.get(index).map(|locale| locale.language).unwrap_or_default().store(values);
                 Effect::Stored
             }
             Source::TextSpeed => Effect::TextSpeed(
@@ -418,7 +460,7 @@ impl RowDef {
         match self.source {
             Source::Opens(_) | Source::Info | Source::View(_) | Source::None => Effect::None,
             // A stored row forgets its number: the file only holds what differs from the defaults.
-            Source::Stored { .. } | Source::Key { .. } => {
+            Source::Stored { .. } | Source::Key { .. } | Source::Language => {
                 values.remove(self.key);
                 Effect::Stored
             }
@@ -823,6 +865,51 @@ mod tests {
             Values::new(),
             "no keys: all defaults"
         );
+    }
+
+    #[test]
+    fn the_language_row_offers_english_then_the_translations_sorted_by_code_and_stores_the_code() {
+        let _guard = LANGUAGES_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let code = |code| Language::from_code(code).unwrap();
+        let row = accessibility::ROWS_WITH_LANGUAGE
+            .iter()
+            .find(|row| row.key == Language::KEY)
+            .expect("the Language row");
+        offer_languages(Vec::new());
+        assert!(!language_row_shown());
+        assert_eq!(offered_languages(), [Locale::english()], "English alone: nothing to choose");
+        offer_languages(vec![
+            Locale { language: code("zz"), name: "Zed".to_owned() },
+            Locale::unnamed(Language::ZH_HK),
+            Locale::english(),
+            Locale { language: code("xx"), name: "Made up".to_owned() },
+            Locale { language: code("zz"), name: "Again".to_owned() },
+        ]);
+        assert!(language_row_shown());
+        let offered = offered_languages();
+        let codes: Vec<&str> = offered.iter().map(|locale| locale.language.code()).collect();
+        assert_eq!(codes, ["en", "xx", "zh-hk", "zz"], "English, then by code, each once");
+        let names: Vec<&str> = offered.iter().map(|locale| locale.name.as_str()).collect();
+        assert_eq!(names, ["English", "Made up", "繁體中文（香港）", "Zed"]);
+        assert_eq!(row.count(), 4);
+        let (mut values, mut cheats) = (Values::new(), Cheats::neutral());
+        assert_eq!(row.index(&values, &cheats, 0), 0, "nothing stored: English");
+        assert_eq!(row.set(&mut values, &mut cheats, 1), Effect::Stored);
+        assert_eq!(values.word(Language::KEY), Some("xx"), "the code, not the row's index");
+        assert_eq!(row.step(&mut values, &mut cheats, 0, 1), Effect::Stored);
+        assert_eq!(Language::from_values(&values), Some(Language::ZH_HK));
+        assert_eq!(row.index(&values, &cheats, 0), 2);
+        values.set(Language::KEY, 1);
+        assert_eq!(
+            row.index(&values, &cheats, 0),
+            2,
+            "an index of the first versions is Hong Kong"
+        );
+        offer_languages(vec![Locale { language: code("xx"), name: "Made up".to_owned() }]);
+        assert_eq!(row.index(&values, &cheats, 0), 0, "Hong Kong is not offered: English shows");
+        assert_eq!(row.reset(&mut values, &mut cheats), Effect::Stored);
+        assert_eq!(Language::from_values(&values), None, "reset: asked again");
+        offer_languages(Vec::new());
     }
 
     #[test]

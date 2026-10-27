@@ -198,8 +198,8 @@ enum LangArg {
 impl From<LangArg> for ssd_menus::Language {
     fn from(lang: LangArg) -> Self {
         match lang {
-            LangArg::En => Self::English,
-            LangArg::ZhHk => Self::ZhHk,
+            LangArg::En => Self::ENGLISH,
+            LangArg::ZhHk => Self::ZH_HK,
         }
     }
 }

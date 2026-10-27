@@ -12,6 +12,8 @@ use crate::{paths, setup_ui};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::gamepad::{Button, Gamepad};
 use sdl3::keyboard::Scancode;
+#[cfg(test)]
+use ssd_menus::language::Locale;
 use ssd_menus::options::Values;
 use ssd_menus::setup::{self, Command, Page, Setup};
 use ssd_menus::{Key, Language};
@@ -155,12 +157,14 @@ mod tests {
 
     #[test]
     fn a_tap_on_a_button_chooses_its_language_wherever_the_page_is_fitted() {
-        let page = Setup::new(Page::Language);
+        let made_up = Locale::unnamed(Language::from_code("xx").unwrap());
+        let languages = vec![Locale::english(), made_up, Locale::unnamed(Language::ZH_HK)];
+        let page = Setup::with_languages(Page::Language, languages.clone());
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1864.0, 860.0));
         let fit = Fit::sized(screen, setup::WIDTH, setup::HEIGHT);
-        for (button, language) in page.buttons().iter().zip(Language::ALL) {
+        for (button, locale) in page.buttons().iter().zip(&languages) {
             let centre = fit.rect(button.rect).center();
-            assert_eq!(tapped(&page, screen, centre), Some(Command::Language(language)));
+            assert_eq!(tapped(&page, screen, centre), Some(Command::Language(locale.language)));
         }
         assert_eq!(tapped(&page, screen, egui::pos2(2.0, 2.0)), None, "the ground chooses nothing");
     }
@@ -181,15 +185,15 @@ mod tests {
         crate::lang::configure(None);
         paths::set_persistent(true);
         let mut values = Values::new();
-        ssd_menus::options::show_language_row(false);
+        ssd_menus::options::offer_languages(Vec::new());
         assert!(!needed(true, &values), "no translation: never asked");
-        ssd_menus::options::show_language_row(true);
+        ssd_menus::options::offer_languages(vec![Locale::unnamed(Language::ZH_HK)]);
         assert!(needed(true, &values));
         assert!(!needed(false, &values), "Classic never asks");
-        Language::English.store(&mut values);
+        Language::ENGLISH.store(&mut values);
         assert!(!needed(true, &values), "asked once");
         paths::set_persistent(false);
         assert!(!needed(true, &Values::new()), "a run that does not persist never asks");
-        ssd_menus::options::show_language_row(false);
+        ssd_menus::options::offer_languages(Vec::new());
     }
 }

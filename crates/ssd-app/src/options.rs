@@ -5,6 +5,7 @@
 
 use crate::paths;
 use anyhow::Context;
+use ssd_menus::Language;
 use ssd_menus::options::{SlotOptions, Values};
 use std::path::{Path, PathBuf};
 
@@ -66,6 +67,8 @@ pub fn read_slots() -> anyhow::Result<SlotOptions> {
 }
 
 /// The options kept for this PC: none when the file does not exist yet, and none in a run that does not persist.
+/// A language stored as the index of the first versions is turned into its code, and the file written so, once
+/// (`Language::migrate`).
 ///
 /// # Errors
 ///
@@ -74,7 +77,14 @@ pub fn read_settings() -> anyhow::Result<Values> {
     if !paths::persists() {
         return Ok(Values::new());
     }
-    Ok(read_or_aside(&settings_path(), Values::from_text)?.unwrap_or_default())
+    let mut values = read_or_aside(&settings_path(), Values::from_text)?.unwrap_or_default();
+    if Language::migrate(&mut values) {
+        log::info!("the language's choice is now kept as its code ({})", Language::KEY);
+        if let Err(error) = write_settings(&values) {
+            log::warn!("the language's choice was not written as its code: {error:#}");
+        }
+    }
+    Ok(values)
 }
 
 /// Writes the slot file; a run that does not persist writes nothing.
@@ -119,6 +129,34 @@ mod tests {
         assert_eq!(read_slots().unwrap(), SlotOptions::empty());
         assert!(slots_path().with_file_name("ssd.options.bad").exists());
         assert!(!slots_path().exists(), "the damaged file was moved");
+        paths::set_persistent(false);
+        unsafe { std::env::remove_var("SSD_DATA_DIR") };
+    }
+
+    #[test]
+    fn a_language_stored_as_an_index_is_read_as_its_code_and_the_file_rewritten_once() {
+        let _guard = paths::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: serialised by ENV_LOCK.
+        unsafe { std::env::set_var("SSD_DATA_DIR", dir.path()) };
+        paths::set_persistent(true);
+        // The file of a player who chose Hong Kong before the language was kept by its code.
+        std::fs::create_dir_all(paths::saves_dir()).unwrap();
+        std::fs::write(settings_path(), "ssd-settings 1\naccess.language=1\nvideo.scale=3\n")
+            .unwrap();
+        let values = read_settings().unwrap();
+        assert_eq!(Language::from_values(&values), Some(Language::ZH_HK));
+        let written = std::fs::read_to_string(settings_path()).unwrap();
+        assert_eq!(written, "ssd-settings 1\nvideo.scale=3\naccess.language=zh-hk\n");
+        assert_eq!(read_settings().unwrap(), values, "read again: the same");
+        let modified = std::fs::metadata(settings_path()).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        read_settings().unwrap();
+        assert_eq!(
+            std::fs::metadata(settings_path()).unwrap().modified().unwrap(),
+            modified,
+            "migrated once: not written again"
+        );
         paths::set_persistent(false);
         unsafe { std::env::remove_var("SSD_DATA_DIR") };
     }

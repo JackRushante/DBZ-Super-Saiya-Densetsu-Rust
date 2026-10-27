@@ -55,7 +55,8 @@ fn looked_up<T: Clone>(slot: &Mutex<Lookup<T>>, read: impl FnOnce() -> Option<T>
 /// Sets the language of the command line (`None`: the PC file's), forgets the files read by an earlier run, and
 /// shows the Options' Language row only where the player has a translation ([`available`]).
 pub fn configure(language: Option<Language>) {
-    ssd_menus::options::show_language_row(available());
+    let hong_kong = ssd_menus::language::Locale::unnamed(Language::ZH_HK);
+    ssd_menus::options::offer_languages(if available() { vec![hong_kong] } else { Vec::new() });
     *OVERRIDE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = language;
     *TABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Lookup::Unread;
     *UI_TABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Lookup::Unread;
@@ -96,7 +97,7 @@ pub fn available() -> bool {
 /// The translation of `language`, read on first use; `None` for English, and when the file is missing or cannot be
 /// read (said once in the log: the text stays English).
 pub fn translation(language: Language) -> Option<Arc<Translation>> {
-    if language != Language::ZhHk {
+    if language != Language::ZH_HK {
         return None;
     }
     looked_up(&TABLE, || {
@@ -122,7 +123,7 @@ pub fn translation(language: Language) -> Option<Arc<Translation>> {
 /// The HD menus' words in `language`, read on first use; `None` for English, and when the file is missing or cannot
 /// be read (said once in the log: the menus stay English).
 pub fn ui_text(language: Language) -> Option<Arc<UiText>> {
-    if language != Language::ZhHk {
+    if language != Language::ZH_HK {
         return None;
     }
     looked_up(&UI_TABLE, || read_ui_text(&places()))
@@ -234,11 +235,11 @@ mod tests {
         let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         configure(None);
         let mut values = Values::new();
-        assert_eq!(effective(&values), Language::English);
-        Language::ZhHk.store(&mut values);
-        assert_eq!(effective(&values), Language::ZhHk);
-        configure(Some(Language::English));
-        assert_eq!(effective(&values), Language::English);
+        assert_eq!(effective(&values), Language::ENGLISH);
+        Language::ZH_HK.store(&mut values);
+        assert_eq!(effective(&values), Language::ZH_HK);
+        configure(Some(Language::ENGLISH));
+        assert_eq!(effective(&values), Language::ENGLISH);
         configure(None);
     }
 
@@ -252,7 +253,7 @@ mod tests {
         assert_eq!(find_in(&places, TABLE_FILE), Some(second.path().join(TABLE_FILE)));
         std::fs::write(first.path().join(TABLE_FILE), "key\tzh\n").unwrap();
         assert_eq!(find_in(&places, TABLE_FILE), Some(first.path().join(TABLE_FILE)));
-        assert_eq!(translation(Language::English), None);
+        assert_eq!(translation(Language::ENGLISH), None);
     }
 
     #[test]
@@ -265,7 +266,7 @@ mod tests {
         let table = read_ui_text(&places).unwrap();
         assert_eq!(table.len(), 2);
         assert_eq!(table.get("Page 1/2").as_deref(), Some("第1/2頁"));
-        assert!(ui_text(Language::English).is_none());
+        assert!(ui_text(Language::ENGLISH).is_none());
     }
 
     #[test]
