@@ -1402,6 +1402,42 @@ pub fn slot_badges(list: SlotList, marked: [bool; 3]) -> DrawList {
     out
 }
 
+/// The original's pixels (left, top, right, bottom) of the tag that carries the units of the stack under the shop's Sell
+/// cursor: the price box of the object under the cursor is a purple strip at (64, 118) to (96, 135), under the
+/// object's portrait, and the tag is the same strip joined to its right edge, so that it reads "6Pt" then "x03".
+const SELL_TAG: (f32, f32, f32, f32) = (95.0, 118.0, 127.0, 135.0);
+/// The colours of the original's price box: the purple of the strip and the yellow of its figure.
+const SELL_TAG_FILL: Color = Color::rgb(0x9C, 0x6B, 0xFF);
+const SELL_TAG_TEXT: Color = Color::rgb(0xFF, 0xFF, 0x63);
+
+/// The count of the stack the shop's Sell list is on, drawn over the original's picture beside the price box as the
+/// Item screen writes it (a times sign and two digits, the HD font). The original lists a stack as one row with no
+/// count.
+#[must_use]
+pub fn sell_count(count: u16) -> DrawList {
+    let mut out = DrawList::new();
+    let (left, top, right, bottom) = SELL_TAG;
+    let scale_x = WIDTH / FRAME_WIDTH;
+    let scale_y = HEIGHT / FRAME_HEIGHT;
+    let rect = Rect::new(
+        (left + SNES_LEFT) * scale_x,
+        top * scale_y,
+        (right - left) * scale_x,
+        (bottom - top) * scale_y,
+    );
+    out.fill(rect, SELL_TAG_FILL);
+    out.push(Op::Outline { rect, width: scale_x, color: palette::BLACK });
+    out.text(
+        rect.x + rect.w / 2.0,
+        rect.middle_y(),
+        &format!("\u{d7}{count:02}"),
+        LARGE_TEXT,
+        SELL_TAG_TEXT,
+        Align::Centre,
+    );
+    out
+}
+
 /// The help of the row under the cursor, along the foot, with the key that goes back.
 fn help_strip(list: &mut DrawList, row: Row) {
     let window =
@@ -2768,6 +2804,28 @@ mod tests {
         let save_second = slot_badges(SlotList::Save, [false, true, false]);
         let (_, second_y, _) = save_second.texts().next().expect("the badge text");
         assert!((second_y - 202.0 * HEIGHT / FRAME_HEIGHT).abs() < 1.0, "{second_y}");
+    }
+
+    #[test]
+    fn the_sell_count_is_written_as_the_item_screen_writes_it_beside_the_price_box() {
+        for (count, text) in [(1, "\u{d7}01"), (3, "\u{d7}03"), (99, "\u{d7}99")] {
+            let list = sell_count(count);
+            assert!(has_text(&list, text, SELL_TAG_TEXT), "{text}");
+            assert_eq!(list.texts().count(), 1);
+        }
+        // The price box is the original's strip at x 64 to 96: the tag starts at its right edge and does not cover it.
+        let list = sell_count(3);
+        let tag = list
+            .ops()
+            .iter()
+            .find_map(|op| if let Op::Fill { rect, .. } = op { Some(*rect) } else { None })
+            .expect("the tag's ground");
+        let strip_right = (96.0 + SNES_LEFT) * WIDTH / FRAME_WIDTH;
+        assert!(tag.x < strip_right && tag.x > strip_right - 2.0 * WIDTH / FRAME_WIDTH, "{tag:?}");
+        assert!(tag.x >= (64.0 + SNES_LEFT) * WIDTH / FRAME_WIDTH);
+        assert!(tag.right() <= WIDTH && tag.bottom() <= HEIGHT, "{tag:?}");
+        let (x, _, _) = list.texts().next().expect("the count");
+        assert!(x > strip_right && x < tag.right(), "the count lies in the tag: {x}");
     }
 
     #[test]

@@ -34,6 +34,7 @@ mod tab_routines;
 mod test_support;
 mod theme;
 mod touch;
+mod turbo;
 mod ui;
 mod ui_script;
 mod video;

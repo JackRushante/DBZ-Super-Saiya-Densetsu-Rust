@@ -614,6 +614,19 @@ impl Driver {
         self.state.nav.set_tab(tab);
     }
 
+    /// The units of the stack the shop's Sell list has its cursor on, while the list takes presses (`None` anywhere
+    /// else, or with no bag). The original draws the list one row a stack, with no count; the host draws this one
+    /// beside the price box of the object under the cursor.
+    #[must_use]
+    pub fn sell_count(&self, wram: &[u8]) -> Option<u16> {
+        // The shop is the original's own screen: the curtain is lifted for it (Talk), and never up.
+        if self.state.curtain == Curtain::Up {
+            return None;
+        }
+        let row = MenuProbe::new(wram, &self.labels).sell_row()?;
+        self.state.keeper.count_at(wram, row)
+    }
+
     /// The screen the HD shows while the curtain is up (`None`: the game's own picture).
     #[must_use]
     pub fn screen(&self) -> Option<Screen> {
@@ -983,8 +996,10 @@ impl State {
             events = self.keeper.bind(wram, labels, sram, &self.sidecar, fresh);
         }
         // A bind writes the list as the bag projects it: the list is kept from the next frame on.
+        // A sale of the shop leaves the list in transit until its message has run: the bag waits for it.
         if self.keeper.bound() && !bound_now {
-            events.extend(self.keeper.sync(wram, labels, sram, &self.sidecar));
+            let pending = probe.sale_pending();
+            events.extend(self.keeper.sync_shop(wram, labels, sram, &self.sidecar, pending));
         }
         // The cheats follow the save the bag is bound to: a bind (a new game has none on), or a save copied
         // into the game, gives the cheats of that save.

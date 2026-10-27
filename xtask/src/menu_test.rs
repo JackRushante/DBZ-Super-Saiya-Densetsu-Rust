@@ -662,9 +662,115 @@ fn town_talk(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The shop's Sell list shows the units of the stack under its cursor (a stack of three, then two after one sale), on the
+/// bag's count: the original lists a stack as one row with no count, and the host draws it beside the price box.
+fn town_sell(h: &mut Harness, r: &mut Report, rom: &[u8]) -> anyhow::Result<()> {
+    h.frames(2)?;
+    r.check(h.driver.bag().is_some(), "the bag is bound in the town");
+    // The list's first row (a stack the original lets a shop buy) holds three units.
+    let object = h.byte(d::ITEM_LIST);
+    let held = |h: &Harness| h.driver.bag().map_or(0, |bag| bag.units_of(object));
+    while held(h) < 3 {
+        append_entry(h, rom, object)?;
+        h.frames(2)?;
+    }
+    let units = held(h);
+    r.check(units >= 3, &format!("a stack of {units} of object {object} is in the bag"));
+    r.check(h.driver.sell_count(h.machine.wram()).is_none(), "no count outside the shop");
+    // Talk to the shopkeeper: A goes on through the messages to the Buy / Sell choice, then Sell and its list.
+    town_open(h, r)?;
+    h.key(Key::Confirm)?;
+    let list_up = |h: &Harness| {
+        h.byte(d::SHOP_MODE) & 0xBF == 0x81
+            && h.byte(d::SHOP_STEP) == 2
+            && h.byte(d::MENU_DRAW_DONE) & 0x80 != 0
+    };
+    let mut chose = false;
+    for _ in 0..40 {
+        h.frames(MESSAGE_RUN / 2)?;
+        if list_up(h) {
+            break;
+        }
+        // The Buy / Sell choice (mode 0, its question waiting): Sell is the second row.
+        if h.byte(d::SHOP_MODE) == 0 && h.byte(d::MESSAGE_STATE) == 0x91 && !chose {
+            h.press(Joypad { down: true, ..Joypad::default() })?;
+            h.frames(20)?;
+            chose = true;
+        }
+        h.press(a())?;
+    }
+    r.check(list_up(h), "the Sell list is up");
+    h.frames(30)?;
+    let count = h.driver.sell_count(h.machine.wram());
+    r.check(
+        count.map(u32::from) == Some(units),
+        &format!("the Sell list shows x{units}: {count:?}"),
+    );
+    let wram = h.machine.wram().to_vec();
+    r.check(
+        ssd_game::menu::MenuProbe::new(&wram, &ssd_menus::Labels::default()).sell_row() == Some(0),
+        "the cursor is on the first row",
+    );
+    // Sell the units one by one: A on the row, then the shop's messages, until its list is back.
+    let before = h.driver.bag().map_or(0, |bag| bag.stacks().len());
+    for left in (0..units).rev() {
+        h.press(a())?;
+        for _ in 0..30 {
+            h.frames(MESSAGE_RUN / 2)?;
+            if list_up(h) {
+                break;
+            }
+            h.press(a())?;
+        }
+        h.frames(30)?;
+        r.check(held(h) == left, &format!("the stack keeps {left} unit(s): {}", held(h)));
+        r.check(list_is_projection(h), "the list is the bag's projection");
+        if left > 0 {
+            let count = h.driver.sell_count(h.machine.wram());
+            let first = h.byte(d::ITEM_LIST);
+            r.check(
+                first == object
+                    && h.byte(d::MENU_ITEM_ID) == object
+                    && count.map(u32::from) == Some(left),
+                &format!("the shop's list keeps the stack with x{left}: {count:?}"),
+            );
+        }
+    }
+    let after = h.driver.bag().map_or(0, |bag| bag.stacks().len());
+    r.check(after + 1 == before, "the last unit takes the row off the list and the bag");
+    r.check(h.byte(d::ITEM_LIST) != object, "the sold object is not on the list any more");
+    Ok(())
+}
+
 /// The town scenarios, from the shop replay.
 const TOWN_SCENARIOS: [(&str, Scenario); 3] =
     [("town-item", town_item), ("town-menu", town_menu), ("town-talk", town_talk)];
+
+/// The town scenarios that need the bag (bound as the window binds it) and a start of their own, run by name.
+fn sell_suite(
+    rom: &[u8],
+    starts: &Starts,
+    only: &[String],
+    out: &mut String,
+) -> anyhow::Result<bool> {
+    // It starts from the shopkeeper (the shop replay at frame 65340), not from the town the others start in: named only.
+    if !only.iter().any(|o| o == "town-sell") {
+        return Ok(true);
+    }
+    let mut report = Report::default();
+    let mut h = bag_harness(rom, starts, &Sidecar::empty())?;
+    if let Err(error) = town_sell(&mut h, &mut report, rom) {
+        report.check(false, &format!("the scenario failed: {error:#}"));
+    }
+    let ok = report.passed();
+    writeln!(out, "{} town-sell", if ok { "ok  " } else { "FAIL" })?;
+    for (passed, what) in &report.lines {
+        if !passed {
+            writeln!(out, "       - {what}")?;
+        }
+    }
+    Ok(ok)
+}
 
 /// The leader's position on the map, x and y words (`re/symbols.toml`, the party's position).
 const LEADER_X: u32 = 0x7E_01A2;
@@ -985,7 +1091,11 @@ pub fn run(rom: &[u8], args: &Args, out: &mut dyn std::io::Write) -> anyhow::Res
     let mut text = format!("{}\n", header(args));
     let ok = match args.suite.as_str() {
         "field" => field_suite(rom, &starts, &args.only, &mut text)?,
-        "town" => scenario_suite(rom, &starts, &TOWN_SCENARIOS, "town", &args.only, &mut text)?,
+        "town" => {
+            let ok = scenario_suite(rom, &starts, &TOWN_SCENARIOS, "town", &args.only, &mut text)?;
+            let sold = sell_suite(rom, &starts, &args.only, &mut text)?;
+            ok && sold
+        }
         "items" => {
             let Start::Save { path, .. } = &args.start else {
                 bail!("menu-test items takes --save <file.sav>: its crafted starts come from it");

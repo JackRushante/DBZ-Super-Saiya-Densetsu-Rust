@@ -265,6 +265,8 @@ struct WindowState {
     release_input: bool,
     /// The touch controls (M9): off unless the run has them (Android, or `--touch-ui`).
     touch: Touch,
+    /// The turbo of held buttons (Options > Controls > Turbo): how long A and B have been held.
+    turbo: crate::turbo::Turbo,
     /// A screenshot asked for, taken once the frame is drawn (windowed runs only).
     shot: Option<screenshot::Kind>,
 }
@@ -310,6 +312,7 @@ impl WindowState {
             kept_sessions: BTreeMap::new(),
             bindings: Bindings::default(),
             release_input: false,
+            turbo: crate::turbo::Turbo::default(),
             touch: Touch::new(
                 false,
                 touch::settings::Settings::default(),
@@ -1042,6 +1045,16 @@ fn run_frames(
     let logging = state.hd.is_some() || machine.line_log_enabled();
     for n in 0..frames {
         let started = Instant::now();
+        // The turbo of the Controls page pulses a held A (and B) one machine frame at a time, here where the frame's
+        // joypad is made, so a recording holds what the game saw. Only the Enhanced run has the page (Classic has no
+        // HD layer and its joypad goes through untouched); the HD menus' keys are made from the raw joypad elsewhere.
+        let live = match state.hd.as_ref() {
+            Some(hd) => {
+                let settings = crate::turbo::Settings::from_values(&hd.driver().options().pc);
+                state.turbo.step(settings, live)
+            }
+            None => live,
+        };
         // While the HD menu has the curtain, its presses are the frame's joypad (the game gets no
         // other buttons); otherwise the live joypad goes through.
         let (pad, events) = hd_frame(state, machine, session, live);
@@ -3224,6 +3237,70 @@ mod tests {
         }
         *previous = pad;
         window_frames(state, machine, session, env, pad, audio, frames).unwrap();
+    }
+
+    /// Turbo on the window's own frame path with the real game: a held A reaches the game as the pulse the turbo makes
+    /// (`turbo::Turbo`, 20 a second here), and the same pulse fed to a bare machine gives the same work RAM, which a
+    /// held A without turbo does not. The ROM stands in for the ki training, which needs a save no copy of ours
+    /// reaches; a recording keeps the pad `Session::run` is given, which is this one (a live Enhanced run cannot
+    /// record: its cheat hooks are refused by the recorder, as before).
+    #[test]
+    #[ignore = "needs SSD_ROM_PATH"]
+    fn a_held_a_with_turbo_reaches_the_game_as_the_pulse() {
+        use ssd_menus::options::controls::{TURBO_MODE, TURBO_RATE};
+        let _guard = paths::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: serialised by ENV_LOCK.
+        unsafe { std::env::set_var("SSD_DATA_DIR", dir.path()) };
+        let rom = std::fs::read(std::env::var("SSD_ROM_PATH").expect("SSD_ROM_PATH")).unwrap();
+        let ruleset = Ruleset::enhanced();
+        let env = Env { rom: &rom, switch: None, verify: None };
+        let mut audio = audio::Audio::muted();
+        let held = Joypad { a: true, ..Joypad::default() };
+        let frames = 600_u64;
+
+        let mut session = Session::default();
+        let mut machine = new_machine(rom.clone(), None, &mut session).unwrap();
+        let mut state =
+            WindowState::new(Controls::new(HooksArg::Original, HooksSwitch::Allowed, false, false));
+        state.hd = hd_layer(&rom, ruleset).unwrap();
+        {
+            let values = state.hd.as_mut().unwrap().pc_options_mut();
+            values.set(TURBO_MODE, 1);
+            values.set(TURBO_RATE, 1);
+        }
+        let mut previous = Joypad::default();
+        for _ in 0..frames {
+            window_step(
+                &mut state,
+                &mut machine,
+                &mut session,
+                &env,
+                &mut audio,
+                1,
+                held,
+                &mut previous,
+            );
+        }
+
+        // The same game fed the pulse straight, and fed the held A without turbo.
+        let run = |pad_of: &mut dyn FnMut() -> Joypad| {
+            let mut machine =
+                Machine::new(rom.clone(), Box::new(ssd_oracle::MemorySaveStore::default()))
+                    .unwrap();
+            for _ in 0..frames {
+                machine.run_frame(pad_of(), &mut NullAudio).unwrap();
+            }
+            machine.wram().to_vec()
+        };
+        let mut turbo = crate::turbo::Turbo::default();
+        let settings = crate::turbo::Settings { buttons: crate::turbo::Buttons::A, rate: 20 };
+        let pulsed = run(&mut || turbo.step(settings, held));
+        let plain = run(&mut || held);
+        assert_eq!(machine.wram(), pulsed.as_slice(), "the window path feeds the turbo's pulse");
+        assert_ne!(pulsed, plain, "and the pulse is not a held A to the game");
+        // SAFETY: serialised by ENV_LOCK.
+        unsafe { std::env::remove_var("SSD_DATA_DIR") };
     }
 
     /// The player's presses through the window's own frame path, as the window loop gives them. The replay plays to

@@ -245,8 +245,9 @@ impl Hd {
         self.notice.note(wram);
     }
 
-    /// The HD's picture over the field while no menu is on screen: the cheats' notice, while one shows, and the
-    /// CHEATS badges of the save-slot list the original shows (see [`slot_list`]), for the slots saved with a cheat on.
+    /// The HD's picture over the field while no menu is on screen: the cheats' notice, while one shows, the
+    /// CHEATS badges of the save-slot list the original shows (see [`slot_list`]), for the slots saved with a cheat on,
+    /// and the count of the stack under the shop's Sell cursor (see [`Driver::sell_count`]).
     #[must_use]
     pub fn overlay(&self, wram: &[u8], sram: Option<&[u8]>) -> Option<DrawList> {
         let mut list = DrawList::new();
@@ -255,6 +256,9 @@ impl Hd {
         }
         if let (Some(which), Some(sram)) = (slot_list(wram), sram) {
             list.append(ssd_menus::screens::slot_badges(which, self.driver.marked_slots(sram)));
+        }
+        if let Some(count) = self.driver.sell_count(wram) {
+            list.append(ssd_menus::screens::sell_count(count));
         }
         (!list.ops().is_empty()).then(|| {
             crate::options::access::restyle(&self.driver.options().pc, self.translated(list, None))

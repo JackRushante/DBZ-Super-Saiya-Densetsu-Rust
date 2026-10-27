@@ -206,7 +206,10 @@ its item list again, and goes when the menu closes. An object the original
 refuses (Saiba) is greyed out; one refused at the moment of use (Mr. Popo or Puar at full KI) keeps its unit and the
 menu stays open for the player. Drop asks Yes or No and drops one unit. A tab with no stack says so when A is pressed
 on it. The Dragon Balls and the story's objects are pinned at the top and cannot be dropped, and a full bag refuses
-what it is offered, with a notice. The bag lives in `saves/ssd.bag` beside the battery save (one bag per save slot,
+what it is offered, with a notice. In a shop's Sell list the original draws a stack as one row with no count: the HD adds a
+tag beside the price box of the object under the cursor with its units, as the Item screen writes them (`×03`). A sale takes
+one unit of the stack the cursor is on (the bag waits for the shop to take the entry out of the list), and the row stays in
+the list until the last unit is sold. The bag lives in `saves/ssd.bag` beside the battery save (one bag per save slot,
 keyed by the slot's checksum: a save changed by Classic play rebuilds its bag from the game's list; a file that cannot
 be read is kept as `ssd.bag.bad` and the bags are rebuilt). A save state keeps the bag and the cheats beside it
 (`states/slotN.hd`, `Hd::session_bytes`), and loading the state brings them back; a state without that file rebuilds
@@ -531,6 +534,12 @@ controls' alone.
   (`style`, `opacity` as a step of five percent, `haptics`, `auto_battle`, `hide_pad`, `picture` (0 Standard, 1 Large, 2 Full
   screen), `show_fps`, and `<group>.x|y|s` or
   `p.<group>.x|y|s` for the portrait layout: the centre in per mille of the screen and the size in percent).
+- Options > Controls > Turbo (the Device row's fourth page, for every device): Turbo Off, A or A+B and the presses per second
+  (15, 20 or 30; `controls.turbo.mode` and `controls.turbo.rate` in `saves/ssd.settings`). While a turbo button is held the game
+  sees it pressed and let go at that rate, whether the keyboard, a gamepad or the touch buttons hold it (`crates/ssd-app/src/turbo.rs`,
+  applied per machine frame in `run_frames`, where the frame's joypad is made, so a replay records the presses; Classic never runs it).
+  The HD menus read the raw joypad: a held A confirms there once. The ki training and any other scene that wants fast presses of A
+  need only a held A.
 - Options > Controls: the Device row has a third page, Touch, with Touch layout (D-pad or Stick), Opacity, Haptics, Switch
   automatically in battle, Hide with gamepad (on by default; only a pad with a stick and face buttons counts), Picture,
   Show FPS (off by default: a line at the top with the frame rate, the sound queue in milliseconds and the frames that found
@@ -1173,7 +1182,8 @@ plays the HD menus (`--mode enhanced`) headless, as a player plays them, from a 
 field) or from a replay's frame N (the town: the shop replay at frame 4340, before its town menu opens). `field` runs
 every entry of the field's command window and of the Menu list, the flying window, the cancels, and an abort (a plan
 that cannot reach its state closes the menu, and the party walks again); each check is printed, and the exit code is 1
-when one fails. `town` runs the town's command window (four rows, no Fly), its Item and Menu, and its Talk. `diff` plays
+when one fails. `town` runs the town's command window (four rows, no Fly), its Item and Menu, and its Talk. `town town-sell --frames 65340` (the shop replay in front of the shopkeeper, with the bag bound) sells a stack of three
+from the Sell list, one unit at a time: the tag shows x03, x02, x01, the shop's list keeps the row, and the last unit takes it off. `diff` plays
 each choice with the HD driver and checks that its joypad words (its presses), replayed as a plain Classic run, end in
 the same work RAM, every byte, and that the hand-written Classic presses of the same choice reach the same game state
 (items, money, party, travel, map and position). `items` plays the bag on saves it crafts from `<file.sav>` (any save with a party, with the window's hooks installed):

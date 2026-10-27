@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.7 (2026-10-27)
+
+### Features
+
+- Turbo option for held buttons, e.g. the ki training (#9): Options > Controls > Turbo makes a held A (or A and B) press and
+  let go again 15, 20 or 30 times a second, for the keyboard, a gamepad and the touch buttons. Off by default; Enhanced only.
+
+### Fixes
+
+- The Gohan card can be called from the HD Items screen in the first Raditz battle (#8, contributed by @lming888 in #11):
+  the original makes the story's Gohan usable there (the one way to hurt Raditz), and the HD list now follows that rule,
+  on PC and Android. Enhanced only.
+- Shop Sell list shows each stack's count (#10): the original lists a stack as one row, so a tag beside the price box now
+  shows its units as the Item screen does (`×03`). Selling is fixed in Remastered too: a sale took a unit of the last
+  object in the list instead of the one sold, and the row of a stack with units left vanished from the Sell screen at the
+  first sale. A sale now takes one unit of the stack chosen and the row stays until the last unit is sold. Enhanced only.
+
 ## 0.3.6 (2026-10-22)
 
 ### Fixes

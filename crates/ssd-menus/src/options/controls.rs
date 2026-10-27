@@ -54,7 +54,7 @@ pub enum Capture {
 }
 
 /// The labels of the device row.
-pub const DEVICES: &[&str] = &["Keyboard", "Gamepad", "Touch"];
+pub const DEVICES: &[&str] = &["Keyboard", "Gamepad", "Touch", "Turbo"];
 
 /// The number of actions a device has: the 12 SNES buttons and the 5 shortcuts.
 pub const ACTIONS: usize = 17;
@@ -245,6 +245,12 @@ pub const TOUCH_DEVICE: usize = 2;
 pub const TOUCH_ROWS: usize = 6;
 /// The index of the first touch row in [`ROWS`].
 pub const TOUCH_ROW0: usize = 1 + 2 * ACTIONS;
+/// The index of the Turbo page in [`DEVICES`]: a list like the Touch page, for the three devices at once.
+pub const TURBO_DEVICE: usize = 3;
+/// How many rows the Turbo page has, after the device row.
+pub const TURBO_ROWS: usize = 2;
+/// The index of the first turbo row in [`ROWS`].
+pub const TURBO_ROW0: usize = TOUCH_ROW0 + TOUCH_ROWS;
 
 const TOUCH_GROUP: &str = "Touch controls";
 const ON_OFF: &[&str] = &["Off", "On"];
@@ -252,6 +258,30 @@ const ON_OFF: &[&str] = &["Off", "On"];
 const OPACITIES: &[&str] = &[
     "20%", "25%", "30%", "35%", "40%", "45%", "50%", "55%", "60%", "65%", "70%", "75%", "80%",
     "85%", "90%", "95%", "100%",
+];
+
+const TURBO_GROUP: &str = "Turbo";
+/// The labels of the turbo rate row: presses per second ([`TURBO_RATES`]).
+const TURBO_RATE_LABELS: &[&str] = &["15 per second", "20 per second", "30 per second"];
+
+/// The rows of the Turbo page.
+const TURBO_ROW_DEFS: [RowDef; TURBO_ROWS] = [
+    RowDef {
+        key: TURBO_MODE,
+        label: "Turbo",
+        group: TURBO_GROUP,
+        help: "Hold the button and the game sees it pressed again and again, as the ki training needs. A turns it on for A, A+B for both. Keyboard, gamepad and touch.",
+        kind: Kind::Choice(TURBO_MODES),
+        source: Source::Stored { default: 0 },
+    },
+    RowDef {
+        key: TURBO_RATE,
+        label: "Presses per second",
+        group: TURBO_GROUP,
+        help: "How fast a held turbo button is pressed again: 15, 20 or 30 times a second.",
+        kind: Kind::Cycle(TURBO_RATE_LABELS),
+        source: Source::Stored { default: TURBO_RATE_DEFAULT },
+    },
 ];
 
 /// The rows of the Touch page.
@@ -307,7 +337,7 @@ const TOUCH_ROW_DEFS: [RowDef; TOUCH_ROWS] = [
 ];
 
 /// The number of rows of the table: the device row, then the keyboard's, then the gamepad's.
-const ROW_COUNT: usize = 1 + 2 * ACTIONS + TOUCH_ROWS;
+const ROW_COUNT: usize = 1 + 2 * ACTIONS + TOUCH_ROWS + TURBO_ROWS;
 
 /// The rows of the page: the device, the 17 keyboard actions, the 17 gamepad actions.
 pub const ROWS: &[RowDef] = &{
@@ -315,7 +345,7 @@ pub const ROWS: &[RowDef] = &{
         key: DEVICE_KEY,
         label: "Device",
         group: "Device",
-        help: "Each device has its own map. A gamepad is found by itself when it is plugged in.",
+        help: "Each device has its own map. A gamepad is found by itself when it is plugged in. Turbo is for all three.",
         kind: Kind::Choice(DEVICES),
         source: Source::Stored { default: 0 },
     };
@@ -330,6 +360,11 @@ pub const ROWS: &[RowDef] = &{
     while touch < TOUCH_ROWS {
         rows[TOUCH_ROW0 + touch] = TOUCH_ROW_DEFS[touch];
         touch += 1;
+    }
+    let mut turbo = 0;
+    while turbo < TURBO_ROWS {
+        rows[TURBO_ROW0 + turbo] = TURBO_ROW_DEFS[turbo];
+        turbo += 1;
     }
     rows
 };
@@ -356,6 +391,16 @@ pub const TOUCH_SHOW_FPS: &str = "controls.touch.show_fps";
 /// The size of the picture beside the controls: 0 the design's (the default), 1 large, 2 the whole screen with the
 /// controls over it.
 pub const TOUCH_PICTURE: &str = "controls.touch.picture";
+/// Which buttons turbo holds down: 0 none (the default), 1 A, 2 A and B.
+pub const TURBO_MODE: &str = "controls.turbo.mode";
+/// The turbo rate as an index of [`TURBO_RATES`]; the default is 20 presses per second.
+pub const TURBO_RATE: &str = "controls.turbo.rate";
+/// The choices of the turbo mode row.
+pub const TURBO_MODES: &[&str] = &["Off", "A", "A+B"];
+/// The presses per second of each choice of the rate row.
+pub const TURBO_RATES: [u8; 3] = [15, 20, 30];
+/// The index of 20 presses per second in [`TURBO_RATES`].
+pub const TURBO_RATE_DEFAULT: u8 = 1;
 /// The steps of the opacity row.
 pub const TOUCH_OPACITY_STEPS: u8 = 17;
 /// The step of 75%.
@@ -385,6 +430,17 @@ pub const fn row_of(device: Device, action: usize) -> usize {
     1 + device.index() * ACTIONS + action
 }
 
+/// The rows of the list page `page` of the Device row (Touch or Turbo): the first row of the table and how many, or
+/// none for the two pages of key boxes.
+#[must_use]
+pub const fn list_rows(page: usize) -> Option<(usize, usize)> {
+    match page {
+        TOUCH_DEVICE => Some((TOUCH_ROW0, TOUCH_ROWS)),
+        TURBO_DEVICE => Some((TURBO_ROW0, TURBO_ROWS)),
+        _ => None,
+    }
+}
+
 /// The device the page shows.
 #[must_use]
 pub fn device(values: &Values) -> Device {
@@ -393,14 +449,36 @@ pub fn device(values: &Values) -> Device {
     )
 }
 
-/// The page of the Device row: 0 the keyboard's keys, 1 the gamepad's, 2 the touch controls' rows ([`TOUCH_DEVICE`]).
+/// The page of the Device row: 0 the keyboard's keys, 1 the gamepad's, 2 the touch controls' rows ([`TOUCH_DEVICE`]), 3
+/// the turbo rows ([`TURBO_DEVICE`]).
 #[must_use]
 pub fn page(values: &Values) -> usize {
     values
         .get(DEVICE_KEY)
         .and_then(|value| usize::try_from(value).ok())
-        .filter(|&page| page <= TOUCH_DEVICE)
+        .filter(|&page| page <= TURBO_DEVICE)
         .unwrap_or(0)
+}
+
+/// The buttons turbo holds, as the PC file says (a missing or wild value is off): 0 none, 1 A, 2 A and B.
+#[must_use]
+pub fn turbo_mode(values: &Values) -> u8 {
+    values
+        .get(TURBO_MODE)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|&mode| usize::from(mode) < TURBO_MODES.len())
+        .unwrap_or(0)
+}
+
+/// The turbo presses per second the PC file says (a missing or wild value is the default, 20).
+#[must_use]
+pub fn turbo_rate(values: &Values) -> u8 {
+    let at = values
+        .get(TURBO_RATE)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|&at| at < TURBO_RATES.len())
+        .unwrap_or(usize::from(TURBO_RATE_DEFAULT));
+    TURBO_RATES[at]
 }
 
 /// The code of `action` on `device`: the stored one, else today's default. 0 is "no key".
@@ -611,8 +689,14 @@ mod tests {
 
     #[test]
     fn the_table_has_the_device_then_seventeen_actions_per_device() {
-        assert_eq!(ROWS.len(), 1 + 2 * ACTIONS + TOUCH_ROWS, "then the touch page's rows");
+        assert_eq!(
+            ROWS.len(),
+            1 + 2 * ACTIONS + TOUCH_ROWS + TURBO_ROWS,
+            "then the touch and the turbo pages' rows"
+        );
         assert_eq!(ROWS[TOUCH_ROW0].key, TOUCH_STYLE);
+        assert_eq!(ROWS[TURBO_ROW0].key, TURBO_MODE);
+        assert_eq!(ROWS[TURBO_ROW0 + 1].key, TURBO_RATE);
         assert_eq!(ROWS[0].key, "controls.device");
         assert_eq!(ROWS[row_of(Device::Keyboard, 0)].key, "controls.kb.up");
         assert_eq!(ROWS[row_of(Device::Keyboard, 15)].key, "controls.kb.load_state");
@@ -628,6 +712,30 @@ mod tests {
             }
         }
         assert_eq!(all_rows().iter().filter(|row| row.kind == Kind::Key).count(), 34);
+    }
+
+    #[test]
+    fn turbo_is_off_at_twenty_a_second_and_reads_back_what_was_stored() {
+        let mut values = Values::new();
+        assert_eq!((turbo_mode(&values), turbo_rate(&values)), (0, 20));
+        values.set(TURBO_MODE, 2);
+        values.set(TURBO_RATE, 2);
+        assert_eq!((turbo_mode(&values), turbo_rate(&values)), (2, 30));
+        values.set(TURBO_MODE, 9);
+        values.set(TURBO_RATE, 77);
+        assert_eq!(
+            (turbo_mode(&values), turbo_rate(&values)),
+            (0, 20),
+            "wild values are the defaults"
+        );
+        assert_eq!(list_rows(TURBO_DEVICE), Some((TURBO_ROW0, TURBO_ROWS)));
+        assert_eq!(list_rows(0), None);
+        assert_eq!(page(&values), 0);
+        values.set(DEVICE_KEY, 3);
+        assert_eq!(page(&values), TURBO_DEVICE);
+        // The touch layout's reset keeps the turbo choice (it is not a touch key).
+        reset_touch_layout(&mut values);
+        assert_eq!(values.get(TURBO_MODE), Some(9));
     }
 
     #[test]
@@ -727,8 +835,11 @@ mod tests {
         assign(&mut values, Device::Gamepad, 2, 16).unwrap();
         clear(&mut values, Device::Keyboard, 12);
         values.set(DEVICE_KEY, 1);
+        values.set(TURBO_MODE, 2);
+        values.set(TURBO_RATE, 2);
         let read = Values::from_text(&values.to_text()).unwrap();
         assert_eq!(read, values);
+        assert_eq!((turbo_mode(&read), turbo_rate(&read)), (2, 30), "turbo is kept in the file");
         assert_eq!(device(&read), Device::Gamepad);
         assert_eq!(code(&read, Device::Keyboard, 0), 9);
         assert_eq!(code(&read, Device::Keyboard, 12), 0);

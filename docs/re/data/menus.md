@@ -268,6 +268,21 @@ attribute; the stock list of the shop or, when selling, a copy of `item_list`) a
   the entry (`01:C639`). The price is the same for both. Seen: with 30 zeni, buying MrPopo (10 Pt) leaves 20 and `item_count`
   goes from 9 to 10.
 
+- **The Sell list in the bag's terms** (seen, the `shop` replay's Baba and a crafted stack). Talk to the shopkeeper asks
+  Buy or Sell (`$07AF` 0, the question waiting in `$071B` = `$91`); the choice moves to mode `$81` (low bits 1, the lists), and the Sell list is
+  that machine's step 2 (`03:A73B`: it reads the cursor `$0C3F`, an index of the list over its pages, and the object
+  `$0D7C`; an entry whose attribute has bit 2 is refused with a message). Buy's lists are steps 7 to 9. The stock at
+  `$7E:2220` is a copy of `item_list` made when Sell is chosen, so the cursor's row is the keeper's row, and each row is a
+  stack of the bag. A sale (`03:A790`) takes `item_count` down by one and clears the attribute byte of the entry (`menu_row`'s) at the A,
+  shows its messages in step 4 and takes the marked entry out of the list (`01:C639`, `03:A899`) about a hundred frames later,
+  then goes back through steps 0 and 1, which redraw the Sell screen from the stock copy, and to step 2. Seen: between the
+  A and the removal the list has its entries in place and the count one short, so the keeper must not read it as the last
+  entry gone (it did, in 0.3.6: the sale took the last object of the bag, and gave the sold one back). The stock copy is
+  compacted by the sale too, so without the keeper's write (`Keeper::sync_shop`) a stack with units left lost its row from
+  the screen at the first sale (the second one sold another object). The names fill the window's two columns (nine tiles
+  each), so the list has no room for a count: the HD draws it on the price box (the purple strip at pixels 64..96 by
+  118..135, under the object's portrait), joined to its right.
+
 ## Facts for the HD menus
 
 - The game's menu logic reads only `$47`/`$48` (newly pressed): feeding virtual joypad presses is a complete way to drive it.

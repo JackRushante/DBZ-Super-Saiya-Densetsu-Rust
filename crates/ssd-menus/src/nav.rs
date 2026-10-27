@@ -465,10 +465,10 @@ impl Nav {
     #[must_use]
     pub fn options_row(&self) -> usize {
         if self.options_category() == Category::Controls {
-            if self.touch_page() {
-                return match self.options.row.min(controls::TOUCH_ROWS) {
+            if let Some((first, count)) = self.list_page() {
+                return match self.options.row.min(count) {
                     0 => 0,
-                    at => controls::TOUCH_ROW0 + at - 1,
+                    at => first + at - 1,
                 };
             }
             return match self.controls_action() {
@@ -477,6 +477,12 @@ impl Nav {
             };
         }
         self.options.row.min(self.options_category().rows().len().saturating_sub(1))
+    }
+
+    /// The first row and the number of rows of the Controls page when it shows a list (the Touch or the Turbo page).
+    #[must_use]
+    pub fn list_page(&self) -> Option<(usize, usize)> {
+        controls::list_rows(usize::from(self.options.device))
     }
 
     /// Whether the Controls page shows the touch controls' rows.
@@ -881,8 +887,8 @@ impl Nav {
     /// (the device row between), Left and Right move across a line or, on the device row, change the device; A
     /// waits for a new key on a key box.
     fn key_controls(&mut self, key: Key) -> Action {
-        if self.touch_page() {
-            return self.key_touch(key);
+        if let Some((first, count)) = self.list_page() {
+            return self.key_list(key, first, count);
         }
         let at = self.controls_position();
         match key {
@@ -915,23 +921,24 @@ impl Nav {
         Action::None
     }
 
-    /// What `key` does on the Touch page of the Controls (M9): the device row, then a list of six rows. Up and Down
-    /// move (wrapping), Left and Right change a row (the device row: the page), A opens the reset button.
-    fn key_touch(&mut self, key: Key) -> Action {
-        let at = self.options.row.min(controls::TOUCH_ROWS);
+    /// What `key` does on a list page of the Controls (the Touch page of M9, the Turbo page): the device row, then
+    /// the `count` rows from table row `first`. Up and Down move (wrapping), Left and Right change a row (the device
+    /// row: the page), A opens a button.
+    fn key_list(&mut self, key: Key, first: usize, count: usize) -> Action {
+        let at = self.options.row.min(count);
         match key {
             Key::Up => {
-                self.options.row = if at == 0 { controls::TOUCH_ROWS } else { at - 1 };
+                self.options.row = if at == 0 { count } else { at - 1 };
             }
             Key::Down => {
-                self.options.row = if at == controls::TOUCH_ROWS { 0 } else { at + 1 };
+                self.options.row = if at == count { 0 } else { at + 1 };
             }
             Key::Left | Key::Right | Key::Confirm if at == 0 => {
                 let by = if key == Key::Left { -1 } else { 1 };
                 return Action::OptionChange { category: Category::Controls, row: 0, by };
             }
             Key::Left | Key::Right | Key::Confirm => {
-                let row = controls::TOUCH_ROW0 + at - 1;
+                let row = first + at - 1;
                 let def = &controls::ROWS[row];
                 if let Kind::Button(_) = def.kind {
                     if key != Key::Left
@@ -1259,6 +1266,37 @@ mod tests {
         assert_eq!(nav.options_row(), controls::TOUCH_ROW0 + controls::TOUCH_ROWS - 1);
         assert_eq!(key(&mut nav, Key::Left), Action::None);
         assert_eq!(key(&mut nav, Key::Confirm), Action::OptionsOpen(Opens::ResetTouchLayout));
+        key(&mut nav, Key::Down);
+        assert_eq!(nav.options_row(), 0, "the list wraps through the device row");
+    }
+
+    #[test]
+    fn the_turbo_page_is_a_list_of_two_rows_under_the_device_row() {
+        let mut nav = Nav::default();
+        nav.enter(Screen::Options);
+        let key = |nav: &mut Nav, key| nav.key(key, false, false, 0);
+        for _ in 0..4 {
+            key(&mut nav, Key::Tab);
+        }
+        nav.set_controls_page(controls::TURBO_DEVICE);
+        assert_eq!(nav.list_page(), Some((controls::TURBO_ROW0, controls::TURBO_ROWS)));
+        assert_eq!(nav.options_row(), 0, "the device row first");
+        key(&mut nav, Key::Down);
+        assert_eq!(nav.options_row(), controls::TURBO_ROW0);
+        assert_eq!(
+            key(&mut nav, Key::Right),
+            Action::OptionChange { category: Category::Controls, row: controls::TURBO_ROW0, by: 1 }
+        );
+        key(&mut nav, Key::Down);
+        assert_eq!(nav.options_row(), controls::TURBO_ROW0 + 1);
+        assert_eq!(
+            key(&mut nav, Key::Left),
+            Action::OptionChange {
+                category: Category::Controls,
+                row: controls::TURBO_ROW0 + 1,
+                by: -1
+            }
+        );
         key(&mut nav, Key::Down);
         assert_eq!(nav.options_row(), 0, "the list wraps through the device row");
     }

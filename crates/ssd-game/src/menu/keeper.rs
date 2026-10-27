@@ -62,13 +62,15 @@ pub struct Keeper {
     /// original's effect finds its entry by its row, so the list does not move under it (a wish of Porunga changes the
     /// entry's state word, and the list written back in the bag's order would put another object on that row).
     front: Option<u32>,
+    /// A sale of the shop was under way at the last frame ([`Keeper::sync_shop`]).
+    sale: bool,
 }
 
 impl Keeper {
     /// A keeper with no bag yet: it binds when the game has a save or a list to keep.
     #[must_use]
     pub fn new(rules: Rules) -> Self {
-        Self { rules, bag: None, save: None, shown: Vec::new(), front: None }
+        Self { rules, bag: None, save: None, shown: Vec::new(), front: None, sale: false }
     }
 
     /// Whether the bag is bound.
@@ -236,6 +238,43 @@ impl Keeper {
         self.project(wram, labels, front)
     }
 
+    /// [`Keeper::sync`] for a frame of the game in which the shop may be selling. The shop's sale takes an entry off the
+    /// count and marks it at the A, and takes it out of the list about a hundred frames later, when its message has run:
+    /// between the two the list is in transit (`pending`), so the bag does not follow it. The frame after the entry is
+    /// out, the bag takes the unit off its stack and the list is written back as the bag projects it (the stack stays,
+    /// with one unit less, or the row is gone with the last unit). The shop has made its own copy of the list for its
+    /// Sell screen ([`d::SHOP_STOCK`]) by then, one entry short, and redraws the screen from it: the copy is written
+    /// as the list too, so the screen keeps the rows of the stacks that still have units.
+    pub fn sync_shop(
+        &mut self,
+        wram: &[u8],
+        labels: &Labels,
+        sram: Option<&[u8]>,
+        sidecar: &Sidecar,
+        pending: bool,
+    ) -> Vec<HostEvent> {
+        if pending {
+            self.sale = true;
+            return Vec::new();
+        }
+        let mut events = self.sync(wram, labels, sram, sidecar);
+        if std::mem::take(&mut self.sale) {
+            events.extend(self.stock_writes(wram, labels));
+        }
+        events
+    }
+
+    /// The writes that make the shop's copy of the list ([`d::SHOP_STOCK`]) the list the keeper last wrote.
+    fn stock_writes(&self, wram: &[u8], labels: &Labels) -> Vec<HostEvent> {
+        vec![
+            HostEvent::Wram {
+                address: d::SHOP_STOCK,
+                bytes: entry_bytes(&self.shown, labels, group_of(wram)),
+            },
+            HostEvent::Wram { address: d::SHOP_STOCK_COUNT, bytes: vec![self.shown.len() as u8] },
+        ]
+    }
+
     /// The item spawner: `count` units of `object` go into the bag (as many as it has room for), and the list is
     /// written back as the bag projects it. Returns the units added and the writes.
     pub fn spawn(
@@ -266,6 +305,19 @@ impl Keeper {
     pub fn stage(&mut self, wram: &[u8], labels: &Labels, front: u32) -> Vec<HostEvent> {
         self.front = Some(front);
         self.project(wram, labels, Some(front))
+    }
+
+    /// The units of the stack the original's list shows at `row`, for a screen of the original that lists the bag's
+    /// objects without their counts (the shop's Sell list). `None` when the row is not a row of the list as the keeper
+    /// last wrote it (the list changed under the screen), so a count is never drawn beside another object.
+    #[must_use]
+    pub fn count_at(&self, wram: &[u8], row: usize) -> Option<u16> {
+        let shown = self.shown.get(row)?;
+        let (object, extra) = *read_list(wram).get(row)?;
+        if object != shown.object || extra != shown.extra {
+            return None;
+        }
+        self.bag.as_ref()?.stack(shown.id).map(|stack| stack.count)
     }
 
     /// Whether a use's stack is held at the top of the list.
@@ -411,19 +463,26 @@ fn read_list(wram: &[u8]) -> Vec<(u8, u16)> {
 /// The writes of the list `shown` in work RAM: the entries and their state words, and the count. Each entry's
 /// attribute is the one the original's list has now ([`attribute_now`], with the encounter group `group`).
 fn list_writes(shown: &[Shown], labels: &Labels, group: u8) -> Vec<HostEvent> {
-    let mut entries = vec![0_u8; LIST_BYTES];
     let mut extras = vec![0_u8; LIST_BYTES];
+    for (index, entry) in shown.iter().enumerate() {
+        extras[2 * index..2 * index + 2].copy_from_slice(&entry.extra.to_le_bytes());
+    }
+    vec![
+        HostEvent::Wram { address: d::ITEM_LIST, bytes: entry_bytes(shown, labels, group) },
+        HostEvent::Wram { address: EXTRA, bytes: extras },
+        HostEvent::Wram { address: d::ITEM_COUNT, bytes: vec![shown.len() as u8] },
+    ]
+}
+
+/// The entries of the list `shown` as the original keeps them: 24 of two bytes, the object and its attribute.
+fn entry_bytes(shown: &[Shown], labels: &Labels, group: u8) -> Vec<u8> {
+    let mut entries = vec![0_u8; LIST_BYTES];
     for (index, entry) in shown.iter().enumerate() {
         let attribute = label_now(labels, entry.object, group).map_or(0, |label| label.attribute);
         entries[2 * index] = entry.object;
         entries[2 * index + 1] = attribute & !0x01;
-        extras[2 * index..2 * index + 2].copy_from_slice(&entry.extra.to_le_bytes());
     }
-    vec![
-        HostEvent::Wram { address: d::ITEM_LIST, bytes: entries },
-        HostEvent::Wram { address: EXTRA, bytes: extras },
-        HostEvent::Wram { address: d::ITEM_COUNT, bytes: vec![shown.len() as u8] },
-    ]
+    entries
 }
 
 /// Pairs the entries of `shown` and `listed` that are the same in order (their longest common
@@ -649,6 +708,74 @@ mod tests {
             keeper.sync(&ram, &labels, None, &Sidecar::empty()).is_empty(),
             "nothing changed since"
         );
+    }
+
+    #[test]
+    fn the_sell_list_counts_the_stack_of_its_row_and_follows_a_sale() {
+        let labels = Labels::default();
+        let sidecar = Sidecar::empty();
+        let mut ram = wram_with(&[2, 2, 2, 16], 0);
+        let mut keeper = Keeper::new(Rules::default());
+        let events = keeper.bind(&ram, &labels, None, &sidecar, true);
+        apply(&mut ram, &events);
+        assert_eq!(read_list(&ram), [(2, 0), (16, 0)], "three Bulmas are one row");
+        assert_eq!(keeper.count_at(&ram, 0), Some(3), "the stack of three");
+        assert_eq!(keeper.count_at(&ram, 1), Some(1), "a single unit");
+        assert_eq!(keeper.count_at(&ram, 2), None, "no third row");
+        // The original sells the row 0: it compacts the list, the stack keeps two units and the row stays.
+        ram[d::ITEM_LIST as usize - 0x7E_0000..][..2].copy_from_slice(&[16, 0]);
+        ram[d::ITEM_COUNT as usize - 0x7E_0000] = 1;
+        let events = keeper.sync(&ram, &labels, None, &sidecar);
+        apply(&mut ram, &events);
+        assert_eq!(read_list(&ram), [(2, 0), (16, 0)], "the list shows the stack again");
+        assert_eq!(keeper.count_at(&ram, 0), Some(2), "one unit sold");
+        assert_eq!(keeper.count_at(&ram, 1), Some(1));
+        // The last unit of the single sells the row away.
+        ram[d::ITEM_LIST as usize - 0x7E_0000..][..2].copy_from_slice(&[2, 0]);
+        ram[d::ITEM_COUNT as usize - 0x7E_0000] = 1;
+        let events = keeper.sync(&ram, &labels, None, &sidecar);
+        apply(&mut ram, &events);
+        assert_eq!(read_list(&ram), [(2, 0)], "the sold single leaves the list");
+        assert_eq!(keeper.count_at(&ram, 0), Some(2));
+        assert_eq!(keeper.count_at(&ram, 1), None);
+        // A list that is not the one the keeper wrote counts nothing: no count beside another object.
+        ram[d::ITEM_LIST as usize - 0x7E_0000] = 5;
+        assert_eq!(keeper.count_at(&ram, 0), None);
+    }
+
+    #[test]
+    fn a_sale_waits_for_the_shops_removal_then_takes_one_unit_and_keeps_the_screens_stock() {
+        let labels = Labels::default();
+        let sidecar = Sidecar::empty();
+        let mut ram = wram_with(&[2, 2, 2, 16], 0);
+        let mut keeper = Keeper::new(Rules::default());
+        let events = keeper.bind(&ram, &labels, None, &sidecar, true);
+        apply(&mut ram, &events);
+        // The shop took the count down and left the list as it was: in transit, the bag does not follow.
+        ram[d::ITEM_COUNT as usize - 0x7E_0000] = 1;
+        let events = keeper.sync_shop(&ram, &labels, None, &sidecar, true);
+        assert!(events.is_empty(), "nothing is written while the sale runs");
+        assert_eq!(keeper.bag().unwrap().units_of(2), 3);
+        assert_eq!(
+            keeper.bag().unwrap().units_of(16),
+            1,
+            "the last entry is not taken for the sold one"
+        );
+        // The shop took the sold entry out: one unit of the stack is gone, the row stays, and the shop's copy of
+        // the list for its screen shows the rows again.
+        ram[d::ITEM_LIST as usize - 0x7E_0000..][..2].copy_from_slice(&[16, 0]);
+        let events = keeper.sync_shop(&ram, &labels, None, &sidecar, false);
+        apply(&mut ram, &events);
+        assert_eq!(keeper.bag().unwrap().units_of(2), 2);
+        assert_eq!(read_list(&ram), [(2, 0), (16, 0)]);
+        let stock = d::SHOP_STOCK as usize - 0x7E_0000;
+        assert_eq!([ram[stock], ram[stock + 2]], [2, 16], "the shop's copy has both rows");
+        assert_eq!(ram[d::SHOP_STOCK_COUNT as usize - 0x7E_0000], 2);
+        // Only the frame after a sale writes it: the stock of a Buy list is not the bag's.
+        ram[stock] = 9;
+        let events = keeper.sync_shop(&ram, &labels, None, &sidecar, false);
+        assert_eq!(events.len(), 0, "the stock of a Buy list is left alone");
+        assert_eq!(ram[stock], 9);
     }
 
     #[test]

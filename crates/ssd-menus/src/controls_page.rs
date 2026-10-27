@@ -42,10 +42,10 @@ pub(crate) fn rows(list: &mut DrawList, view: &OptionsView) {
     let middle = y + ROW / 2.0;
     cursor_row(list, left, right, y, at == 0);
     list.text(left + 26.0, middle, "Device", LABEL_TEXT, palette::BLACK, Align::Left);
-    let widths = [136.0, 120.0, 100.0];
-    let mut x = right - widths[0] - widths[1] - widths[2] - 4.0;
+    let widths = [136.0, 120.0, 100.0, 100.0];
+    let mut x = right - widths.iter().sum::<f32>() - 6.0;
     for (index, (text, width)) in
-        ["Keyboard", "Gamepad", "Touch"].into_iter().zip(widths).enumerate()
+        ["Keyboard", "Gamepad", "Touch", "Turbo"].into_iter().zip(widths).enumerate()
     {
         let rect = Rect::new(x, middle - DEVICE_BUTTON_HEIGHT / 2.0, width, DEVICE_BUTTON_HEIGHT);
         if index == page {
@@ -57,18 +57,10 @@ pub(crate) fn rows(list: &mut DrawList, view: &OptionsView) {
     }
     y += ROW + GAP;
 
-    if page == controls::TOUCH_DEVICE {
-        // The touch controls' rows: a list under the device row, drawn like any page's rows. The view's cursor is a
-        // row of the table, so the generic list tints the row it is on.
-        let first = controls::TOUCH_ROW0;
-        crate::screens::option_row_list(
-            list,
-            view,
-            first..first + controls::TOUCH_ROWS,
-            left,
-            right,
-            y,
-        );
+    if let Some((first, count)) = controls::list_rows(page) {
+        // The touch controls' or the turbo rows: a list under the device row, drawn like any page's rows. The view's
+        // cursor is a row of the table, so the generic list tints the row it is on.
+        crate::screens::option_row_list(list, view, first..first + count, left, right, y);
         return;
     }
 

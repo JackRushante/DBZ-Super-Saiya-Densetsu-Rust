@@ -60,6 +60,15 @@ const TOWN_MODE: u8 = 0x01;
 const FIELD_MODE: u8 = 0x06;
 /// The bit of `$0D67` that is set while the window queue of the menu is empty (everything drawn).
 const DRAW_QUEUE_EMPTY: u8 = 0x80;
+/// The shop (`docs/re/data/menus.md`, "The shop"): `shop_mode` has bit 7 set while it runs and its low six bits say
+/// which of its machines: 0 the Buy / Sell choice, 1 the lists. In the lists' machine the Sell list is step 2: its
+/// cursor is `menu_row` (an index of the list, over the pages) and the portrait and price box are drawn.
+const SHOP_ON: u8 = 0x80;
+const SHOP_MODE_MASK: u8 = 0x3F;
+const SHOP_LIST_MODE: u8 = 1;
+const SHOP_SELL_STEP: u8 = 2;
+/// The step of a sale under way: from the A that sells (`03:A7B1` and on) to the removal of the entry (`03:A889`).
+const SHOP_SALE_STEP: u8 = 4;
 /// Rows of the item list on one page (the original's, eight a page).
 const ITEM_PAGE: usize = 8;
 /// The object id of Porunga: his price box shows the wishes he has left.
@@ -202,6 +211,35 @@ impl<'a> MenuProbe<'a> {
     #[must_use]
     pub fn field_mode(&self) -> bool {
         self.byte(d::GAME_MODE).is_some_and(|mode| mode == FIELD_MODE || mode == TOWN_MODE)
+    }
+
+    /// The step of the shop's lists machine, while the shop runs its lists in a town (`None` otherwise).
+    fn shop_step(&self) -> Option<u8> {
+        let mode = self.byte(d::SHOP_MODE)?;
+        let listing = mode & SHOP_ON != 0 && mode & SHOP_MODE_MASK == SHOP_LIST_MODE;
+        if !listing || self.byte(d::GAME_MODE) != Some(TOWN_MODE) {
+            return None;
+        }
+        self.byte(d::SHOP_STEP)
+    }
+
+    /// The row of the original's item list the shop's Sell list has its cursor on, while the list takes presses (the
+    /// shop in its list mode, at the step that reads the cursor and the portrait and price box show), in a town.
+    /// The list the shop sells from is a copy of `item_list`, so the row is an index of it.
+    #[must_use]
+    pub fn sell_row(&self) -> Option<usize> {
+        if self.shop_step()? != SHOP_SELL_STEP {
+            return None;
+        }
+        self.byte(d::MENU_ROW).map(usize::from)
+    }
+
+    /// Whether a sale is under way: the shop has taken one entry off the count and marked it (its attribute byte is
+    /// cleared), and takes it out of the list only when its message has run, about a hundred frames later. The list is
+    /// in transit then (the count is one short and no entry is gone), so the bag does not follow it yet.
+    #[must_use]
+    pub fn sale_pending(&self) -> bool {
+        self.shop_step() == Some(SHOP_SALE_STEP)
     }
 
     /// The members of the party.
@@ -569,6 +607,36 @@ mod tests {
         set(&mut ram, d::MENU_SCREEN, SCREEN_TOWN);
         let view = MenuProbe::new(&ram, &labels).view().unwrap();
         assert!(view.town && !view.flying, "a town has no flying");
+    }
+
+    #[test]
+    fn the_sell_list_is_the_shops_list_machine_at_its_sell_step_in_a_town() {
+        let labels = labels();
+        let mut ram = wram(&[
+            (d::GAME_MODE, &[TOWN_MODE]),
+            (d::SHOP_MODE, &[0x81]),
+            (d::SHOP_STEP, &[SHOP_SELL_STEP]),
+            (d::MENU_ROW, &[4]),
+        ]);
+        assert_eq!(MenuProbe::new(&ram, &labels).sell_row(), Some(4), "the cursor's row");
+        assert!(!MenuProbe::new(&ram, &labels).sale_pending(), "the list takes presses");
+        set(&mut ram, d::SHOP_STEP, SHOP_SALE_STEP);
+        assert!(MenuProbe::new(&ram, &labels).sale_pending(), "a sale under way");
+        assert_eq!(MenuProbe::new(&ram, &labels).sell_row(), None, "no count while it runs");
+        set(&mut ram, d::GAME_MODE, FIELD_MODE);
+        assert!(!MenuProbe::new(&ram, &labels).sale_pending(), "not in a town");
+        set(&mut ram, d::GAME_MODE, TOWN_MODE);
+        set(&mut ram, d::SHOP_STEP, 7);
+        assert_eq!(MenuProbe::new(&ram, &labels).sell_row(), None, "the Buy list's step");
+        set(&mut ram, d::SHOP_STEP, SHOP_SELL_STEP);
+        set(&mut ram, d::SHOP_MODE, 0x80);
+        assert_eq!(MenuProbe::new(&ram, &labels).sell_row(), None, "the Buy / Sell choice");
+        set(&mut ram, d::SHOP_MODE, 0x01);
+        assert_eq!(MenuProbe::new(&ram, &labels).sell_row(), None, "the shop is not running");
+        set(&mut ram, d::SHOP_MODE, 0x81);
+        set(&mut ram, d::GAME_MODE, FIELD_MODE);
+        assert_eq!(MenuProbe::new(&ram, &labels).sell_row(), None, "not in a town");
+        assert_eq!(MenuProbe::new(&ram[..0x100], &labels).sell_row(), None, "too short");
     }
 
     #[test]
