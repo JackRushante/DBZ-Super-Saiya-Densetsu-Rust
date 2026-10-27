@@ -39,6 +39,8 @@ pub(crate) struct FakeMenu {
     pub hold: bool,
     /// A battle runs (`context_61` 1): its command window is screen 17, and it holds the field (`field_state` 2).
     pub battle: bool,
+    /// `encounter_group_index`: the encounter group of the battle.
+    pub group: u8,
     /// The item list the game holds (object and state word of each entry), as the keeper last wrote it.
     pub list: Vec<(u8, u16)>,
     /// Frames until the timed change of the state (opening, take-off, the Item list).
@@ -82,6 +84,7 @@ impl FakeMenu {
         if self.battle {
             put(d::CONTEXT_61, 1);
         }
+        put(d::ENCOUNTER_GROUP_INDEX, self.group);
         for (index, &(object, extra)) in self.list.iter().enumerate() {
             put(d::ITEM_LIST + 2 * index as u32, object);
             let [low, high] = extra.to_le_bytes();

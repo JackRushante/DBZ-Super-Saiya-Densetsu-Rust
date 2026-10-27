@@ -9,10 +9,11 @@
 //! ([`Bag::project`]), so the original always sees the list the bag implies.
 
 use crate::data as d;
-use ssd_menus::Labels;
 use ssd_menus::bag::{Bag, Class, LIST_FULL, Rules, Sidecar};
+use ssd_menus::{Labels, ObjectLabel};
 use ssd_oracle::HostEvent;
 use ssd_save::{CHECKSUM_OFFSET, IMAGE_LEN, PAGE_LEN, SLOT_BASES, SaveFile, SlotStatus};
+use std::borrow::Cow;
 
 /// The tag of the application event that binds the bag: its payload is the bag's bytes.
 pub const BIND_TAG: u8 = 1;
@@ -329,7 +330,7 @@ impl Keeper {
                 .iter()
                 .zip(&shown)
                 .all(|(&(object, extra), shown)| shown.object == object && shown.extra == extra);
-        let writes = if same { Vec::new() } else { list_writes(&shown, labels) };
+        let writes = if same { Vec::new() } else { list_writes(&shown, labels, group_of(wram)) };
         self.shown = shown;
         writes
     }
@@ -339,6 +340,47 @@ impl Keeper {
 fn class_of(labels: &Labels, object: u8) -> Class {
     let story = labels.objects.get(usize::from(object)).is_some_and(|label| label.story);
     Class::of(object, story)
+}
+
+/// The story's Gohan: `01:C535` compares each entry of the list with `$1A`.
+const GOHAN: u8 = 0x1A;
+/// `encounter_group_index` of the first Raditz battle, where Gohan can be called.
+const RADITZ_GROUP: u8 = 5;
+/// Gohan's attribute in that battle: INT (bit 7) and cannot be dropped (bit 2), without the story bit.
+const GOHAN_CALLED: u8 = 0x84;
+
+/// The attribute the original's list gives `object` now, from `attribute`, its attribute in the table
+/// (`item_attributes`), and `group`, the encounter group of the battle (`encounter_group_index`). `01:C535` writes each
+/// entry's attribute from the table, except Gohan's when the group is the first Raditz battle's: there it is "INT,
+/// cannot be dropped", so that he can be called, the one way to hurt Raditz (`docs/re/data/menus.md`). Every other
+/// object, and Gohan in any other group, keeps its table attribute.
+pub(crate) fn attribute_now(object: u8, attribute: u8, group: u8) -> u8 {
+    if object == GOHAN && group == RADITZ_GROUP { GOHAN_CALLED } else { attribute }
+}
+
+/// The label of `object` with its attribute as it is now ([`attribute_now`]): the catalogue's label, or, when the
+/// attribute now is another one, a copy whose attribute and flags are those of the attribute now.
+pub(crate) fn label_now(labels: &Labels, object: u8, group: u8) -> Option<Cow<'_, ObjectLabel>> {
+    let label = labels.objects.get(usize::from(object))?;
+    let attribute = attribute_now(object, label.attribute, group);
+    if attribute == label.attribute {
+        return Some(Cow::Borrowed(label));
+    }
+    Some(Cow::Owned(ObjectLabel {
+        attribute,
+        battle: attribute & 0x80 != 0,
+        field: attribute & 0x40 != 0,
+        story: attribute & 0x20 != 0,
+        fixed: attribute & 0x04 != 0,
+        member: attribute & 0x08 != 0,
+        card: attribute & 0x10 != 0,
+        ..label.clone()
+    }))
+}
+
+/// The encounter group of the battle in work RAM (`encounter_group_index`); 0 when the snapshot does not hold it.
+fn group_of(wram: &[u8]) -> u8 {
+    wram.get(d::ENCOUNTER_GROUP_INDEX as usize - 0x7E_0000).copied().unwrap_or(0)
 }
 
 /// Whether work RAM holds a list the game could have made: a count of at most 24 entries, each of
@@ -366,13 +408,13 @@ fn read_list(wram: &[u8]) -> Vec<(u8, u16)> {
         .collect()
 }
 
-/// The writes of the list `shown` in work RAM: the entries and their state words, and the count.
-fn list_writes(shown: &[Shown], labels: &Labels) -> Vec<HostEvent> {
+/// The writes of the list `shown` in work RAM: the entries and their state words, and the count. Each entry's
+/// attribute is the one the original's list has now ([`attribute_now`], with the encounter group `group`).
+fn list_writes(shown: &[Shown], labels: &Labels, group: u8) -> Vec<HostEvent> {
     let mut entries = vec![0_u8; LIST_BYTES];
     let mut extras = vec![0_u8; LIST_BYTES];
     for (index, entry) in shown.iter().enumerate() {
-        let attribute =
-            labels.objects.get(usize::from(entry.object)).map_or(0, |label| label.attribute);
+        let attribute = label_now(labels, entry.object, group).map_or(0, |label| label.attribute);
         entries[2 * index] = entry.object;
         entries[2 * index + 1] = attribute & !0x01;
         extras[2 * index..2 * index + 2].copy_from_slice(&entry.extra.to_le_bytes());
@@ -528,6 +570,67 @@ mod tests {
                 ram[at..at + bytes.len()].copy_from_slice(bytes);
             }
         }
+    }
+
+    /// Labels with the story's Gohan (26) as the catalogue has him (`$25`: a story object, cannot be dropped) and
+    /// Bulma (2, INT and EXT).
+    fn gohan_labels() -> Labels {
+        let mut objects = vec![ObjectLabel::default(); OBJECTS];
+        objects[2] =
+            ObjectLabel { attribute: 0xC0, battle: true, field: true, ..ObjectLabel::default() };
+        objects[26] =
+            ObjectLabel { attribute: 0x25, story: true, fixed: true, ..ObjectLabel::default() };
+        Labels { objects, ..Labels::default() }
+    }
+
+    /// The attribute byte the keeper writes for each object of a fresh bind of the list `objects`, with the
+    /// encounter group `group` in work RAM.
+    fn written_attributes(objects: &[u8], group: u8) -> Vec<(u8, u8)> {
+        let labels = gohan_labels();
+        let mut ram = wram_with(objects, 0);
+        ram[d::ENCOUNTER_GROUP_INDEX as usize - 0x7E_0000] = group;
+        let mut keeper = Keeper::new(Rules::default());
+        let events = keeper.bind(&ram, &labels, None, &Sidecar::empty(), true);
+        apply(&mut ram, &events);
+        let list = d::ITEM_LIST as usize - 0x7E_0000;
+        (0..read_list(&ram).len()).map(|i| (ram[list + 2 * i], ram[list + 2 * i + 1])).collect()
+    }
+
+    #[test]
+    fn the_list_of_the_first_raditz_battle_is_written_with_gohan_as_int_and_not_droppable() {
+        // Two Bulmas are one stack, so the list is written back.
+        let written = written_attributes(&[26, 2, 2], 5);
+        assert!(written.contains(&(26, 0x84)), "Gohan as 01:C535 has him there: {written:?}");
+        assert!(
+            written.contains(&(2, 0xC0)),
+            "the other objects keep their attribute: {written:?}"
+        );
+    }
+
+    #[test]
+    fn the_list_of_another_battle_is_written_with_gohans_own_attribute() {
+        for group in [0, 4, 6] {
+            let written = written_attributes(&[26, 2, 2], group);
+            assert!(
+                written.contains(&(26, 0x24)),
+                "group {group}: the table's, bit 0 clear: {written:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_gohan_in_the_first_raditz_battle_has_another_attribute_now() {
+        assert_eq!(attribute_now(0x1A, 0x25, 5), 0x84);
+        assert_eq!(attribute_now(0x1A, 0x25, 4), 0x25);
+        assert_eq!(attribute_now(0x1B, 0x25, 5), 0x25, "another story object keeps its own");
+        let labels = gohan_labels();
+        let now = label_now(&labels, 26, 5).unwrap();
+        assert_eq!(
+            (now.attribute, now.battle, now.field, now.story, now.fixed),
+            (0x84, true, false, false, true),
+            "the flags are the bits of the attribute now"
+        );
+        assert!(matches!(label_now(&labels, 26, 4), Some(Cow::Borrowed(_))));
     }
 
     #[test]
