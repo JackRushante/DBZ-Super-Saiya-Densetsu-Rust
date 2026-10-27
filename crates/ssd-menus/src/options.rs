@@ -442,9 +442,13 @@ pub enum Effect {
     Open(Opens),
 }
 
-/// The integers the options keep, by key. Keys the game does not know are kept and written back.
+/// The integers the options keep, by key, and the few words (a language's code, see
+/// [`crate::language::Language::store`]). Keys the game does not know are kept and written back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Values(BTreeMap<String, i64>);
+pub struct Values {
+    numbers: BTreeMap<String, i64>,
+    words: BTreeMap<String, String>,
+}
 
 impl Values {
     /// An empty map: every row is at its default.
@@ -453,20 +457,35 @@ impl Values {
         Self::default()
     }
 
-    /// The value under `key`.
+    /// The value under `key`, when it is a number.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<i64> {
-        self.0.get(key).copied()
+        self.numbers.get(key).copied()
     }
 
-    /// Stores `value` under `key`.
+    /// Stores `value` under `key` (in place of a word there).
     pub fn set(&mut self, key: &str, value: i64) {
-        self.0.insert(key.to_owned(), value);
+        self.words.remove(key);
+        self.numbers.insert(key.to_owned(), value);
+    }
+
+    /// The value under `key`, when it is a word.
+    #[must_use]
+    pub fn word(&self, key: &str) -> Option<&str> {
+        self.words.get(key).map(String::as_str)
+    }
+
+    /// Stores the word `value` under `key` (in place of a number there). A word is one line without `=`, trimmed
+    /// as the file reads it back.
+    pub fn set_word(&mut self, key: &str, value: &str) {
+        self.numbers.remove(key);
+        self.words.insert(key.to_owned(), value.trim().replace(['\n', '\r', '='], ""));
     }
 
     /// Forgets the value of `key` (the row is at its default again).
     pub fn remove(&mut self, key: &str) {
-        self.0.remove(key);
+        self.numbers.remove(key);
+        self.words.remove(key);
     }
 
     /// Forgets every key that starts with `prefix`.
@@ -476,13 +495,14 @@ impl Values {
 
     /// Keeps the keys `keep` says yes to.
     pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
-        self.0.retain(|key, _| keep(key));
+        self.numbers.retain(|key, _| keep(key));
+        self.words.retain(|key, _| keep(key));
     }
 
     /// Whether nothing is stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.numbers.is_empty() && self.words.is_empty()
     }
 
     /// The keys that belong to `category`'s rows are forgotten.
@@ -500,8 +520,12 @@ const SLOTS_MAGIC: &str = "ssd-options";
 /// The version of both files. A file of a newer version is read as far as it is understood.
 pub const VERSION: u32 = 1;
 
-/// The `key=value` lines of `text` after its header line, the header being `magic` and a version number.
-fn lines<'a>(text: &'a str, magic: &str) -> Result<impl Iterator<Item = (&'a str, i64)>, String> {
+/// The `key=value` lines of `text` after its header line, the header being `magic` and a version number: the
+/// value as written (trimmed).
+fn lines<'a>(
+    text: &'a str,
+    magic: &str,
+) -> Result<impl Iterator<Item = (&'a str, &'a str)>, String> {
     let mut all = text.lines();
     let header = all.next().unwrap_or("").trim();
     let version = header
@@ -513,22 +537,26 @@ fn lines<'a>(text: &'a str, magic: &str) -> Result<impl Iterator<Item = (&'a str
     let _ = version;
     Ok(all.filter_map(|line| {
         let (key, value) = line.split_once('=')?;
-        Some((key.trim(), value.trim().parse::<i64>().ok()?))
+        Some((key.trim(), value.trim()))
     }))
 }
 
 impl Values {
-    /// The PC file: a header line, then `key=value` lines.
+    /// The PC file: a header line, then `key=value` lines, the numbers then the words.
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut text = format!("{PC_MAGIC} {VERSION}\n");
-        for (key, value) in &self.0 {
+        for (key, value) in &self.numbers {
+            let _ = writeln!(text, "{key}={value}");
+        }
+        for (key, value) in &self.words {
             let _ = writeln!(text, "{key}={value}");
         }
         text
     }
 
-    /// Reads [`Values::to_text`]. A line that is not `key=number` is skipped; a key nobody knows is kept.
+    /// Reads [`Values::to_text`]: a value that reads as a number is a number, any other a word. A line without a key
+    /// or a value is skipped; a key nobody knows is kept.
     ///
     /// # Errors
     ///
@@ -536,8 +564,12 @@ impl Values {
     pub fn from_text(text: &str) -> Result<Self, String> {
         let mut values = Self::new();
         for (key, value) in lines(text, PC_MAGIC)? {
-            if !key.is_empty() {
-                values.set(key, value);
+            if key.is_empty() || value.is_empty() {
+                continue;
+            }
+            match value.parse::<i64>() {
+                Ok(number) => values.set(key, number),
+                Err(_) => values.set_word(key, value),
             }
         }
         Ok(values)
@@ -585,7 +617,7 @@ impl SlotOptions {
         let mut text = format!("{SLOTS_MAGIC} {VERSION}\n");
         for (slot, entry) in &self.entries {
             let _ = writeln!(text, "s{slot}.sum={}", entry.checksum);
-            for (key, value) in &entry.values.0 {
+            for (key, value) in &entry.values.numbers {
                 let _ = writeln!(text, "s{slot}.{key}={value}");
             }
         }
@@ -602,6 +634,7 @@ impl SlotOptions {
         let mut sums: BTreeMap<u8, u16> = BTreeMap::new();
         let mut values: BTreeMap<u8, Values> = BTreeMap::new();
         for (key, value) in lines(text, SLOTS_MAGIC)? {
+            let Ok(value) = value.parse::<i64>() else { continue };
             let Some((slot, name)) = key.strip_prefix('s').and_then(|rest| rest.split_once('.'))
             else {
                 continue;
@@ -779,6 +812,7 @@ mod tests {
         assert_eq!(read.get("video.look"), None);
         assert_eq!(read.get("audio.music"), Some(-2));
         assert_eq!(read.get(""), None);
+        assert_eq!(read.word("video.look"), Some("x"), "a word is kept as a word");
         assert!(Values::from_text("").is_err() && Values::from_text("ssd-options 1\n").is_err());
         assert!(
             Values::from_text("ssd-settings\n").is_err()
@@ -789,6 +823,32 @@ mod tests {
             Values::new(),
             "no keys: all defaults"
         );
+    }
+
+    #[test]
+    fn the_pc_file_keeps_a_word_and_a_key_holds_a_number_or_a_word() {
+        let mut values = Values::new();
+        values.set("video.scale", 4);
+        values.set_word("access.language", "xx");
+        let text = values.to_text();
+        assert_eq!(text, "ssd-settings 1\nvideo.scale=4\naccess.language=xx\n");
+        assert_eq!(Values::from_text(&text).unwrap(), values);
+        values.set("access.language", 1);
+        assert_eq!(
+            (values.get("access.language"), values.word("access.language")),
+            (Some(1), None)
+        );
+        values.set_word("access.language", " x=y\n");
+        assert_eq!(
+            (values.get("access.language"), values.word("access.language")),
+            (None, Some("xy"))
+        );
+        values.remove("access.language");
+        assert_eq!(values.word("access.language"), None);
+        values.retain(|key| key != "video.scale");
+        assert!(values.is_empty());
+        let read = Values::from_text("ssd-settings 1\nkey=\n").unwrap();
+        assert!(read.is_empty(), "no value: skipped");
     }
 
     #[test]
