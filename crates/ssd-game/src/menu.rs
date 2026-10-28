@@ -8,11 +8,16 @@
 //! entries, `party_order` and `party_records` the party. [`presses`] plays the original's input and
 //! [`driver`] turns the HD's choices into it.
 
+pub mod cards;
 pub mod driver;
 pub mod keeper;
+mod order;
 pub mod presses;
+mod save;
+mod status;
 #[cfg(test)]
 mod testing;
+mod text;
 
 use crate::data as d;
 use ssd_menus::{Labels, Member, MenuView, ObjectLabel, Screen, Selected, Slot};
@@ -31,6 +36,9 @@ const SCREEN_BATTLE_COMMAND: u8 = 17;
 const SCREEN_BATTLE_EFFECT: u8 = 21;
 /// The Menu list (screen 4): Cards, Status, Order, Text, Save.
 const SCREEN_MENU: u8 = 4;
+/// The Status (screen 7): its page 1 idles on step 2 with `menu_busy` set, and takes A and B there.
+const SCREEN_STATUS: u8 = 7;
+const STATUS_PAGE_STEP: u8 = 2;
 /// The Save (screen 10). Its list of save slots is step 1: the cursor (`map_entry_value`, `$0D62`) holds the slot
 /// chosen, 0 to 2. The A that chooses the slot writes the slot, and the Save moves to its completion (step 2) in the
 /// next frame; the cursor is back at 0 by then, so the slot is read on the list's frames. Step 0 is the question
@@ -295,6 +303,8 @@ impl<'a> MenuProbe<'a> {
                 }
                 _ => false,
             },
+            // Status page 1 waits for a press on its step 2, busy flag or not.
+            Some(SCREEN_STATUS) => self.step() == Some(STATUS_PAGE_STEP),
             _ => !self.busy(),
         }
     }
@@ -338,9 +348,16 @@ impl<'a> MenuProbe<'a> {
         let items = self.items()?;
         let selected = match screen {
             Screen::Items => self.selected(&items, cursor, page),
-            Screen::Command | Screen::Menu | Screen::Cheats | Screen::Options | Screen::Mods => {
-                None
-            }
+            Screen::Command
+            | Screen::Menu
+            | Screen::Cheats
+            | Screen::Options
+            | Screen::Mods
+            | Screen::Cards
+            | Screen::Text
+            | Screen::Order
+            | Screen::Status
+            | Screen::Save => None,
         };
         Some(MenuView {
             bag: None,
@@ -386,12 +403,20 @@ impl<'a> MenuProbe<'a> {
             .collect()
     }
 
-    /// The party in party order: the record of each character id of `party_order`.
+    /// The party in party order: the record of each character id of [`MenuProbe::party_ids`].
     fn party(&self) -> Vec<Member> {
-        (0..PARTY_ORDER_LENGTH)
-            .map_while(|index| self.byte(d::PARTY_ORDER + index).filter(|&id| id != PARTY_END))
-            .filter_map(|character| self.member(character))
-            .collect()
+        self.party_ids().into_iter().filter_map(|character| self.member(character)).collect()
+    }
+
+    /// The character ids of the party in party order. The party records in their slots are the order the game plays with
+    /// (the field's corners, the Order screen and the battles read them), so they are what is read when they describe the
+    /// party; `party_order` (`$0190`) is a list the game rewrites only when it saves, so it is the fallback.
+    fn party_ids(&self) -> Vec<u8> {
+        self.order_rows().unwrap_or_else(|| {
+            (0..PARTY_ORDER_LENGTH)
+                .map_while(|index| self.byte(d::PARTY_ORDER + index).filter(|&id| id != PARTY_END))
+                .collect()
+        })
     }
 
     /// The member of a character: its record in the party, if it has one.
@@ -482,11 +507,11 @@ mod tests {
         objects[13] = object("Oolong", Some(7), false, true);
         objects[28] = object("Goku", None, false, false);
         let characters = vec![
-            CharacterLabel { name: "Goku".into(), face: Some(28) },
-            CharacterLabel { name: "Gohan".into(), face: None },
-            CharacterLabel { name: "Piccolo".into(), face: Some(29) },
+            CharacterLabel { name: "Goku".into(), face: Some(28), class: Some(1) },
+            CharacterLabel { name: "Gohan".into(), face: None, class: Some(2) },
+            CharacterLabel { name: "Piccolo".into(), face: Some(29), class: Some(2) },
         ];
-        Labels { characters, objects }
+        Labels { characters, objects, ..Labels::default() }
     }
 
     /// A field menu on the Item screen: three items, the cursor on the second, Goku and Piccolo in

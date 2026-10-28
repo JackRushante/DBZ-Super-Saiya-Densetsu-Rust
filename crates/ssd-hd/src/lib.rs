@@ -46,12 +46,13 @@ pub use art::{
     colour_class,
 };
 pub use binding::Binder;
-pub use cards::{CardArt, Preview as CardPreview};
+pub use cards::{CARD_WORDS, CardArt, CardPart, Preview as CardPreview};
 pub use enhanced::{HdFrame, HdOptions, Look, Rect};
 pub use font::{Font, FontError};
 pub use menu_art::MenuPicture;
 pub use pack::{Index, TileRef};
 pub use ssd_oracle::{LineRegs, SpriteLine};
+pub use tooltip::symbol_words;
 
 /// Width of the frame the renderer produces (and of the PPU's, without hi-res).
 pub const WIDTH: usize = 256;

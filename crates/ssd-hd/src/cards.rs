@@ -26,6 +26,9 @@ use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
+mod face;
+pub use face::{Part as CardPart, WORDS as CARD_WORDS};
+
 /// The first glyph index that is a card (or other tile art) tile: the text glyphs are below it (97 of them).
 pub(crate) const CARD_BASE: u8 = 104;
 /// The most tiles of art the index may hold.
@@ -229,6 +232,15 @@ impl CardArt {
         });
         let at = self.tips.iter().position(|(tip, _)| *tip == code)?;
         all.get(at).map(Vec::as_slice)
+    }
+
+    /// The art of the card symbol `symbol` (0 to 6, a fighter's class too): its tooltip picture, the side in pixels and the
+    /// RGBA pixels, for the menus that show a class. `None` for a number that is no symbol, or when the art has no picture of it.
+    #[must_use]
+    pub fn symbol(&self, symbol: u8) -> Option<(usize, &[u8])> {
+        let code = crate::tooltip::TIPS.get(usize::from(symbol))?.code;
+        let (_, art) = self.tips.iter().find(|(tip, _)| *tip == code)?;
+        Some((TIP_PX, art.as_slice()))
     }
 
     /// The tiles with art, in glyph order (glyph `CARD_BASE + n` is the `n`th): their code, and whether it

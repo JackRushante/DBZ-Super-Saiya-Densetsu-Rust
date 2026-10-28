@@ -22,6 +22,10 @@ const FIRST_FIXED_ID: u8 = 8;
 /// Added to a character id (8 and up) to give its row of the unit table.
 const UNIT_ROW_SKEW: u8 = 26;
 
+/// The table of level caps (bank 3): one byte per character id, the highest level the character reaches. It is not a named
+/// symbol: the original reads it at two places (`docs/re/data/tables.md`, row 16).
+const LEVEL_CAPS: u32 = 0x03_850E;
+
 /// What a character gains on reaching a level (one row of the level table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelRow {
@@ -70,6 +74,9 @@ pub struct Character {
     /// The row of the unit table that gives the stats of this character instead of the level
     /// rows (ids 8, 9 and 10).
     pub fixed_stats_unit: Option<u8>,
+    /// The highest level the character reaches (47 or 48; 3 for the character with the short table): the level-up check
+    /// stops there, and the last row of the table is no level to reach.
+    pub level_cap: u8,
 }
 
 impl Character {
@@ -124,6 +131,7 @@ pub(crate) fn read(rom: RomView<'_>) -> Result<Vec<Character>, CatalogueError> {
             unit_id: rom.u8(d::PARTY_UNIT_IDS + id)?,
             levels,
             fixed_stats_unit: fixed.then(|| id8 + UNIT_ROW_SKEW),
+            level_cap: rom.u8(LEVEL_CAPS + id)?,
         });
     }
     Ok(characters)
@@ -165,6 +173,7 @@ mod tests {
             (d::CHARACTER_LEVEL_ROWS, &rows),
             (d::CHARACTER_LEVEL_POINTERS, &pointers),
             (d::PARTY_UNIT_IDS, &[0, 9, 1, 10, 11, 12, 13, 0x50, 0x22, 0x23, 0x24, 0x61]),
+            (LEVEL_CAPS, &[47, 47, 47, 47, 47, 47, 47, 48, 48, 48, 48, 3]),
             (d::STRING_POINTERS, &[0x00, 0xAC, 0x05, 0xAC]),
             (0x02_AC00, &[4, 0xED, 0x1B, 0x17, 0x55, 0x01]),
             (0x02_AC05, &[2, 0x8B, 0x05]),
@@ -195,6 +204,10 @@ mod tests {
         assert_eq!(characters[1].name.text, "Pa");
         assert_eq!(characters[1].unit_id, 9);
         assert_eq!(characters[7].levels.len(), FULL, "a table ends where the next begins");
+        assert_eq!(
+            (goku.level_cap, characters[7].level_cap, characters[11].level_cap),
+            (47, 48, 3)
+        );
     }
 
     #[test]

@@ -31,7 +31,8 @@ beside a battle, a title or a room) drawn at that scale: 1488 x 956 pixels at 4x
 
 HD art: when the pack of the cached ROM holds art (`xtask hd-import`, below), the Enhanced picture draws it: the
 portraits and faces on the field and in battle, the fighters' poses and the effects of the battle, and the HD Item
-screen's portraits. `--hd-pack DIR` names another pack folder, `--no-hd-art` draws the look alone. The field's sprites
+screen's portraits. A pose may have bigger art than its sprite's box (Super Saiyan Goku's hair stands up past it): the pack's pose variants
+(`variants` of the art store, below; `docs/mods/art.md`, "Pose variants"). `--hd-pack DIR` names another pack folder, `--no-hd-art` draws the look alone. The field's sprites
 (the party, NPCs, ships and objects) are found as groups of the visible sprites (runs of one OAM palette, split into sets
 within 2 pixels of each other) and drawn the same way, recoloured to the palette in use; a group cut by the edge of the
 view is drawn from the group of the index that holds it, and a group that runs under line 224 (where the art's capture ends, the 239-line view shows the band below) takes the sprites of its palette that touch it there, when the index holds art for the whole figure. In the 16:9 view the groups are found over the whole view, so an
@@ -180,7 +181,22 @@ In Enhanced mode the map menus are drawn at 1280x720 in the original's style (cr
 Share Tech Mono font of the game's own HD text, DotGothic16 for the two kanji of the cards, the original portraits
 upscaled) over the field as it was when the menu opened: the command window of
 the field, the towns and the flying party with its help window, the corner portraits with their HP and KI bars and the
-Zeni window; the Menu list (Cheats opens the cheats screen below; Options opens the options screen, see "Options (M7)"); and the Item screen.
+Zeni window; the Menu list (Cheats opens the cheats screen below; Options opens the options screen, see "Options (M7)"); the Item screen;
+and the Cards screen: the hand of five drawn big (the game's own black cards, dealt one by one as the original deals them), a cursor
+over it (Left and Right), the kanji named with its reading and meaning as the battle's tooltip has them, the attack and defence
+numbers (a Z counts as 10), and who in the party the card favours (+25% battle power, the battle's own rule, ringed in the party
+row) with a help line in plain words; B goes back to the Menu list and Start closes the menu.
+The Order screen holds the party's new order while it is edited (A grabs a member, Up and Down carry it, A drops it, B undoes the
+last move or goes back) and writes nothing; "Apply order" has the original's own Order screen take the members one by one in the new
+order (its cursor walked to each row, A on each, A on Yes), so the game itself writes the records.
+The Save screen (Menu > Save) shows the three slots with what each holds (the party's portraits, the place, the leader's level, the
+money and the item count, read from the save itself) beside a strip for the game you are in; an empty slot says so, a slot that holds
+a game says it is replaced, and A on it asks "Overwrite slot 0N?" with the cursor on No. The original's first "Save?" question is not
+asked: the HD answers it with the original's own A, then moves the slot list's cursor and presses A, so the original's code writes the
+battery save (and the bag, cheats and mod state that go with a save follow it as before). The place is named from the map number for the
+maps the notes name (the first island and its cave, King Kai's planet, Piccolo's cave, Earth, Namek, the spaceship); the others show no
+place. B goes back to the Menu list with nothing saved, and Start closes the menu. `menu-test field menu-save` and `menu-test diff
+menu-save menu-save-over` play it.
 While an HD menu is up the keys belong to it: the arrows move its cursor, X confirms, Z goes back and Q or W changes
 the bag's tab (the game gets no buttons until the original draws a message or a screen of its own, such as Cards, Save
 or the take-off). The original menu keeps running underneath and performs every consequence (Talk, Look, the take-off,
@@ -189,6 +205,14 @@ as the last press of Talk, Look, Fly, Land or a Menu entry goes (the original sh
 there, and the press is taken when the original answers, a message that holds the field included). While the HD plays
 a choice (a few seconds), its keys wait for it to end. Options is greyed out: A on it does nothing, and its help line
 says "Coming soon."
+
+Status is the original's two pages on one screen: the party at the left (portrait, name, LV, HP and KI bars with their figures,
+nine slots with the unused ones as empty frames, a header counting 5/9) and the member under the cursor at the right (a big
+portrait, the class kanji with its reading and meaning, HP, KI, BP, PLA., EXP, the EXP to the next level and every technique
+with its KI cost). Up and Down change the member and the panel follows at once, B goes back to the Menu list and Start closes
+the menu. The screen only reads the party records and the cartridge's tables (`ssd-game`'s `menu/status.rs`); the original's own
+Status page 1 runs under it and is left with B presses, and nothing is written. The kanji is the HD pack's card art (no pack, no
+kanji; its reading and meaning stay).
 
 Enhanced mode is shown at 16:9: every frame is drawn 372 pixels wide, the original's 256 in the middle (where the view
 stops at a map's edge the picture moves toward it, and the frame still fills the width). The field shows its map beyond
@@ -606,7 +630,7 @@ skipped, and a line that is not an action is a usage error (exit 2) that names i
 - `breakpoint SYMBOL` (or an address, as the Debugger's field takes it)
 - `mode ROUTINE original`, `mode ROUTINE rust` or `mode ROUTINE verify`
 - `menu open` (A on the field), `menu key up|down|left|right|a|b|l|r|y|select|x` (the HD menu's keys: a confirms, b cancels, l and r change a page, y and select reset on the options, x applies the data packs),
-  `menu tab all|allies|tools` (the bag's tab), `menu press <key>` (a raw key or `pad <button>` for a Controls box that waits), `menu battle-cheats` (the Cheats screen over the battle the game is in, as F3 opens it) and `menu show field|menu|items|cheats|options|mods` (checks the HD screen): with
+  `menu tab all|allies|tools` (the bag's tab), `menu press <key>` (a raw key or `pad <button>` for a Controls box that waits), `menu battle-cheats` (the Cheats screen over the battle the game is in, as F3 opens it) and `menu close` (Start on the Cards or Status screen) and `menu show field|menu|items|cheats|options|mods|cards|text|status|order` (checks the HD screen): with
   `--mode enhanced` only. A menu line plays its choice to its
   end before the next line; a replay still playing stops there, and the menu presses live (`--replay` with
   `--headless-frames` to the field first)
@@ -943,6 +967,15 @@ listed in `art\maps\maps.toml`; every size is checked.
 An optional `mode7\index.json` (the Mode 7 planes' art: per plane an `id`, the content `key` of its VRAM, as `hd-art m7scan` and `m7dump` print it, the `palette` it
 was made in (256 colours `RRGGBB`) and its art at 4x in tiles of 256 x 256 game pixels, RGBA, named by a `tiles` pattern with `{x}` and `{y}`; see `ssd_hd::mode7art`)
 is linked into `art\mode7` of the pack and listed in `art\mode7\mode7.toml`; every tile is checked for its size.
+An optional `variants\index.json` (the poses' bigger art, the HD pack's own pose variants) lists `variants`: each has an `id` (the
+name of its picture), the `art` it replaces (a pose's `id` in `class2`), `when` it is drawn (`always`, or `kaioken`), the `margin`
+(art pixels on each side of the pose's picture: a multiple of 4, at most 96) and its `file`, the pose's picture grown by the margin
+(so `4 * width + 2 * margin` pixels across, the pose's `source_size` being in game pixels); a size that does not fit, a margin or
+a condition the game does not have, or two variants of one art for one condition is an error. The pictures are copied to
+`art/variants` of the pack and listed in `art/variants/variants.toml` (`ssd_hd::pack::PoseArt`). The renderer draws them as it
+draws a data pack's pose variants (`docs/mods/art.md`, "Pose variants"), and a data pack's variant of the same art wins over
+them. The store's folder `variants` holds the 27 poses of Super Saiyan Goku (`battle-goku-ssj-000` to `026`, `always`, margin 76:
+the hair stands up past the box of the original sprite).
 Every folder of the art store with an `index.json` is read (`classN` are sprites; a folder no reader knows is an error, so a
 branch that predates one never drops it from the pack). `bg\index.json` lists the background `layers`: `id`, the content `key`
 (`ssd_hd::bgart::layer_key`), the registers that show the layer (`bg`, `mode`, `map_base`, `char_base`, `size`), the tile
@@ -967,7 +1000,9 @@ of backgrounds and maps, the rollback zips and every original pixel stay out; a 
 colours of a Mode 7 plane, content hashes, sizes and `BB:AAAA` pointers are the only data of the game that an entry carries.
 It prints the size of each kind, then installs the zip into a scratch data directory (as the game does on the first launch)
 and compares the pack that comes out with the import's, index by index: any difference is an error. `--without-masks` leaves
-the outlines out. The game and a pack without source pictures: a background or map layer shown in a palette other than the
+the outlines out. The pose variants are one more kind of art (`variants/`, an `index.json` and a lossless WebP per picture; the
+import's pack and the installed one are compared on them too). The pack's `revision` is 2 by default since it carries them (the
+install is made again whenever the digest of the pack's files changes, which a new zip always does). The game and a pack without source pictures: a background or map layer shown in a palette other than the
 one its art was made for is drawn with the art's own colours.
 
 The game installs the pack on its own: with `hd-pack.zip` (or a folder `hd-pack` holding `hd-pack.toml`) next to the

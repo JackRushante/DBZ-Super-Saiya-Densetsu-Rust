@@ -5,15 +5,18 @@
 //!
 //! The curtain is up (`Up`) while the HD draws the menu, and then the keys belong to the HD and the
 //! game gets no buttons. The curtain lifts (`Lifted`) when the original draws the next thing itself
-//! (a message after Talk or Look, Fly or Land, Cards, Status, Order, Text, Save), and the game gets the
+//! (a message after Talk or Look, Fly or Land, Status, Order, Text, Save), and the game gets the
 //! keys again; it comes down (`Down`) once the field is free. The original's menu sits on its first
 //! screen while the HD cursor moves: a choice is a plan of presses from the original's own cursor.
 //! A use or a drop of the bag stages its stack in the original's list and then presses the original's
 //! own keys, one unit at a time, so the original takes the unit and the bag follows the list.
 
+use super::cards;
 use super::keeper::{BIND_TAG, Keeper, SPAWN_TAG, good_checksum, label_now};
+use super::order;
 use super::presses::{Button, Next, Outcome, Player, Step, Until};
-use super::{MenuProbe, PORUNGA, SAVE_DONE_STEP, SAVE_LIST_STEP, SAVE_SCREEN};
+use super::{MenuProbe, PORUNGA, SAVE_DONE_STEP, SAVE_LIST_STEP, SAVE_SCREEN, status};
+use super::{save, text};
 use crate::cheats::{CHEATS_TAG, block_events, frame_events, hand_events, settings_events};
 use crate::data as d;
 use crate::gameplay::{self, AutoRun};
@@ -29,6 +32,7 @@ use ssd_menus::options::{
     Category, Effect, Opens, Options, SlotOptions, Values, controls, difficulty, video,
 };
 use ssd_menus::packs::{Catalog, Listed, PackInfo, Request};
+use ssd_menus::screens::OrderNav;
 use ssd_menus::view::{
     BagView, ChapterLine, CheatsView, ControlsView, Labels, MenuView, ModsView, ObjectLabel,
     OptionsView, PackLine, PackState, RefusedKey, Screen, Selected, SpawnerRow, SpawnerView,
@@ -53,10 +57,14 @@ pub enum Curtain {
 enum Arrival {
     /// The HD shows this screen.
     Show(Screen),
+    /// The HD shows this screen again, with the cursors it had (the Menu list after Status).
+    Resume(Screen),
     /// The original draws what comes next.
     Lifted,
     /// The menu has closed.
     Closed,
+    /// The original saved to this slot (0 to 2) and shows its "Completed!": the HD says so and waits for A.
+    Saved(u8),
 }
 
 /// A plan running, and where it leaves the curtain.
@@ -136,6 +144,10 @@ struct State {
     save_slot: Option<u8>,
     /// Whether the Save was at its completion step at the last frame (a completion is seen once).
     save_done: bool,
+    /// The three save slots as the cartridge had them at the last frame, while the HD Save screen is up.
+    save_slots: [ssd_menus::screens::SlotState; 3],
+    /// The slots saved with a cheat on, as of the same frame.
+    save_marks: [bool; 3],
     /// The Cheats screen is open over a battle ([`Driver::open_battle_cheats`]): Back closes it, and a change
     /// writes the settings only, so the runtime bytes the wrappers keep through the battle stay.
     battle_cheats: bool,
@@ -167,6 +179,8 @@ struct State {
     mods_alert: Option<String>,
     /// The request the Data packs screen made, once: the host applies the set, or starts a chapter.
     mods_request: Option<Request>,
+    /// The Order screen's cursor and the order it holds, until "Apply order" has the original take it.
+    order: OrderNav,
 }
 
 /// The frames a second the video question counts its ten seconds in (the console's rate, which the host paces to).
@@ -215,6 +229,8 @@ impl Driver {
                 mods_save: None,
                 save_slot: None,
                 save_done: false,
+                save_slots: std::array::from_fn(|_| screens::SlotState::Used(None)),
+                save_marks: [false; 3],
                 battle_cheats: false,
                 battle_items: false,
                 options: Options::default(),
@@ -229,6 +245,7 @@ impl Driver {
                 packs_edit: Vec::new(),
                 mods_alert: None,
                 mods_request: None,
+                order: OrderNav::default(),
             },
         }
     }
@@ -428,6 +445,8 @@ impl Driver {
             mods_save: None,
             save_slot: None,
             save_done: false,
+            save_slots: std::array::from_fn(|_| screens::SlotState::Used(None)),
+            save_marks: [false; 3],
             battle_cheats: false,
             battle_items: false,
             options: Options { game: Values::new(), pc },
@@ -442,6 +461,7 @@ impl Driver {
             packs_edit: Vec::new(),
             mods_alert: None,
             mods_request: None,
+            order: OrderNav::default(),
         };
     }
 
@@ -467,13 +487,7 @@ impl Driver {
     /// checksum word (a slot changed by another way has no entry).
     #[must_use]
     pub fn marked_slots(&self, sram: &[u8]) -> [bool; 3] {
-        let mut marks = [false; 3];
-        for (slot, mark) in (0..3_u8).zip(marks.iter_mut()) {
-            if let Some(checksum) = good_checksum(sram, slot) {
-                *mark = self.state.cheat_sidecar.marked(slot, checksum);
-            }
-        }
-        marks
+        self.state.marked_slots(sram)
     }
 
     /// How the bag is bound (see [`Binding`]).
@@ -526,6 +540,12 @@ impl Driver {
         self.state.nav
     }
 
+    /// The Order screen's cursor and the order it holds.
+    #[must_use]
+    pub fn order(&self) -> &OrderNav {
+        &self.state.order
+    }
+
     /// Whether a plan is running: the menu is busy with a choice, and the keys wait.
     #[must_use]
     pub fn busy(&self) -> bool {
@@ -555,6 +575,14 @@ impl Driver {
     pub fn key(&mut self, key: Key, wram: &[u8]) {
         let probe = MenuProbe::new(wram, &self.labels);
         self.state.key(key, &probe, &self.labels, wram);
+    }
+
+    /// Start on the HD's Cards or Status screen closes the menu: on the Cards, the original's own A, once it has dealt the
+    /// hand; on the Status, its own B presses back out of the page; on the Save list (nothing asked, nothing saved) the
+    /// original's own B presses, and nothing is saved. Ignored while the curtain is not up, while a plan runs,
+    /// and on the other screens.
+    pub fn close_menu(&mut self) {
+        self.state.close_menu();
     }
 
     /// Whether the Controls page waits for the next key or button, and for which device: the host then gives
@@ -660,6 +688,23 @@ impl State {
         self.start(steps, Arrival::Show(Screen::Command));
     }
 
+    /// See [`Driver::close_menu`].
+    fn close_menu(&mut self) {
+        if self.curtain != Curtain::Up || self.running.is_some() {
+            return;
+        }
+        match self.nav.screen() {
+            Screen::Cards => self.start(cards::close_steps(), Arrival::Closed),
+            Screen::Status => self.start(status::close_steps(), Arrival::Closed),
+            // The Save list with nothing asked and nothing saved: the original's own B back to its command window and B
+            // again close the menu, and nothing is saved.
+            Screen::Save if self.nav.save().is_browsing() => {
+                self.start(save::leave_steps(), Arrival::Closed);
+            }
+            _ => {}
+        }
+    }
+
     /// The Controls page was waiting for a key or button and got `capture`: Esc stops, Backspace clears a
     /// shortcut, a code is taken for the action under the cursor unless another action already holds it.
     fn capture(&mut self, capture: controls::Capture) {
@@ -724,6 +769,8 @@ impl State {
                 let lines = self.mods_lines();
                 self.nav.key_mods(key, &lines)
             }
+            Screen::Order => self.order.key(key),
+            Screen::Status => self.nav.key_status(key, probe.status_count()),
             _ => self.nav.key(key, flying, town, probe.item_count()),
         };
         match action {
@@ -733,6 +780,28 @@ impl State {
             Action::Choose(Entry::Cheats) => self.nav.enter(Screen::Cheats),
             // The Options screen is the HD's own too: the original keeps its Menu list.
             Action::Choose(Entry::Options) => self.nav.enter(Screen::Options),
+            // The Text screen is the HD's own too: it holds the speed until A, then the original's Text screen takes it.
+            Action::Choose(Entry::Text) => self.nav.open_text(probe.text_speed()),
+            Action::TextKeep(speed) => self.start(text::keep_steps(speed), Arrival::Closed),
+            // The Save screen is the HD's own: the original keeps its Menu list until a slot is chosen, and then its own
+            // Save takes the presses (it writes the slot).
+            Action::Choose(Entry::Save) => self.nav.open_save(),
+            Action::SaveSlot(slot) => {
+                self.nav.save_saving(slot);
+                self.start(save::save_steps(slot), Arrival::Saved(slot));
+            }
+            Action::SaveClose => self.start(save::close_steps(), Arrival::Closed),
+            // The Order screen is the HD's own as well: it holds the order until Apply, then the original's own Order
+            // screen takes it pick by pick. A party the original's records do not describe keeps the original's screen.
+            Action::Choose(Entry::Order) if probe.order_rows().is_some() => {
+                if let Some(rows) = probe.order_rows() {
+                    self.nav.enter(Screen::Order);
+                    self.order.open(rows);
+                }
+            }
+            Action::OrderApply => {
+                self.start(order::apply_steps(self.order.order()), Arrival::Closed);
+            }
             Action::Choose(entry) => {
                 if let Some((steps, arrival)) = choice(screen, entry, flying, town) {
                     self.start(steps, arrival);
@@ -824,6 +893,8 @@ impl State {
                     vec![Step::Press { button: Button::B, until: Until::Command }],
                     Arrival::Show(Screen::Command),
                 ),
+                // Status is the HD's two pages in one: the original sits on its page 1, and B takes it back to its Menu list.
+                Screen::Status => self.start(status::back_steps(), Arrival::Resume(Screen::Menu)),
                 // Over a battle there is no menu under it: Back gives the battle its keys again.
                 Screen::Cheats if self.battle_cheats => {
                     self.battle_cheats = false;
@@ -832,9 +903,16 @@ impl State {
                 }
                 // Back to the Menu list, which the original never left: its cursor stays on Cheats.
                 Screen::Cheats => self.nav.resume(self.nav.cheats_back()),
-                Screen::Options => self.nav.resume(Screen::Menu),
+                // The Text screen goes back the same way: its speed was only held, and the old one stays.
+                Screen::Options | Screen::Text | Screen::Order | Screen::Save => {
+                    self.nav.resume(Screen::Menu);
+                }
                 // Back to the Options, where the Data packs button was.
                 Screen::Mods => self.nav.resume(Screen::Options),
+                // The original's Cards screen takes only A, which closes the menu: back is a close and a reopening.
+                Screen::Cards => {
+                    self.start(cards::back_steps(flying, town), Arrival::Show(Screen::Menu));
+                }
             },
         }
     }
@@ -1028,6 +1106,9 @@ impl State {
             SavedBag { slot, checksum, bag }
         });
         let saved_options = saved_cheats.is_some();
+        if self.nav.screen() == Screen::Save {
+            self.refresh_save_slots(labels, sram);
+        }
         self.video_tick();
         self.nav.tick();
         self.sync_device();
@@ -1036,6 +1117,26 @@ impl State {
             .then(|| self.options.pc.clone());
         let video = std::mem::take(&mut self.video_apply).then(|| self.options.pc.clone());
         Frame { pad, events, saved, saved_cheats, saved_mods, saved_options, settings, video }
+    }
+
+    /// The HD Save screen's slots, as the cartridge `sram` has them now (a Save that just wrote one shows at once), and
+    /// which of them hold a game, for the keys.
+    fn refresh_save_slots(&mut self, labels: &Labels, sram: Option<&[u8]>) {
+        self.save_slots = save::slots(sram, labels, &self.sidecar);
+        self.save_marks = sram.map_or([false; 3], |sram| self.marked_slots(sram));
+        self.nav.set_save_used(std::array::from_fn(|slot| self.save_slots[slot].used()));
+    }
+
+    /// Which save slots carry the CHEATS badge: a good save whose cheats were saved with one on, by its checksum word (a
+    /// slot changed by another way has no entry).
+    fn marked_slots(&self, sram: &[u8]) -> [bool; 3] {
+        let mut marks = [false; 3];
+        for (slot, mark) in (0..3_u8).zip(marks.iter_mut()) {
+            if let Some(checksum) = good_checksum(sram, slot) {
+                *mark = self.cheat_sidecar.marked(slot, checksum);
+            }
+        }
+        marks
     }
 
     /// The Save of the original, followed on work RAM at every frame. While the Save's list shows, its cursor (the
@@ -1146,6 +1247,36 @@ impl State {
         }
         if self.nav.screen() == Screen::Mods {
             return Some(screens::mods_screen(&self.mods_view()));
+        }
+        if self.nav.screen() == Screen::Status {
+            return Some(screens::status_screen(
+                &probe.status_view(usize::from(self.nav.cursor())),
+            ));
+        }
+        if self.nav.screen() == Screen::Cards {
+            let cursor = usize::from(self.nav.cursor());
+            return Some(screens::cards_screen(&probe.cards_view(cursor)));
+        }
+        if self.nav.screen() == Screen::Order {
+            return Some(screens::order_screen(&order::view(&self.order, labels)));
+        }
+        if self.nav.screen() == Screen::Text {
+            let text = self.nav.text();
+            return Some(screens::text_screen(&screens::TextView {
+                speed: text.speed(),
+                frames: text.frames(),
+            }));
+        }
+        if self.nav.screen() == Screen::Save {
+            let save = self.nav.save();
+            return Some(screens::save_screen(&screens::SaveView {
+                now: probe.save_now(self.keeper.bag().map(ssd_menus::bag::Bag::units)),
+                slots: self.save_slots.clone(),
+                badges: self.save_marks,
+                cursor: save.cursor(),
+                ask: save.ask(),
+                phase: save.phase(),
+            }));
         }
         let Context { flying, town } = context(probe);
         let mut view: MenuView = probe.view_as(
@@ -1578,8 +1709,17 @@ impl State {
     /// Where a plan that ended leaves the curtain.
     fn arrive(&mut self, arrival: Arrival, outcome: Outcome) {
         self.curtain = match (outcome, arrival) {
+            // The original wrote the slot and shows "Completed!": the HD's own message waits for A.
+            (Outcome::Reached, Arrival::Saved(slot)) => {
+                self.nav.save_done(slot);
+                Curtain::Up
+            }
             (Outcome::Reached, Arrival::Show(screen)) => {
                 self.nav.enter(screen);
+                Curtain::Up
+            }
+            (Outcome::Reached, Arrival::Resume(screen)) => {
+                self.nav.resume(screen);
                 Curtain::Up
             }
             // A plan that could not close the menu leaves the original's menu to the player, with the
@@ -1661,9 +1801,25 @@ fn choice(screen: Screen, entry: Entry, flying: bool, town: bool) -> Option<(Vec
                 Entry::Save => (4, 10),
                 _ => return None,
             };
-            (row, ORIGINAL_MENU_ROWS, Until::Screen(until), Arrival::Lifted)
+            // Cards and Status are the HD's: the original deals the hand or sits on its page 1, and the HD draws it
+            let arrival = match entry {
+                Entry::Cards => Arrival::Show(Screen::Cards),
+                Entry::Status => Arrival::Show(Screen::Status),
+                _ => Arrival::Lifted,
+            };
+            (row, ORIGINAL_MENU_ROWS, Until::Screen(until), arrival)
         }
-        Screen::Items | Screen::Cheats | Screen::Options | Screen::Mods => return None,
+        Screen::Items
+        | Screen::Cheats
+        | Screen::Options
+        | Screen::Mods
+        | Screen::Cards
+        | Screen::Text
+        | Screen::Order
+        | Screen::Status
+        | Screen::Save => {
+            return None;
+        }
     };
     // The original draws what comes next, so the curtain lifts as the last press goes: the HD cursor moved on the
     // rows above, and the HD window does not stay up (with rows the original's own window may not have) while
@@ -2200,7 +2356,7 @@ mod tests {
     }
 
     #[test]
-    fn cards_lifts_the_curtain_for_the_original_screen() {
+    fn cards_keeps_the_curtain_up_for_the_hd_hand_over_the_original_screen() {
         let mut driver = Driver::new(Labels::default());
         let mut menu = FakeMenu::default();
         open_by_player(&mut driver, &mut menu);
@@ -2209,8 +2365,84 @@ mod tests {
         }
         choose(&mut driver, &mut menu, Key::Confirm);
         choose(&mut driver, &mut menu, Key::Confirm);
-        assert_eq!(driver.curtain(), Curtain::Lifted);
+        assert_eq!((driver.curtain(), driver.nav().screen()), (Curtain::Up, Screen::Cards));
         assert_eq!(menu.screen, 6, "the original's Cards");
+    }
+
+    /// Work RAM of the fake menu with a party of `count` members (character ids 0 up) in the records and the order.
+    fn with_party(menu: &FakeMenu, count: u8) -> Vec<u8> {
+        let mut ram = menu.wram();
+        let at = |address: u32| (address - 0x7E_0000) as usize;
+        for slot in 0..count {
+            let start = at(d::PARTY_RECORDS) + 32 * usize::from(slot);
+            ram[start] = 0xC0;
+            ram[start + 1] = slot;
+            ram[start + 2] = 10 + slot;
+            ram[start + 0x1C] = slot;
+            ram[at(d::PARTY_ORDER) + usize::from(slot)] = slot;
+        }
+        ram[at(d::PARTY_ORDER) + usize::from(count)] = 0xFF;
+        ram
+    }
+
+    /// The Menu list's Status on the fake menu: the HD screen opens over the original's page, Up and Down move the member
+    /// without a press of the original, B goes back to the Menu list on Status, and Start closes the menu.
+    #[test]
+    fn status_is_the_hds_own_screen_over_the_originals_page_and_b_and_start_leave_it() {
+        let mut driver = Driver::new(Labels::default());
+        let mut menu = FakeMenu::default();
+        open_by_player(&mut driver, &mut menu);
+        for _ in 0..4 {
+            driver.key(Key::Down, &menu.wram());
+        }
+        choose(&mut driver, &mut menu, Key::Confirm);
+        driver.key(Key::Down, &menu.wram());
+        choose(&mut driver, &mut menu, Key::Confirm);
+        assert_eq!((driver.curtain(), driver.nav().screen()), (Curtain::Up, Screen::Status));
+        assert_eq!(menu.screen, 7, "the original runs its Status page 1 under the HD screen");
+        // The party of three: Down moves over it with no press of the original, and wraps.
+        let ram = with_party(&menu, 3);
+        for want in [1, 2, 0] {
+            driver.key(Key::Down, &ram);
+            assert_eq!(driver.nav().cursor(), want);
+            assert!(!driver.busy(), "moving the member is the HD's alone");
+        }
+        assert_eq!(menu.screen, 7);
+        let scene = driver.scene(&ram).expect("the HD draws Status");
+        assert!(scene.texts().any(|(_, _, text)| text == "3/9"), "the header counts the party");
+        // B goes back to the Menu list, with its cursor on Status.
+        choose(&mut driver, &mut menu, Key::Cancel);
+        assert_eq!((driver.curtain(), driver.nav().screen()), (Curtain::Up, Screen::Menu));
+        assert_eq!(driver.nav().cursor(), 1, "the Menu list keeps its cursor on Status");
+        assert_eq!(menu.screen, 4, "the original is back on its Menu list");
+        // Again, and Start closes the menu from it with the original's own B presses.
+        choose(&mut driver, &mut menu, Key::Confirm);
+        assert_eq!(driver.nav().screen(), Screen::Status);
+        assert_eq!(driver.nav().cursor(), 0, "Status opens on the first member");
+        driver.close_menu();
+        settle(&mut driver, &mut menu);
+        assert_eq!(driver.curtain(), Curtain::Down, "Start closes the menu");
+        assert_eq!(menu.field, 0, "the field is free");
+        assert_eq!(driver.last_outcome(), Some(Outcome::Reached));
+    }
+
+    /// Start does nothing on the other HD screens: the original's menu is not closed by a stray Start.
+    #[test]
+    fn start_does_nothing_off_the_status_screen() {
+        let mut driver = Driver::new(Labels::default());
+        let mut menu = FakeMenu::default();
+        open_by_player(&mut driver, &mut menu);
+        driver.close_menu();
+        settle(&mut driver, &mut menu);
+        assert_eq!((driver.curtain(), driver.nav().screen()), (Curtain::Up, Screen::Command));
+        for _ in 0..4 {
+            driver.key(Key::Down, &menu.wram());
+        }
+        choose(&mut driver, &mut menu, Key::Confirm);
+        driver.close_menu();
+        settle(&mut driver, &mut menu);
+        assert_eq!((driver.curtain(), driver.nav().screen()), (Curtain::Up, Screen::Menu));
+        assert_eq!(menu.field, 1, "the menu is still open");
     }
 
     #[test]
@@ -2622,6 +2854,70 @@ mod tests {
             frame.settings.is_none() && !frame.saved_options,
             "it is the game's value, nothing is stored"
         );
+    }
+
+    /// The Text speed row of the Gameplay page as the Options screen shows it now (its index in the row's choices).
+    fn options_text_speed_index(driver: &Driver, menu: &FakeMenu) -> usize {
+        let wram = menu.wram();
+        let probe = MenuProbe::new(&wram, &driver.labels);
+        driver.state.options.indices(Category::Gameplay, &driver.state.cheats, probe.text_speed())
+            [0]
+    }
+
+    #[test]
+    fn the_text_screen_and_the_options_text_speed_row_are_one_setting_the_games_byte() {
+        // The Options row writes the game's byte, and the Text screen opens on it.
+        for speed in 0..5_u8 {
+            let (mut driver, mut menu) = driver_on_options(&saved_slots(&[0]));
+            menu.text_speed = speed;
+            assert_eq!(options_text_speed_index(&driver, &menu), usize::from(4 - speed));
+            driver.key(Key::Tab, &menu.wram());
+            driver.key(Key::Right, &menu.wram());
+            let frame = driver.frame(&menu.wram(), None, Joypad::default());
+            let written = frame.events.iter().find_map(|event| match event {
+                HostEvent::Wram { address, bytes } if *address == d::TEXT_SPEED => bytes.first(),
+                _ => None,
+            });
+            // One step to the right is one step faster (the row lists the slowest first), and the row wraps.
+            let faster = if speed == 0 { 4 } else { speed - 1 };
+            assert_eq!(written, Some(&faster), "speed {speed}");
+            menu.text_speed = faster;
+            driver.key(Key::Cancel, &menu.wram());
+            for _ in 0..3 {
+                driver.key(Key::Down, &menu.wram());
+            }
+            driver.key(Key::Confirm, &menu.wram());
+            assert_eq!(driver.nav().screen(), Screen::Text);
+            assert_eq!(
+                driver.nav().text().speed(),
+                faster,
+                "the Text screen opens on the row's speed"
+            );
+        }
+        // The Text screen keeps a speed through the original's own screen, and the row shows it.
+        for target in 0..5_u8 {
+            let (mut driver, mut menu) = driver_on_options(&saved_slots(&[0]));
+            menu.text_speed = 2;
+            driver.key(Key::Cancel, &menu.wram());
+            for _ in 0..3 {
+                driver.key(Key::Down, &menu.wram());
+            }
+            driver.key(Key::Confirm, &menu.wram());
+            for _ in 0..4 {
+                driver.key(if target > 2 { Key::Right } else { Key::Left }, &menu.wram());
+            }
+            driver.key(Key::Confirm, &menu.wram());
+            for _ in 0..2_000 {
+                let pad = driver.frame(&menu.wram(), None, Joypad::default()).pad;
+                menu.tick(pad);
+                if !driver.busy() {
+                    break;
+                }
+            }
+            let end = if target > 2 { 4 } else { 0 };
+            assert_eq!(menu.text_speed, end, "the whole way to the end the keys went");
+            assert_eq!(options_text_speed_index(&driver, &menu), usize::from(4 - end));
+        }
     }
 
     #[test]

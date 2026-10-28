@@ -21,7 +21,7 @@ use ssd_menus::cheats::{CheatSidecar, MARKER, MARKER_BYTES, SUSPENDED};
 use ssd_menus::layout::{self, palette};
 use ssd_menus::mods_state::ModsSidecar;
 use ssd_menus::screens::SlotList;
-use ssd_menus::{Color, DrawList, Key, Language, Op, Picture, Rect};
+use ssd_menus::{CardPart, Color, DrawList, Key, Language, Op, Picture, Rect};
 use ssd_oracle::{Frame, FrameLog, Joypad};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -153,6 +153,8 @@ impl Hd {
                     }
                 }),
                 card_textures: HashMap::new(),
+                symbol_textures: HashMap::new(),
+                hand_textures: HashMap::new(),
                 textures: HashMap::new(),
                 field: None,
                 backdrop: None,
@@ -254,7 +256,9 @@ impl Hd {
         if let Some(text) = self.notice.text() {
             list.append(ssd_menus::screens::notice(text));
         }
-        if let (Some(which), Some(sram)) = (slot_list(wram), sram) {
+        // The HD Save screen has its own badges: the original's slot list runs unseen under it.
+        let hd_save = self.driver.screen() == Some(ssd_menus::view::Screen::Save);
+        if let (Some(which), Some(sram), false) = (slot_list(wram), sram, hd_save) {
             list.append(ssd_menus::screens::slot_badges(which, self.driver.marked_slots(sram)));
         }
         if let Some(count) = self.driver.sell_count(wram) {
@@ -320,6 +324,11 @@ impl Hd {
     /// A navigation key of the HD on the menu of `wram` (see [`Driver::key`]).
     pub fn key(&mut self, key: Key, wram: &[u8]) {
         self.driver.key(key, wram);
+    }
+
+    /// Start on the Cards screen closes the menu (see [`Driver::close_menu`]).
+    pub fn close_menu(&mut self) {
+        self.driver.close_menu();
     }
 
     /// Whether the Controls page waits for a key or button, and for which device (see [`Driver::listening`]).
@@ -486,6 +495,11 @@ pub struct Art {
     cards: Option<ssd_hd::CardArt>,
     /// The preview card as a texture, by its Z corners (attack, defence), made on first use.
     card_textures: HashMap<(bool, bool), Option<egui::TextureHandle>>,
+    /// The class kanji of the Status screen as textures, by symbol number, made on first use from the card art.
+    symbol_textures: HashMap<u8, Option<egui::TextureHandle>>,
+    /// The cards of the Cards screen's hand (and their parts) as textures, by their tile words and the part, made on
+    /// first use.
+    hand_textures: HashMap<(Vec<u16>, CardPart), Option<egui::TextureHandle>>,
     textures: HashMap<Picture, Option<egui::TextureHandle>>,
     field: Option<FieldImage>,
     /// The texture of the field at a generation, uploaded when it is first painted.
@@ -501,6 +515,8 @@ impl Art {
             pack: None,
             cards: None,
             card_textures: HashMap::new(),
+            symbol_textures: HashMap::new(),
+            hand_textures: HashMap::new(),
             textures: HashMap::new(),
             field: None,
             backdrop: None,
@@ -576,6 +592,40 @@ impl Art {
             ))
         });
         entry.as_ref().map(|texture| (texture.id(), texture.size_vec2()))
+    }
+
+    /// The texture of the card symbol `symbol` (a class kanji), from the pack's card art on first use; `None` when the pack
+    /// has no card art or no picture of it.
+    fn symbol(&mut self, ctx: &egui::Context, symbol: u8) -> Option<egui::TextureId> {
+        let cards = self.cards.as_ref();
+        let entry = self.symbol_textures.entry(symbol).or_insert_with(|| {
+            let (side, rgba) = cards?.symbol(symbol)?;
+            let image = egui::ColorImage::from_rgba_unmultiplied([side, side], rgba);
+            Some(ctx.load_texture(format!("symbol {symbol}"), image, egui::TextureOptions::LINEAR))
+        });
+        entry.as_ref().map(egui::TextureHandle::id)
+    }
+
+    /// The texture of `part` of the card of the Cards screen's hand with the tile words `tiles`, drawn from the pack's card
+    /// art on first use; `None` when the pack has no card art or none of the part's tiles has art.
+    fn hand_card(
+        &mut self,
+        ctx: &egui::Context,
+        tiles: &[u16],
+        part: CardPart,
+    ) -> Option<egui::TextureId> {
+        let cards = self.cards.as_ref()?;
+        // A hand is five cards: a long run of dealt hands does not pile textures up
+        if self.hand_textures.len() > 96 {
+            self.hand_textures.clear();
+        }
+        let entry = self.hand_textures.entry((tiles.to_vec(), part)).or_insert_with(|| {
+            let card = cards.compose(tiles, hd_part(part))?;
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([card.width, card.height], &card.rgba);
+            Some(ctx.load_texture("hand card", image, egui::TextureOptions::LINEAR))
+        });
+        entry.as_ref().map(egui::TextureHandle::id)
     }
 
     /// The texture of `picture` (an object's, or a corner face), decoded on first use; `None` when the ROM has no
@@ -914,6 +964,35 @@ pub fn paint_fit(ui: &egui::Ui, picture: egui::Rect, fit: &Fit, list: &DrawList,
                     ),
                 }
             }
+            Op::Symbol { rect, symbol } => {
+                if let Some(id) = art.symbol(ui.ctx(), *symbol) {
+                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                    painter.image(id, fit.rect(*rect), uv, egui::Color32::WHITE);
+                }
+            }
+            Op::HandCard { rect, tiles, part } => match art.hand_card(ui.ctx(), tiles, *part) {
+                Some(id) => {
+                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                    painter.image(id, fit.rect(*rect), uv, egui::Color32::WHITE);
+                }
+                None => paint_fit(
+                    ui,
+                    picture,
+                    &fit,
+                    &ssd_menus::screens::cards::flat_part(*rect, *part),
+                    art,
+                ),
+            },
+            Op::CursorDown { x, y } => {
+                let points = [(0.0, 0.0), (18.0, 0.0), (9.0, 16.0)]
+                    .map(|(dx, dy)| fit.point(x + dx, y + dy));
+                let stroke = egui::Stroke::new(2.0 * fit.scale, colour(palette::DARK_RED));
+                painter.add(egui::Shape::convex_polygon(
+                    points.to_vec(),
+                    colour(palette::ORANGE),
+                    stroke,
+                ));
+            }
             Op::Bar { rect, fraction, color } => {
                 painter.rect_filled(fit.rect(*rect), 0.0, colour(palette::WHITE));
                 let well = rect.grow(-layout::BAR_BORDER);
@@ -922,6 +1001,16 @@ pub fn paint_fit(ui: &egui::Ui, picture: egui::Rect, fit: &Fit, list: &DrawList,
                 painter.rect_filled(fit.rect(filled), 0.0, colour(*color));
             }
         }
+    }
+}
+
+/// The card art's part of a draw list's [`CardPart`].
+fn hd_part(part: CardPart) -> ssd_hd::CardPart {
+    match part {
+        CardPart::Whole => ssd_hd::CardPart::WHOLE,
+        CardPart::Attack => ssd_hd::CardPart::ATTACK,
+        CardPart::Symbol => ssd_hd::CardPart::SYMBOL,
+        CardPart::Defence => ssd_hd::CardPart::DEFENCE,
     }
 }
 
@@ -981,8 +1070,9 @@ fn portrait(
     // Nothing to show (an empty list, or a face with no picture): the box stays empty, never a
     // stand-in text
     if let Some(id) = texture {
+        // A box under two pictures wide (the favoured row of the Cards screen) shows its picture the box's size
         let whole = (inner.w / layout::PICTURE).floor().max(1.0);
-        let side = layout::PICTURE * whole;
+        let side = if whole < 2.0 { inner.w.min(inner.h) } else { layout::PICTURE * whole };
         let picture = Rect::new(
             inner.x + (inner.w - side) / 2.0,
             inner.y + (inner.h - side) / 2.0,
@@ -998,6 +1088,16 @@ fn portrait(
 mod tests {
     use super::*;
     use ssd_menus::Style;
+
+    #[test]
+    fn the_cards_screen_names_each_kanji_as_the_battles_tooltip_does() {
+        use ssd_menus::screens::cards::Card;
+        let words = ssd_hd::symbol_words();
+        for (symbol, expected) in words.into_iter().enumerate() {
+            let card = Card { attack: 1, defence: 1, symbol: symbol as u8, tiles: Vec::new() };
+            assert_eq!(card.words(), expected, "symbol {symbol}");
+        }
+    }
 
     #[test]
     fn a_run_that_does_not_persist_writes_no_sidecar_and_leaves_a_damaged_one_as_it_is() {
@@ -1078,14 +1178,19 @@ mod tests {
                 Op::Fill { rect, .. }
                 | Op::Disc { rect, .. }
                 | Op::Outline { rect, .. }
-                | Op::Bar { rect, .. } => {
+                | Op::Bar { rect, .. }
+                | Op::Card { rect, .. }
+                | Op::HandCard { rect, .. }
+                | Op::Symbol { rect, .. } => {
                     boxes.push(logical(*rect));
                 }
                 Op::Window { rect } | Op::WindowHc { rect } => {
                     boxes.push(logical(rect.grow(layout::CAP_OVERHANG.max(layout::LINE))));
                 }
                 Op::Portrait { rect, .. } => boxes.push(logical(rect.grow(2.0))),
-                Op::Card { rect, .. } => boxes.push(logical(*rect)),
+                Op::CursorDown { x, y } => {
+                    boxes.push(logical(Rect::new(*x, *y, 18.0, 16.0)));
+                }
                 Op::Pointer { rect, .. } => boxes.push(logical(rect.grow(POINTER_EDGE / 2.0))),
                 Op::Cursor { x, y } | Op::Arrow { x, y, .. } => {
                     boxes.push(logical(Rect::new(
@@ -1147,6 +1252,48 @@ mod tests {
             screens.extend(plain.iter().map(|list| style.apply(list.clone())));
         }
         screens
+    }
+
+    /// An Order view of `count` members of the longest names.
+    fn order_view(
+        count: usize,
+        cursor: usize,
+        held: Option<usize>,
+        changed: bool,
+    ) -> ssd_menus::screens::OrderView {
+        use ssd_menus::screens::{OrderMember, OrderView};
+        OrderView {
+            members: (0..count)
+                .map(|i| OrderMember { name: format!("Tsumuri Maima {i}"), face: Some(28) })
+                .collect(),
+            cursor,
+            held,
+            changed,
+            can_undo: changed,
+        }
+    }
+
+    /// A Status view of `count` members of the worst figures: the longest name, six-digit figures, five techniques.
+    fn status_view(count: usize, cursor: usize) -> ssd_menus::screens::StatusView {
+        use ssd_menus::screens::{StatusMember, StatusView, Technique};
+        let member = |i: usize| StatusMember {
+            name: format!("Tien Shinhan {i}"),
+            level: 99,
+            hp: 9999,
+            max_hp: 9999,
+            ki: 9999,
+            max_ki: 9999,
+            bp: 16_777_215,
+            pla: 99,
+            exp: 16_777_215,
+            to_next: 16_777_215,
+            class: 2,
+            face: Some(28),
+            techniques: (0..5)
+                .map(|n| Technique { name: format!("Dragon Thunder {n}"), cost: 255 })
+                .collect(),
+        };
+        StatusView { members: (0..count).map(member).collect(), cursor }
     }
 
     /// The screens in the design as drawn: see [`every_screen`].
@@ -1260,6 +1407,22 @@ mod tests {
             selected: None,
             ..base
         }));
+        // The Status screen: a full party of the longest names and figures with the cursor on each member, and a short one.
+        for cursor in 0..9 {
+            screens.push(ssd_menus::screens::status_screen(&status_view(9, cursor)));
+        }
+        screens.push(ssd_menus::screens::status_screen(&status_view(1, 0)));
+        // The Order screen: the longest names, the cursor on each slot and on Apply, a member held at each slot, a
+        // changed order, and a party of nine (the most the records hold).
+        for (count, changed) in [(5, false), (5, true), (9, true)] {
+            for cursor in 0..=count {
+                for held in [None, Some(cursor).filter(|&slot| slot < count)] {
+                    screens.push(ssd_menus::screens::order_screen(&order_view(
+                        count, cursor, held, changed,
+                    )));
+                }
+            }
+        }
         // The cheats screen: each row under the cursor, with nothing on and with every setting on (the longest
         // On list, the longest names), and the notice of a scripted fight.
         let names: Vec<String> = (0..12).map(|id| format!("Tsumuri Maima {id}")).collect();

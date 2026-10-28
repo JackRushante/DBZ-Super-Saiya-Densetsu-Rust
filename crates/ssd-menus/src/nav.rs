@@ -3,10 +3,13 @@
 //! original menu needs, so the original keeps every consequence; this module only moves the HD
 //! cursors and reports what was chosen.
 
+mod status;
+
 use crate::cheats::Row;
 use crate::options::controls::{self, Device};
 use crate::options::{Category, Kind, Opens};
-use crate::screens::PAGE_SIZE;
+use crate::screens::cards::HAND;
+use crate::screens::{PAGE_SIZE, SaveNav, TextNav};
 use crate::view::{Screen, Sheet, Tab};
 
 /// The line A shows on a tab with no stack: there is nothing under the cursor to use or drop.
@@ -181,6 +184,14 @@ pub enum Action {
     OptionsOpen(Opens),
     /// On the options screen, "Apply video changes?" was answered: Keep (`true`) or Revert (`false`).
     OptionsVideo { keep: bool },
+    /// On the Text screen, A kept the speed (the byte of `$01D0`: 0 the fastest to 4 the slowest).
+    TextKeep(u8),
+    /// On the Save screen, the slot `0` (0 to 2) was chosen, and the overwrite question, if there was one, answered Yes.
+    SaveSlot(u8),
+    /// On the Save screen, the save is done and A (or B) takes the game back to the field.
+    SaveClose,
+    /// On the Order screen, "Apply order" was chosen: the order the screen holds goes to the original.
+    OrderApply,
     /// On the Data packs screen, the pack at place `at` of the list is switched on or off.
     PackToggle(usize),
     /// On the Data packs screen, the pack at place `at` moves by `by` places (-1 up, 1 down) in the order.
@@ -246,6 +257,14 @@ pub struct Nav {
     cheats_from_options: bool,
     /// The Data packs screen's cursor and question.
     mods: ModsNav,
+    /// The card under the cursor of the Cards screen: an index of the hand.
+    cards: usize,
+    /// The member under the cursor of the Status screen.
+    status: usize,
+    /// The Text screen's speed and preview.
+    text: TextNav,
+    /// The Save screen's cursor, question and phase.
+    save: SaveNav,
 }
 
 /// The line A shows on a refused pack: it stays off.
@@ -348,8 +367,53 @@ impl Nav {
             Screen::Cheats => self.cheats,
             Screen::Options => self.options_row(),
             Screen::Mods => self.mods.cursor,
+            Screen::Cards => self.cards,
+            Screen::Status => self.status,
+            Screen::Text => usize::from(self.text.speed()),
+            Screen::Save => usize::from(self.save.cursor()),
+            // The Order screen's cursor is its own (`OrderNav`, kept by the driver).
+            Screen::Order => 0,
         };
         u8::try_from(row).unwrap_or(0)
+    }
+
+    /// The Text screen's speed and preview.
+    #[must_use]
+    pub const fn text(&self) -> &TextNav {
+        &self.text
+    }
+
+    /// The Save screen's cursor, question and phase.
+    #[must_use]
+    pub const fn save(&self) -> &SaveNav {
+        &self.save
+    }
+
+    /// The Save screen opens on its first slot, with nothing asked.
+    pub fn open_save(&mut self) {
+        self.enter(Screen::Save);
+        self.save.open();
+    }
+
+    /// The host tells which save slots hold a game.
+    pub fn set_save_used(&mut self, used: [bool; crate::screens::SAVE_SLOTS]) {
+        self.save.set_used(used);
+    }
+
+    /// The original starts saving to `slot` (0 to 2).
+    pub fn save_saving(&mut self, slot: u8) {
+        self.save.saving(slot);
+    }
+
+    /// The original saved to `slot` (0 to 2).
+    pub fn save_done(&mut self, slot: u8) {
+        self.save.done(slot);
+    }
+
+    /// The Text screen opens on the game's speed `speed` (the byte of `$01D0`), its preview from the start.
+    pub fn open_text(&mut self, speed: u8) {
+        self.enter(Screen::Text);
+        self.text.open(speed);
     }
 
     /// The cursor of the Data packs screen: an index of its lines (see [`ModsLine`]).
@@ -380,7 +444,16 @@ impl Nav {
     pub fn page(&self) -> u8 {
         match self.screen {
             Screen::Items => u8::try_from(self.bag.cursor / PAGE_SIZE).unwrap_or(0),
-            Screen::Command | Screen::Menu | Screen::Cheats | Screen::Options | Screen::Mods => 0,
+            Screen::Command
+            | Screen::Menu
+            | Screen::Cheats
+            | Screen::Options
+            | Screen::Mods
+            | Screen::Cards
+            | Screen::Text
+            | Screen::Order
+            | Screen::Status
+            | Screen::Save => 0,
         }
     }
 
@@ -545,6 +618,9 @@ impl Nav {
 
     /// One frame goes by: a refused row's flash runs down.
     pub fn tick(&mut self) {
+        if self.screen == Screen::Text {
+            self.text.tick();
+        }
         if let Some(refusal) = self.options.refused.as_mut() {
             refusal.flash = refusal.flash.saturating_sub(1);
         }
@@ -613,7 +689,8 @@ impl Nav {
     pub fn enter(&mut self, screen: Screen) {
         self.screen = screen;
         match screen {
-            Screen::Command => {}
+            // The Order screen's cursor is its own (`OrderNav`, kept by the driver).
+            Screen::Command | Screen::Order => {}
             Screen::Menu => self.menu = 0,
             Screen::Items => {
                 self.bag.cursor = 0;
@@ -625,6 +702,10 @@ impl Nav {
             }
             Screen::Options => self.options = OptionsNav::default(),
             Screen::Mods => self.mods = ModsNav::default(),
+            Screen::Cards => self.cards = 0,
+            Screen::Status => self.status = 0,
+            Screen::Text => self.text = TextNav::default(),
+            Screen::Save => self.save.open(),
         }
     }
 
@@ -709,8 +790,20 @@ impl Nav {
                 Key::Tab | Key::TabBack | Key::ResetPage | Key::ResetAll | Key::Apply => {}
             },
             Screen::Options => return self.key_options(key),
-            // The Data packs screen's keys are given by `key_mods`, with the list of its lines.
-            Screen::Mods => {}
+            // The Data packs screen's keys are given by `key_mods`, with the list of its lines. The Status screen's by
+            // `key_status`, which knows the party, and the Order screen's by its own cursor (`OrderNav`), which the
+            // driver keeps.
+            Screen::Mods | Screen::Status | Screen::Order => {}
+            // The hand: Left and Right move over it (wrapping), B goes back. The original's A only closes its screen,
+            // so the HD's A and the rest do nothing; Start closes (`Driver::close_menu`).
+            Screen::Cards => match key {
+                Key::Left => self.cards = previous(self.cards, HAND),
+                Key::Right => self.cards = next(self.cards, HAND),
+                Key::Cancel => return Action::Back,
+                _ => {}
+            },
+            Screen::Text => return self.text.key(key),
+            Screen::Save => return self.save.key(key),
         }
         Action::None
     }
@@ -1823,5 +1916,31 @@ mod tests {
         assert_eq!(nav.key_mods(Key::Cancel, &[]), Action::Back);
         nav.resume(Screen::Options);
         assert_eq!(nav.options_row(), 5, "back on the Options, on the button");
+    }
+
+    #[test]
+    fn the_cards_cursor_walks_the_hand_both_ways_and_wraps_and_only_b_does_anything_else() {
+        let mut nav = Nav::default();
+        nav.enter(Screen::Cards);
+        assert_eq!(nav.cursor(), 0, "the hand opens on its first card");
+        assert_eq!(nav.key(Key::Right, false, false, 0), Action::None);
+        assert_eq!(nav.key(Key::Right, false, false, 0), Action::None);
+        assert_eq!(nav.cursor(), 2);
+        nav.key(Key::Left, false, false, 0);
+        assert_eq!(nav.cursor(), 1);
+        nav.key(Key::Left, false, false, 0);
+        nav.key(Key::Left, false, false, 0);
+        assert_eq!(nav.cursor(), 4, "Left from the first card is the last");
+        nav.key(Key::Right, false, false, 0);
+        assert_eq!(nav.cursor(), 0, "Right from the last card is the first");
+        for key in [Key::Up, Key::Down, Key::Confirm, Key::Tab, Key::TabBack, Key::ResetPage] {
+            assert_eq!(nav.key(key, false, false, 0), Action::None, "{key:?} does nothing here");
+        }
+        assert_eq!(nav.cursor(), 0);
+        assert_eq!(nav.key(Key::Cancel, false, false, 0), Action::Back);
+        // Opened again, the hand starts on its first card
+        nav.key(Key::Right, false, false, 0);
+        nav.enter(Screen::Cards);
+        assert_eq!(nav.cursor(), 0);
     }
 }

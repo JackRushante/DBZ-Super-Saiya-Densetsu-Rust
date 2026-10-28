@@ -23,10 +23,11 @@ pub mod style;
 pub mod ui_text;
 pub mod view;
 
-pub use draw::{Align, Color, DrawList, Op, Rect};
+pub use draw::{Align, CardPart, Color, DrawList, Op, Rect};
 pub use language::Language;
 pub use nav::{Action, Entry, Key, Nav};
 pub use style::Style;
 pub use view::{
-    CharacterLabel, Labels, Member, MenuView, ObjectLabel, Picture, Screen, Selected, Slot,
+    CharacterLabel, CommandLabel, Labels, Member, MenuView, ObjectLabel, Picture, Screen, Selected,
+    Slot, StatusLabels,
 };

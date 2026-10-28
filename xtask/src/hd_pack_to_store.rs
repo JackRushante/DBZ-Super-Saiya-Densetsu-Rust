@@ -153,6 +153,7 @@ const FOLDERS: &[Folder] = &[
     Folder { name: "bg", keys: &["layers"] },
     Folder { name: "maps", keys: &["layers"] },
     Folder { name: "mode7", keys: &["planes"] },
+    Folder { name: "variants", keys: &["variants"] },
 ];
 
 /// Where an object of the pack goes in the store: the field's poses have their own folder.

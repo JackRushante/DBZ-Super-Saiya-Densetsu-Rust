@@ -1557,28 +1557,44 @@ impl ArtState {
 
     /// The picture of the pose variant the pack gives the object `at` while the conditions of the frame hold, and its margin
     /// in game pixels: of the object's variants that hold, one for a specific condition before an `always` one
-    /// ([`ssd_mod::pose::drawn`]). `None` when no variant holds for the object, or its picture is not drawn (see
-    /// [`ArtState::load_variant`]): the object is then drawn as it is.
+    /// ([`ssd_mod::pose::drawn`]). A data pack's variants ([`Pack::variants`]) come before the pack's own bigger art
+    /// ([`Pack::pose_art`]): the own art is drawn only where no data pack's variant of the object holds, or its picture is not
+    /// drawn (see [`ArtState::load_variant`]). `None` when no variant holds for the object, or no picture is drawn: the object
+    /// is then drawn as it is.
     fn pose_variant(&mut self, at: u32) -> Option<(Arc<Image>, i32)> {
         let pack = Arc::clone(&self.pack);
         let object = &pack.art.objects()[real(at)];
-        let holding: Vec<usize> = (0..pack.variants.len())
-            .filter(|&index| {
-                let variant = &pack.variants[index];
-                variant.art == object.id && self.conditions.holds(variant.when)
-            })
-            .collect();
-        let index =
-            holding[ssd_mod::pose::drawn(holding.iter().map(|&index| pack.variants[index].when))?];
-        let variant = &pack.variants[index];
         let mirrored = at & MIRROR != 0;
-        let margin = variant.margin as i32;
-        if let Some(loaded) = self.pose_images.get(&(index, mirrored)) {
-            return loaded.clone().map(|image| (image, margin));
+        // The variants are numbered: the data packs' first, then the pack's own
+        let own = pack.variants.len();
+        for (variants, first) in [(&pack.variants, 0), (&pack.pose_art, own)] {
+            let holding: Vec<usize> = (0..variants.len())
+                .filter(|&index| {
+                    let variant = &variants[index];
+                    variant.art == object.id && self.conditions.holds(variant.when)
+                })
+                .collect();
+            let Some(chosen) =
+                ssd_mod::pose::drawn(holding.iter().map(|&index| variants[index].when))
+            else {
+                continue;
+            };
+            let index = holding[chosen];
+            let variant = &variants[index];
+            let margin = variant.margin as i32;
+            let loaded = match self.pose_images.get(&(first + index, mirrored)) {
+                Some(loaded) => loaded.clone(),
+                None => {
+                    let loaded = self.load_variant(variant, object, mirrored);
+                    self.pose_images.insert((first + index, mirrored), loaded.clone());
+                    loaded
+                }
+            };
+            if let Some(image) = loaded {
+                return Some((image, margin));
+            }
         }
-        let loaded = self.load_variant(variant, object, mirrored);
-        self.pose_images.insert((index, mirrored), loaded.clone());
-        loaded.map(|image| (image, margin))
+        None
     }
 
     /// Keeps `image` as the art of object `at`, the least recently used one making room.

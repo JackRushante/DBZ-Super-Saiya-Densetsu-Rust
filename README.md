@@ -274,10 +274,11 @@ restarts at the title. On Windows you can also put the file in `%LOCALAPPDATA%\d
 Three mods come with this release:
 
 - **Super Saiyan Goku HD**: the Super Saiyan Goku's 27 battle poses redrawn with his hair standing up, past the box of
-  the original sprite (which keeps it flat). For the HD pack.
+  the original sprite (which keeps it flat). The HD pack holds this art itself since 0.3.9: the mod is only for an older
+  `hd-pack.zip`.
 - **Super Saiyan Kaioken** (not canon): Goku can use the Kaioken while he is a Super Saiyan, up to x10; each move made in
-  both costs 10% of his maximum HP. With his Super Saiyan poses redrawn with the Kaioken's aura, on the art of Super Saiyan
-  Goku HD (switch both on).
+  both costs 10% of his maximum HP. With his Super Saiyan poses redrawn with the Kaioken's aura, on the new Super Saiyan
+  art.
 - **Free progression** (**under test**): the story moves on events, never on levels or battle power, and every enemy
   follows your party's level, with a difficulty of `easy`, `normal` (the default) or `hard` (the `difficulty` line of the
   `pack.toml` inside the `.ssdpack`, which is a zip). The balance of the scaled bosses has not been played end to end yet: save often.
@@ -392,6 +393,8 @@ This is a young project; these are the things we know are not right yet.
 <!-- KNOWN-BUGS:BEGIN -->
 **Remastered (HD)**
 
+- **Field map hitches**: walking or flying on the field, the picture stops for a moment every few seconds while the HD
+  map art is read ([#15](../../issues/15)); a fix is on the way.
 - A few **effects in battle** (about 0.3 % of their pixels) and some figures that the original draws merged together for a
   frame are still drawn from the original's pixels, made bigger.
 
@@ -432,8 +435,8 @@ goes from polish to new content. Dates are not promised; each milestone ships wh
 ### M10: Cheats, mod support and data packs (in progress, most of it in 0.3.0)
 
 Done: the item spawner and the zeni multiplier, the data packs and everything below up to the two mods. Left: the
-documentation and acceptance of the pack tools, the review of the HD art, and every menu in HD (Cards, Status, Order, Text
-and Save are still the original screens, made bigger).
+documentation and acceptance of the pack tools and the review of the HD art. The field's menus are all in HD since 0.3.9
+(Cards, Status, Order, Text and Save were the last).
 
 - Two more **cheats**: an **item spawner** (every object, with a short description and how many to add; story objects
   such as the Dragon Balls and the Dragon Radar carry a red warning, since spawning them can break the story, so save

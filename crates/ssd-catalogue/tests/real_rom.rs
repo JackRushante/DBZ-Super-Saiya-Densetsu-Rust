@@ -228,3 +228,32 @@ fn the_catalogue_agrees_with_the_game_state_during_the_reference_battle() {
     run_to(&mut machine, 7_000);
     assert_eq!(wram24(&machine, records + 0x0F), u32::from(catalogue.enemies[4].exp_reward));
 }
+
+#[test]
+#[ignore = "needs the ROM"]
+fn the_status_tables_give_the_figures_of_the_original_status_screen() {
+    let catalogue = catalogue();
+    let labels = ssd_catalogue::menu_labels(&catalogue);
+    let status = &labels.status;
+    let techniques = |unit: usize| -> Vec<(String, u8)> {
+        status.techniques[unit]
+            .iter()
+            .map(|&id| {
+                let command = &status.commands[usize::from(id)];
+                (command.name.clone(), command.ki_cost)
+            })
+            .collect()
+    };
+    // The reference capture of the original's Status page (Goku level 47, Gohan level 40, Piccolo, Krillin, Vegeta).
+    let goku = [("Ki Blast", 2), ("Energy Wave", 4), ("Solar Flare", 6), ("KameHameHa", 8)];
+    assert_eq!(techniques(0x00), goku.map(|(name, cost)| (name.to_owned(), cost)));
+    let gohan = [("Energy Wave", 4), ("Masenko", 15)];
+    assert_eq!(techniques(0x09), gohan.map(|(name, cost)| (name.to_owned(), cost)));
+    assert_eq!(techniques(0x3A).last().unwrap(), &("Spirit Bomb".to_owned(), 20));
+    // Gohan at level 40 with 65400 EXP needs 7750 more; Goku at his cap of 47 has no level to reach.
+    assert_eq!(status.levels[1][40] - 65_400, 7_750);
+    assert_eq!(status.levels[0].len(), 47, "Goku's rows end at his level cap");
+    assert_eq!(status.levels[0].get(47), None);
+    assert_eq!(status.levels[11].len(), 3);
+    assert!(status.levels[8].is_empty(), "Nail has no level table");
+}

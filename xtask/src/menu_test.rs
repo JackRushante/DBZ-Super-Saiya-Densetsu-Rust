@@ -224,18 +224,6 @@ impl Harness {
         self.frames(30)
     }
 
-    /// Closes the menu the original keeps after a lifted screen: B presses until the field is free.
-    pub(crate) fn close_lifted(&mut self) -> anyhow::Result<()> {
-        for _ in 0..12 {
-            if self.byte(d::FIELD_STATE) == 0 {
-                break;
-            }
-            self.press(b())?;
-            self.frames(40)?;
-        }
-        Ok(())
-    }
-
     /// A byte of work RAM.
     pub(crate) fn byte(&self, address: u32) -> u8 {
         self.machine.wram()[(address - WRAM_BASE) as usize]
@@ -337,7 +325,7 @@ const FIELD_SCENARIOS: [(&str, Scenario); 14] = [
     ("menu-status", menu_status),
     ("menu-order", menu_order),
     ("menu-text", menu_text),
-    ("menu-save", menu_save),
+    ("menu-save", menu_save_screen),
     ("cancel-command", cancel_command),
     ("cancel-menu", cancel_menu),
     ("menu-cheats", menu_cheats),
@@ -428,67 +416,496 @@ pub(crate) fn menu_list(h: &mut Harness) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One entry of the Menu list: its original screen opens under the lifted curtain, and the field
-/// comes back when the player has closed it.
-fn menu_entry(
-    h: &mut Harness,
-    r: &mut Report,
-    downs: usize,
-    screen: u8,
-    name: &str,
-) -> anyhow::Result<()> {
+/// The texts of the HD screen now, with the cursor and the hand the original dealt (its `card_hand` bytes).
+fn cards_texts(h: &Harness) -> Vec<String> {
+    let wram = h.machine.wram().to_vec();
+    h.driver
+        .scene(&wram)
+        .map(|list| list.texts().map(|(_, _, text)| text.to_owned()).collect())
+        .unwrap_or_default()
+}
+
+/// The Cards: the HD screen over the original's, which deals the hand and waits for A. The cursor walks the hand (the
+/// original does not move), the numbers and the kanji shown are the ones in `card_hand`, B goes back to the Menu list
+/// through the original's own close and reopening, and Start closes the menu.
+fn menu_cards(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
     menu_list(h)?;
     r.check(h.driver.nav().screen() == ssd_menus::Screen::Menu, "the HD Menu list is up");
-    for _ in 0..downs {
-        h.key(Key::Down)?;
-    }
     h.key(Key::Confirm)?;
-    r.check(h.driver.curtain() == Curtain::Lifted, &format!("{name} lifts the curtain"));
     r.check(
-        h.byte(d::MENU_SCREEN) == screen,
-        &format!("{name} opens the original's screen {screen}"),
+        h.driver.curtain() == Curtain::Up && h.driver.nav().screen() == ssd_menus::Screen::Cards,
+        "Cards keeps the curtain up: the HD hand",
+    );
+    r.check(h.byte(d::MENU_SCREEN) == 6, "the original is on its Cards screen");
+    // The original deals the hand one card at a time: the HD shows the backs until it has
+    let first = cards_texts(h);
+    r.check(
+        first.iter().any(|text| text.starts_with("Hand ") && text != "Hand 5/5"),
+        "the hand is dealt one by one: not all five at once",
     );
     h.frames(SETTLE)?;
-    h.close_lifted()?;
-    r.check(h.byte(d::FIELD_STATE) == 0, &format!("{name} returns to the field"));
-    r.check(h.driver.curtain() == Curtain::Down, &format!("{name}: the curtain is down"));
+    let hand = |h: &Harness, slot: u32| {
+        let base = 0x7E_0140 + 6 * slot;
+        (h.byte(base), h.byte(base + 3), h.byte(base + 4), h.byte(base + 5))
+    };
+    let slots: Vec<_> = (0..5).map(|slot| hand(h, slot)).collect();
+    r.check(
+        slots.iter().all(|&(flag, attack, defence, symbol)| {
+            flag == 0 && (1..=8).contains(&attack) && (1..=8).contains(&defence) && symbol < 7
+        }),
+        &format!("the original dealt five cards of values 1 to 8 and symbols 0 to 6: {slots:?}"),
+    );
+    let readings = ["Kai", "Kami", "Ma", "Waku", "Ginyu", "Hitsu", "Chou"];
+    let counts = |value: u8| if value == 8 { 10 } else { value };
+    for (at, &(_, attack, defence, symbol)) in slots.iter().enumerate() {
+        let texts = cards_texts(h);
+        r.check(texts.iter().any(|text| text == "Hand 5/5"), "five cards in the hand");
+        r.check(
+            texts.contains(&readings[usize::from(symbol)].to_owned()),
+            &format!("card {at}: the kanji is named {}", readings[usize::from(symbol)]),
+        );
+        let numbers: Vec<String> = h
+            .driver
+            .scene(h.machine.wram())
+            .map(|list| {
+                list.ops()
+                    .iter()
+                    .filter_map(|op| match op {
+                        ssd_menus::Op::Text {
+                            text, size, align: ssd_menus::Align::Right, ..
+                        } if (*size - 30.0).abs() < f32::EPSILON => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        r.check(
+            numbers == [counts(attack).to_string(), counts(defence).to_string()],
+            &format!("card {at}: attack {attack} and defence {defence} as the game holds them: {numbers:?}"),
+        );
+        if at < 4 {
+            h.key(Key::Right)?;
+        }
+    }
+    let faces = h.driver.scene(h.machine.wram()).map_or(0, |list| {
+        list.ops().iter().filter(|op| matches!(op, ssd_menus::Op::Portrait { .. })).count()
+    });
+    r.check(faces >= 2, &format!("the party's faces are in the row of the favoured: {faces}"));
+    r.check(h.driver.nav().cursor() == 4, "the cursor walked the five cards");
+    r.check(h.byte(d::MENU_SCREEN) == 6, "the original stayed on its Cards screen");
+    h.key(Key::Right)?;
+    r.check(h.driver.nav().cursor() == 0, "the cursor wraps");
+    // Back: the original closes and the menu opens again on the Menu list, the HD cursor on Cards
+    h.key(Key::Cancel)?;
+    r.check(h.driver.last_outcome() == Some(Outcome::Reached), "back reached the Menu list");
+    r.check(
+        h.driver.curtain() == Curtain::Up && h.driver.nav().screen() == ssd_menus::Screen::Menu,
+        "B on the Cards goes back to the HD Menu list",
+    );
+    r.check(h.byte(d::MENU_SCREEN) == 4, "the original is on its Menu list");
+    r.check(h.driver.nav().cursor() == 0, "the cursor is on Cards");
+    // Cards again, then Start closes the menu
+    h.key(Key::Confirm)?;
+    r.check(h.driver.nav().screen() == ssd_menus::Screen::Cards, "Cards opens again");
+    h.frames(SETTLE)?;
+    h.driver.close_menu();
+    h.until_idle()?;
+    h.frames(SETTLE)?;
+    r.check(h.byte(d::FIELD_STATE) == 0, "Start closes the menu: the field is free");
+    r.check(h.driver.curtain() == Curtain::Down, "the curtain is down");
     Ok(())
 }
 
-fn menu_cards(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
-    menu_entry(h, r, 0, 6, "Cards")
-}
-
+/// The HD Status screen is the original's two pages in one: Status opens under the HD's curtain with the original on its
+/// page 1; Up and Down move the member (the right panel follows, nothing is sent to the original, and its records are not
+/// written); B goes back to the Menu list with its cursor on Status; Start closes the menu from the screen.
 fn menu_status(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
-    menu_entry(h, r, 1, 7, "Status")
+    use ssd_menus::Screen;
+    let records = |h: &Harness| h.machine.wram()[0x0B00..0x0C20].to_vec();
+    let scene = |h: &Harness| {
+        h.driver
+            .scene(h.machine.wram())
+            .map(|list| list.texts().map(|(_, _, text)| text.to_owned()).collect::<Vec<_>>())
+    };
+    menu_list(h)?;
+    let before = records(h);
+    h.key(Key::Down)?;
+    h.key(Key::Confirm)?;
+    r.check(h.driver.curtain() == Curtain::Up, "Status keeps the curtain up: the HD screen");
+    r.check(h.driver.nav().screen() == Screen::Status, "the HD shows the Status screen");
+    r.check(h.byte(d::MENU_SCREEN) == 7, "the original runs its Status screen under it");
+    h.frames(SETTLE)?;
+    let texts = scene(h).unwrap_or_default();
+    let party = (1..=9).find(|n| texts.contains(&format!("{n}/9"))).unwrap_or(0);
+    r.check(party >= 2, &format!("the header counts the party over nine slots ({party}/9)"));
+    if party < 2 {
+        return Ok(());
+    }
+    for label in ["HP", "KI", "BP", "PLA.", "EXP", "To next LV", "Techniques", "KI-USE"] {
+        r.check(texts.contains(&label.to_owned()), &format!("the panel has its {label} line"));
+    }
+    // Down moves the member and the panel follows, at once; the original is not touched.
+    let screen_step = (h.byte(d::MENU_SCREEN), h.byte(d::MENU_STEP));
+    h.key(Key::Down)?;
+    r.check(h.driver.nav().cursor() == 1, "Down moves the cursor to the second member");
+    r.check(!h.driver.busy(), "moving the member starts no press of the original");
+    r.check(
+        (h.byte(d::MENU_SCREEN), h.byte(d::MENU_STEP)) == screen_step,
+        "the original stays on its Status page 1",
+    );
+    let second = scene(h).unwrap_or_default();
+    r.check(second != texts, "the right panel follows the cursor");
+    for _ in 0..party - 1 {
+        h.key(Key::Down)?;
+    }
+    r.check(h.driver.nav().cursor() == 0, "Down wraps after the last member");
+    h.key(Key::Up)?;
+    r.check(usize::from(h.driver.nav().cursor()) == party - 1, "Up wraps before the first");
+    r.check(records(h) == before, "the party records are the same: Status is read-only");
+    // B goes back to the Menu list; its cursor is on Status again.
+    h.key(Key::Cancel)?;
+    r.check(h.driver.curtain() == Curtain::Up, "back from Status: the HD Menu list");
+    r.check(h.driver.nav().screen() == Screen::Menu, "B goes back to the Menu list");
+    r.check(h.driver.nav().cursor() == 1, "the Menu list keeps its cursor on Status");
+    r.check(h.byte(d::MENU_SCREEN) == 4, "the original is back on its Menu list");
+    // Status again, and Start closes the menu from it.
+    h.key(Key::Confirm)?;
+    r.check(h.driver.nav().screen() == Screen::Status, "Status opens again");
+    r.check(h.driver.nav().cursor() == 0, "on its first member");
+    h.driver.close_menu();
+    h.frame(Joypad::default())?;
+    h.until_idle()?;
+    h.frames(SETTLE)?;
+    r.check(h.driver.curtain() == Curtain::Down, "Start closes the menu: the curtain is down");
+    r.check(h.byte(d::FIELD_STATE) == 0, "the field is free");
+    r.check(records(h) == before, "the party records are unchanged after the menu closes");
+    Ok(())
 }
 
+/// Puts the party `ids` into the original's records (each a copy of the second record with its own character id), the
+/// size and the party list, as the game holds a party of that many: the saves at hand have two members only.
+fn stage_party(h: &mut Harness, ids: &[u8]) -> anyhow::Result<()> {
+    let base: Vec<u8> = (0..32).map(|i| h.byte(d::PARTY_RECORDS + 32 + i)).collect();
+    let mut events = Vec::new();
+    for (row, &id) in ids.iter().enumerate() {
+        let mut record = base.clone();
+        record[0x1C] = id;
+        events.push(HostEvent::Wram { address: d::PARTY_RECORDS + 32 * row as u32, bytes: record });
+    }
+    events.push(HostEvent::Wram { address: 0x7E_01BB, bytes: vec![ids.len() as u8] });
+    let mut order = ids.to_vec();
+    order.push(0xFF);
+    events.push(HostEvent::Wram { address: d::PARTY_ORDER, bytes: order });
+    apply_events(&mut h.machine, &events)?;
+    Ok(())
+}
+
+/// Presses Down on the HD Order screen until its cursor is on `row` (a slot, or the Apply row after the last).
+fn cursor_to(h: &mut Harness, row: usize) -> anyhow::Result<()> {
+    for _ in 0..8 {
+        if h.driver.order().cursor() == row {
+            return Ok(());
+        }
+        h.key(Key::Down)?;
+    }
+    bail!("the Order screen's cursor did not reach row {row}")
+}
+
+/// Grabs the member in slot `from` of the HD Order screen, carries it to slot `to` and drops it.
+fn carry(h: &mut Harness, from: usize, to: usize) -> anyhow::Result<()> {
+    cursor_to(h, from)?;
+    h.key(Key::Confirm)?;
+    while h.driver.order().held().is_some_and(|slot| slot != to) {
+        h.key(if h.driver.order().held().is_some_and(|slot| slot > to) {
+            Key::Up
+        } else {
+            Key::Down
+        })?;
+    }
+    h.key(Key::Confirm)
+}
+
+/// The party order list of the game, and the character of each of its first records.
+fn party_now(h: &Harness, size: usize) -> (Vec<u8>, Vec<u8>) {
+    let order = (0..=size as u32).map(|i| h.byte(d::PARTY_ORDER + i)).collect();
+    let records = (0..size as u32).map(|i| h.byte(d::PARTY_RECORDS + 32 * i + 0x1C)).collect();
+    (order, records)
+}
+
+/// The Order screen is the HD's own: the original keeps its Menu list while the HD holds the order (a member grabbed, moved
+/// and dropped, B undoing the moves), nothing is written until "Apply order", and then the original's own Order screen
+/// takes the members pick by pick (its cursor walked to each row, A on each, A on Yes), writes the records, and closes
+/// the menu. The party is staged with five members.
 fn menu_order(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
-    menu_entry(h, r, 2, 8, "Order")
+    use ssd_menus::Screen;
+    stage_party(h, &[0, 1, 2, 3, 4])?;
+    let before = party_now(h, 5);
+    r.check(before == (vec![0, 1, 2, 3, 4, 0xFF], vec![0, 1, 2, 3, 4]), "the staged party is in");
+    menu_list(h)?;
+    for _ in 0..2 {
+        h.key(Key::Down)?;
+    }
+    h.key(Key::Confirm)?;
+    r.check(
+        h.driver.curtain() == Curtain::Up && h.driver.nav().screen() == Screen::Order,
+        "Order opens the HD Order screen",
+    );
+    r.check(h.byte(d::MENU_SCREEN) == 4, "the original keeps its Menu list under it");
+    r.check(h.driver.order().members() == [0, 1, 2, 3, 4], "it opens on the game's order");
+    // Gohan to the front, Tien (the fifth) to the second place.
+    carry(h, 1, 0)?;
+    carry(h, 4, 1)?;
+    r.check(h.driver.order().members() == [1, 4, 0, 2, 3], "the HD holds the new order");
+    r.check(party_now(h, 5) == before, "editing writes nothing in the game");
+    r.check(h.byte(d::MENU_SCREEN) == 4, "and presses nothing: the original is on its Menu list");
+    // B undoes the last move, then the one before.
+    h.key(Key::Cancel)?;
+    r.check(h.driver.order().members() == [1, 0, 2, 3, 4], "B undoes the last move");
+    h.key(Key::Cancel)?;
+    r.check(h.driver.order().members() == [0, 1, 2, 3, 4], "and the one before it");
+    // Make the order again and apply it.
+    carry(h, 1, 0)?;
+    carry(h, 4, 1)?;
+    cursor_to(h, 5)?;
+    h.key(Key::Confirm)?;
+    h.frames(SETTLE)?;
+    r.check(
+        party_now(h, 5).1 == [1, 4, 0, 2, 3],
+        "the original wrote the records in the new order",
+    );
+    r.check(h.byte(d::FIELD_STATE) == 0, "its Order screen closed the menu");
+    r.check(h.driver.curtain() == Curtain::Down, "the curtain is down");
+    // Reopened, the screen starts on the new order; the whole party reversed is applied too.
+    menu_list(h)?;
+    for _ in 0..2 {
+        h.key(Key::Down)?;
+    }
+    h.key(Key::Confirm)?;
+    r.check(h.driver.order().members() == [1, 4, 0, 2, 3], "it reopens on the order the game has");
+    // Reverse: the first to the end, then the new first to the fourth place, and so on.
+    for end in (1..5).rev() {
+        carry(h, 0, end)?;
+    }
+    r.check(h.driver.order().members() == [3, 2, 0, 4, 1], "the HD holds the reversed order");
+    cursor_to(h, 5)?;
+    h.key(Key::Confirm)?;
+    h.frames(SETTLE)?;
+    r.check(party_now(h, 5).1 == [3, 2, 0, 4, 1], "the reversed party");
+    r.check(h.byte(d::FIELD_STATE) == 0, "and the menu is closed");
+    // B on an order not touched goes back to the Menu list, with nothing pressed.
+    menu_list(h)?;
+    for _ in 0..2 {
+        h.key(Key::Down)?;
+    }
+    h.key(Key::Confirm)?;
+    h.key(Key::Cancel)?;
+    r.check(h.driver.nav().screen() == Screen::Menu, "B goes back to the Menu list");
+    r.check(h.byte(d::MENU_SCREEN) == 4, "the original is still on its Menu list");
+    for _ in 0..3 {
+        h.key(Key::Cancel)?;
+    }
+    r.check(h.byte(d::FIELD_STATE) == 0, "the menu closes");
+    Ok(())
 }
 
+/// The Text screen is the HD's own: the original keeps its Menu list while the HD holds a speed, B puts nothing
+/// in the game, and A has the original's own Text screen take the speed (its cursor moved with the d-pad, then A,
+/// which stores it in `$01D0` and closes the menu). Options > Gameplay shows the same byte (a view of it).
 fn menu_text(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
-    menu_entry(h, r, 3, 9, "Text")
+    use ssd_menus::Screen;
+    menu_list(h)?;
+    for _ in 0..3 {
+        h.key(Key::Down)?;
+    }
+    let old = h.byte(d::TEXT_SPEED);
+    h.key(Key::Confirm)?;
+    r.check(
+        h.driver.curtain() == Curtain::Up && h.driver.nav().screen() == Screen::Text,
+        "Text opens the HD Text screen",
+    );
+    r.check(h.byte(d::MENU_SCREEN) == 4, "the original keeps its Menu list under it");
+    r.check(h.driver.nav().text().speed() == old, "the screen opens on the game's speed");
+    let (other, key) = if old < 4 { (old + 1, Key::Right) } else { (old - 1, Key::Left) };
+    h.key(key)?;
+    r.check(h.driver.nav().text().speed() == other, "Left and Right move the speed");
+    r.check(h.byte(d::TEXT_SPEED) == old, "moving writes nothing in the game");
+    h.frames(20)?;
+    r.check(h.driver.nav().text().frames() >= 20, "the preview runs");
+    h.key(Key::Cancel)?;
+    r.check(h.driver.nav().screen() == Screen::Menu, "B goes back to the Menu list");
+    r.check(h.byte(d::TEXT_SPEED) == old, "B leaves the old speed");
+    r.check(h.byte(d::MENU_SCREEN) == 4, "the original is still on its Menu list");
+    h.key(Key::Confirm)?;
+    h.key(key)?;
+    h.key(Key::Confirm)?;
+    h.frames(SETTLE)?;
+    r.check(h.byte(d::TEXT_SPEED) == other, "A has the original's screen take the new speed");
+    r.check(h.byte(d::FIELD_STATE) == 0, "the original's Text screen returns to the field");
+    r.check(h.driver.curtain() == Curtain::Down, "the curtain is down");
+    // Reopened, the screen opens on the speed that was kept.
+    menu_list(h)?;
+    for _ in 0..3 {
+        h.key(Key::Down)?;
+    }
+    h.key(Key::Confirm)?;
+    r.check(h.driver.nav().text().speed() == other, "the screen reopens on the kept speed");
+    // From one end to the other: the cursor of the original's screen goes the whole way, Left and Right.
+    for (key, end) in [(Key::Left, 0), (Key::Right, 4), (Key::Left, 0)] {
+        for _ in 0..4 {
+            h.key(key)?;
+        }
+        h.key(Key::Confirm)?;
+        h.frames(SETTLE)?;
+        r.check(h.byte(d::TEXT_SPEED) == end, &format!("the whole way to speed {}", end + 1));
+        r.check(h.byte(d::FIELD_STATE) == 0, "and the menu is closed");
+        menu_list(h)?;
+        for _ in 0..3 {
+            h.key(Key::Down)?;
+        }
+        h.key(Key::Confirm)?;
+    }
+    for _ in 0..3 {
+        h.key(Key::Cancel)?;
+    }
+    r.check(h.byte(d::FIELD_STATE) == 0, "the menu closes");
+    Ok(())
 }
 
-pub(crate) fn menu_save(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+/// The slots of the cartridge as the game's save has them: whether each holds a game.
+fn slots_used(h: &Harness) -> [bool; 3] {
+    let file = h.machine.sram().and_then(|sram| ssd_save::SaveFile::from_bytes(sram).ok());
+    std::array::from_fn(|slot| {
+        file.as_ref()
+            .and_then(|file| file.status(slot).ok())
+            .is_some_and(|status| status != ssd_save::SlotStatus::Empty)
+    })
+}
+
+/// The texts of the HD screen now.
+fn screen_texts(h: &Harness) -> Vec<String> {
+    h.driver
+        .scene(h.machine.wram())
+        .map(|list| list.texts().map(|(_, _, text)| text.to_owned()).collect())
+        .unwrap_or_default()
+}
+
+/// Saves to `slot` (0 to 2) through the HD Save screen, from the open screen with its cursor on the first slot: the
+/// cursor goes to the slot, A, and Yes if the slot holds a game and the screen asks. The original runs its own Save
+/// (its entry, its question, the slot); the call ends when the original shows "Completed!". Returns whether it asked.
+pub(crate) fn hd_save_to(h: &mut Harness, slot: usize) -> anyhow::Result<bool> {
+    for _ in 0..slot {
+        h.key(Key::Down)?;
+    }
+    h.key(Key::Confirm)?;
+    let asked = h.driver.nav().save().ask().is_some();
+    if asked {
+        h.key(Key::Left)?;
+        h.key(Key::Confirm)?;
+    }
+    Ok(asked)
+}
+
+/// Opens the HD Save screen from the field (the Menu list's fifth row).
+pub(crate) fn open_hd_save(h: &mut Harness) -> anyhow::Result<()> {
     menu_list(h)?;
     for _ in 0..4 {
         h.key(Key::Down)?;
     }
+    h.key(Key::Confirm)
+}
+
+/// Saves the game to slot 1 through the HD Save screen from the field, as the scenarios that need a save made do (the
+/// cheats, the bag): the original's own Save runs to Completed, and the game is back on the field.
+pub(crate) fn menu_save(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+    open_hd_save(h)?;
+    r.check(h.driver.nav().screen() == ssd_menus::Screen::Save, "Save opens the HD Save screen");
+    hd_save_to(h, 0)?;
+    r.check(
+        h.byte(d::MENU_SCREEN) == 10 && h.byte(d::MENU_STEP) == 2,
+        "the original's Save runs to Completed",
+    );
     h.key(Key::Confirm)?;
-    r.check(h.byte(d::MENU_SCREEN) == 10, "Save opens the original's slot screen");
-    r.check(h.driver.curtain() == Curtain::Lifted, "Save lifts the curtain");
-    // The slot, the question and the completion each take an A; the last one closes the menu.
-    for _ in 0..4 {
-        if h.byte(d::MENU_SCREEN) != 10 {
-            break;
-        }
-        h.press(a())?;
-        h.frames(60)?;
-    }
-    h.close_lifted()?;
     r.check(h.byte(d::FIELD_STATE) == 0, "Save returns to the field");
+    Ok(())
+}
+
+/// Menu > Save is the HD's own: the screen shows the slots and holds the choice while the original stays on its Menu
+/// list (its first "Save?" is never asked); B leaves with nothing written; A on a slot that holds a game asks "Overwrite"
+/// with the cursor on No; the save is the original's own presses, and a third A closes the menu.
+fn menu_save_screen(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+    use ssd_menus::Screen;
+    let used = slots_used(h);
+    let (Some(empty), Some(held)) = (used.iter().position(|&u| !u), used.iter().position(|&u| u))
+    else {
+        bail!("menu-save needs a cartridge with a used slot and an empty one: {used:?}");
+    };
+    open_hd_save(h)?;
+    r.check(h.driver.nav().screen() == Screen::Save, "Save opens the HD Save screen");
+    r.check(h.driver.curtain() == Curtain::Up, "the HD screen has the curtain");
+    r.check(h.byte(d::MENU_SCREEN) == 4, "the original keeps its Menu list: no \"Save?\" question");
+    let text = screen_texts(h);
+    r.check(
+        text.iter().any(|t| t == "Empty") && text.iter().any(|t| t.starts_with("LV ")),
+        &format!("the screen marks an empty slot and shows what a used one holds: {text:?}"),
+    );
+    let cartridge = h.machine.sram().map(<[u8]>::to_vec);
+    // B goes back with nothing written.
+    h.key(Key::Cancel)?;
+    r.check(h.driver.nav().screen() == Screen::Menu, "B goes back to the Menu list");
+    r.check(h.machine.sram().map(<[u8]>::to_vec) == cartridge, "B saved nothing");
+    h.key(Key::Confirm)?;
+    // A on a slot that holds a game asks first, with the cursor on No, and writes nothing.
+    for _ in 0..held {
+        h.key(Key::Down)?;
+    }
+    h.key(Key::Confirm)?;
+    r.check(h.driver.nav().save().ask() == Some(1), "A on a used slot asks, the cursor on No");
+    r.check(
+        screen_texts(h).iter().any(|t| t == &format!("Overwrite slot {:02}?", held + 1)),
+        "the question names the slot",
+    );
+    r.check(h.byte(d::MENU_SCREEN) == 4, "the original has been sent nothing");
+    h.key(Key::Confirm)?;
+    r.check(
+        h.driver.nav().save().ask().is_none() && h.machine.sram().map(<[u8]>::to_vec) == cartridge,
+        "A on No closes the question and saves nothing",
+    );
+    // A on an empty slot saves at once, through the original's own screen.
+    for _ in 0..(empty + 3 - held) % 3 {
+        h.key(Key::Down)?;
+    }
+    let asked = hd_save_to(h, 0)?;
+    r.check(!asked, "an empty slot is saved to at once");
+    r.check(
+        h.byte(d::MENU_SCREEN) == 10 && h.byte(d::MENU_STEP) == 2,
+        "the original's Save wrote the slot: it shows Completed",
+    );
+    let after = slots_used(h);
+    r.check(
+        after[empty] && (0..3).all(|slot| slot == empty || after[slot] == used[slot]),
+        "only the slot chosen was written",
+    );
+    r.check(
+        screen_texts(h).iter().any(|t| t == &format!("Saved to slot {:02}.", empty + 1)),
+        "the HD says where it saved",
+    );
+    r.check(h.driver.curtain() == Curtain::Up, "the HD message holds the curtain");
+    // A takes the game back to the field.
+    h.key(Key::Confirm)?;
+    r.check(h.byte(d::FIELD_STATE) == 0, "Save returns to the field");
+    r.check(h.driver.curtain() == Curtain::Down, "the curtain is down");
+    // The slot just written holds a game now: A on it asks, Yes overwrites it.
+    open_hd_save(h)?;
+    for _ in 0..empty {
+        h.key(Key::Down)?;
+    }
+    h.key(Key::Confirm)?;
+    r.check(h.driver.nav().save().ask() == Some(1), "the slot just written asks to be overwritten");
+    h.key(Key::Left)?;
+    h.key(Key::Confirm)?;
+    r.check(h.byte(d::MENU_SCREEN) == 10 && h.byte(d::MENU_STEP) == 2, "Yes saves again");
+    h.key(Key::Confirm)?;
+    r.check(h.byte(d::FIELD_STATE) == 0, "and the game is back on the field");
     Ok(())
 }
 
@@ -635,9 +1052,16 @@ fn town_menu(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
         "Menu in town opens the HD Menu list",
     );
     h.key(Key::Confirm)?;
-    r.check(h.driver.curtain() == Curtain::Lifted && h.byte(d::MENU_SCREEN) == 6, "Cards opens");
-    h.close_lifted()?;
-    r.check(h.byte(d::FIELD_STATE) == 0, "Cards closes back to the field");
+    r.check(
+        h.driver.curtain() == Curtain::Up && h.driver.nav().screen() == ssd_menus::Screen::Cards,
+        "Cards opens the HD hand",
+    );
+    r.check(h.byte(d::MENU_SCREEN) == 6, "over the original's Cards screen");
+    h.frames(SETTLE)?;
+    h.driver.close_menu();
+    h.until_idle()?;
+    h.frames(SETTLE)?;
+    r.check(h.byte(d::FIELD_STATE) == 0, "Start closes back to the field");
     Ok(())
 }
 
@@ -827,7 +1251,7 @@ fn scenario_suite(
 
 /// The game's own state the Classic check compares, as ranges of work RAM: the items, the money,
 /// the party, the party's mode and its map. The timers and the random generators are left out.
-const GAME_STATE: [(u32, u32); 7] = [
+const GAME_STATE: [(u32, u32); 8] = [
     (0x7E_0100, 0x30),  // item_list
     (0x7E_01B2, 0x03),  // item_count and zeni (a word)
     (0x7E_0190, 0x10),  // party_order
@@ -835,6 +1259,7 @@ const GAME_STATE: [(u32, u32); 7] = [
     (0x7E_0D55, 0x01),  // travel_mode
     (0x7E_01A0, 0x01),  // map_id
     (0x7E_01A2, 0x04),  // the leader's position
+    (0x7E_01D0, 0x01),  // text_speed
 ];
 
 /// The part of work RAM the ranges of `GAME_STATE` cover, as (address, value) pairs.
@@ -861,7 +1286,7 @@ struct Case {
 
 /// The choices the differential checks: the command window, the Menu list, the flying window, and
 /// the cancels.
-const CASES: [Case; 10] = [
+const CASES: [Case; 14] = [
     Case {
         name: "talk",
         hd: |h| {
@@ -921,15 +1346,175 @@ const CASES: [Case; 10] = [
         classic: "4 a\n120 -\n4 down\n30 -\n4 down\n30 -\n4 down\n30 -\n4 down\n30 -\n4 a\n120 -\n4 down\n30 -\n4 a\n200 -\n",
     },
     Case {
+        name: "status-start",
+        hd: |h| {
+            menu_list(h)?;
+            h.key(Key::Down)?;
+            h.key(Key::Confirm)?;
+            h.driver.close_menu();
+            h.frame(Joypad::default())?;
+            h.until_idle()
+        },
+        classic: "4 a
+120 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 a
+120 -
+4 down
+30 -
+4 a
+200 -
+4 b
+200 -
+4 b
+200 -
+4 b
+200 -
+",
+    },
+    Case {
+        name: "menu-order",
+        hd: |h| {
+            menu_list(h)?;
+            for _ in 0..2 {
+                h.key(Key::Down)?;
+            }
+            // The HD's Order screen: the second member to the front, then Apply order (the original's own screen takes it:
+            // Down to the second member, A, the last one is taken by itself, A on Yes).
+            h.key(Key::Confirm)?;
+            for key in [Key::Down, Key::Confirm, Key::Up, Key::Confirm, Key::Down, Key::Down] {
+                h.key(key)?;
+            }
+            h.key(Key::Confirm)
+        },
+        classic: "4 a
+120 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 a
+120 -
+4 down
+30 -
+4 down
+30 -
+4 a
+120 -
+4 down
+30 -
+4 a
+120 -
+4 a
+200 -
+",
+    },
+    Case {
         name: "menu-text",
         hd: |h| {
             menu_list(h)?;
             for _ in 0..3 {
                 h.key(Key::Down)?;
             }
+            // The HD's Text screen: one step slower, kept with A (the original's screen then takes it).
+            h.key(Key::Confirm)?;
+            h.key(Key::Right)?;
             h.key(Key::Confirm)
         },
-        classic: "4 a\n120 -\n4 down\n30 -\n4 down\n30 -\n4 down\n30 -\n4 down\n30 -\n4 a\n120 -\n4 down\n30 -\n4 down\n30 -\n4 down\n30 -\n4 a\n200 -\n",
+        classic: "4 a\n120 -\n4 down\n30 -\n4 down\n30 -\n4 down\n30 -\n4 down\n30 -\n4 a\n120 -\n4 down\n30 -\n4 down\n30 -\n4 down\n30 -\n4 a\n120 -\n4 right\n30 -\n4 a\n200 -\n",
+    },
+    Case {
+        name: "menu-save",
+        hd: |h| {
+            // The HD Save screen: the third slot, saved to through the original's own Save (its question is answered by the
+            // HD, which never asks it).
+            open_hd_save(h)?;
+            hd_save_to(h, 2)?;
+            h.key(Key::Confirm)
+        },
+        classic: "4 a
+120 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 a
+120 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 a
+120 -
+4 a
+120 -
+4 down
+30 -
+4 down
+30 -
+4 a
+200 -
+4 a
+200 -
+",
+    },
+    Case {
+        name: "menu-save-over",
+        hd: |h| {
+            // The first slot: it holds a game, so the HD asks first (Yes), then the original saves as above.
+            open_hd_save(h)?;
+            let asked = hd_save_to(h, 0)?;
+            anyhow::ensure!(asked, "slot 1 of the start holds a game: the HD asks before it saves");
+            h.key(Key::Confirm)
+        },
+        classic: "4 a
+120 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 a
+120 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 down
+30 -
+4 a
+120 -
+4 a
+120 -
+4 a
+200 -
+4 a
+200 -
+",
     },
     Case {
         name: "fly",
@@ -990,7 +1575,9 @@ fn tape_check(
     let (a, b) = (played.machine.wram(), replayed.wram());
     let differing: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
     let same_frames = played.machine.frame_count() == replayed.frame_count();
-    let ok = differing.is_empty() && same_frames;
+    // The battery save too: a Save the HD plays writes the same bytes as the same presses on a plain machine.
+    let sram_differs = played.machine.sram() != replayed.sram();
+    let ok = differing.is_empty() && same_frames && !sram_differs;
     let shown: Vec<String> = differing
         .iter()
         .take(12)
@@ -1000,13 +1587,14 @@ fn tape_check(
         + tape.windows(2).filter(|w| !w[0].a && w[1].a).count();
     writeln!(
         out,
-        "{} {} tape: {} frames, {presses} presses of A; replayed as Classic, {} bytes of work RAM differ{}{}",
+        "{} {} tape: {} frames, {presses} presses of A; replayed as Classic, {} bytes of work RAM differ{}{}, the battery save {}",
         if ok { "ok  " } else { "FAIL" },
         case.name,
         tape.len(),
         differing.len(),
         if shown.is_empty() { "" } else { ": " },
-        shown.join(" ")
+        shown.join(" "),
+        if sram_differs { "DIFFERS" } else { "is equal" }
     )?;
     Ok((ok, replayed))
 }
@@ -1042,14 +1630,17 @@ fn classic_check(
         .take(12)
         .map(|(x, y)| format!("{:06X} {:02X}/{:02X}", x.0, x.1, y.1))
         .collect();
-    let ok = differing.is_empty();
+    // The battery save is compared whole: a Save made with the HD's presses writes what the original's own screen writes.
+    let sram_differs = by_tape.sram() != by_hand.sram();
+    let ok = differing.is_empty() && !sram_differs;
     writeln!(
         out,
-        "{} {} Classic timeline: the game state at frame {target} {}{}",
+        "{} {} Classic timeline: the game state at frame {target} {}{}, the battery save {}",
         if ok { "ok  " } else { "FAIL" },
         case.name,
         if ok { "is equal" } else { "differs:" },
-        if ok { String::new() } else { format!(" {}", differing.join(" ")) }
+        if ok { String::new() } else { format!(" {}", differing.join(" ")) },
+        if sram_differs { "DIFFERS" } else { "is equal" }
     )?;
     Ok(ok)
 }

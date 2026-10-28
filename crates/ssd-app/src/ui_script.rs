@@ -13,7 +13,7 @@
 //! mode <routine> original|rust|verify
 //! menu open
 //! menu key up|down|left|right|a|b|l|r|y|select|x
-//! menu show field|menu|items|cheats|options|mods
+//! menu show field|menu|items|cheats|options|mods|status
 //! menu battle-cheats
 //! menu press <key>|esc|backspace|pad <button>
 //! menu tab all|allies|tools
@@ -74,6 +74,8 @@ pub enum MenuCommand {
     Press(Capture),
     /// The Cheats screen over the battle the game is in (F3, the touch MENU's Cheats).
     BattleCheats,
+    /// Start: the Cards screen closes the menu.
+    Close,
 }
 
 /// The HD screen a `menu show` line asks for.
@@ -91,6 +93,16 @@ pub enum MenuShow {
     Options,
     /// The Data packs screen.
     Mods,
+    /// The Status screen.
+    Status,
+    /// The Cards screen.
+    Cards,
+    /// The Text screen.
+    Text,
+    /// The Save screen.
+    Save,
+    /// The Order screen.
+    Order,
 }
 
 /// A line of a script, with its number (from 1).
@@ -165,6 +177,7 @@ fn parse_command(text: &str) -> Result<Command, String> {
         ("mode", _) => Err("mode takes a routine and one of original, rust, verify".to_owned()),
         ("menu", ["open"]) => Ok(Command::Menu(MenuCommand::Open)),
         ("menu", ["battle-cheats"]) => Ok(Command::Menu(MenuCommand::BattleCheats)),
+        ("menu", ["close"]) => Ok(Command::Menu(MenuCommand::Close)),
         ("menu", ["key", key]) => {
             menu_key_named(key).map(|key| Command::Menu(MenuCommand::Key(key)))
         }
@@ -191,7 +204,7 @@ fn parse_command(text: &str) -> Result<Command, String> {
 }
 
 /// What a `menu` line takes, for the error message.
-const MENU_USAGE: &str = "menu takes open, key up|down|left|right|a|b|x, show field|menu|items|cheats|options|mods, press <key>, or tab all|allies|tools";
+const MENU_USAGE: &str = "menu takes open, close, key up|down|left|right|a|b|x, show field|menu|items|cheats|options|mods|cards, press <key>, or tab all|allies|tools";
 
 fn menu_tab_named(name: &str) -> Result<BagTab, String> {
     match name {
@@ -243,8 +256,13 @@ fn menu_screen_named(name: &str) -> Result<MenuShow, String> {
         "cheats" => Ok(MenuShow::Cheats),
         "options" => Ok(MenuShow::Options),
         "mods" => Ok(MenuShow::Mods),
+        "status" => Ok(MenuShow::Status),
+        "cards" => Ok(MenuShow::Cards),
+        "text" => Ok(MenuShow::Text),
+        "order" => Ok(MenuShow::Order),
+        "save" => Ok(MenuShow::Save),
         _ => Err(format!(
-            "unknown menu screen `{name}`: expected field, menu, items, cheats, options or mods"
+            "unknown menu screen `{name}`: expected field, menu, items, cheats, options, mods, cards, text, order, status or save"
         )),
     }
 }
@@ -349,6 +367,9 @@ mod tests {
         assert!(error("menu key w").message.contains("unknown menu key `w`"));
         assert_eq!(command("menu key x"), Command::Menu(MenuCommand::Key(Key::Apply)));
         assert_eq!(command("menu show mods"), Command::Menu(MenuCommand::Show(MenuShow::Mods)));
+        assert_eq!(command("menu show status"), Command::Menu(MenuCommand::Show(MenuShow::Status)));
+        assert_eq!(command("menu show cards"), Command::Menu(MenuCommand::Show(MenuShow::Cards)));
+        assert_eq!(command("menu close"), Command::Menu(MenuCommand::Close));
         assert!(error("menu show packs").message.contains("unknown menu screen `packs`"));
     }
 

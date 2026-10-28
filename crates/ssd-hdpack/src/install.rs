@@ -415,6 +415,12 @@ mod tests {
     /// A shared pack of one pose (a lossless WebP, its outline in masks.bin), one background layer
     /// with no source picture, and a manifest for `crc`.
     fn shared_pack(dir: &Path, crc: u32) -> PathBuf {
+        shared_pack_of(dir, crc, false)
+    }
+
+    /// [`shared_pack`], with the bigger art of the pose (`variants/`: the pose's picture and 4 art pixels of margin each
+    /// side, `always`) when `variants` is set, and the digest of a pack that has it.
+    fn shared_pack_of(dir: &Path, crc: u32, variants: bool) -> PathBuf {
         let path = dir.join("hd-pack.zip");
         let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
         let stored = zip::write::SimpleFileOptions::default()
@@ -446,12 +452,21 @@ mod tests {
                 "map_base": 28672, "char_base": 20480, "size": 0, "rows": [0, 2], "fill": true,
                 "file": "b.webp"}]}"#,
         );
+        if variants {
+            put("variants/p.webp", &webp(16, 16));
+            put(
+                "variants/index.json",
+                br#"{"variants": [{"id": "p", "art": "p", "when": "always", "margin": 4,
+                    "file": "p.webp"}]}"#,
+            );
+        }
+        let digest = if variants { "00000003" } else { "00000002" };
         let text = format!(
             "format = 1
 name = \"Test art\"
 revision = \"t1\"
 rom_crc32 = \"{crc:08X}\"
-digest = \"00000002\"
+digest = \"{digest}\"
 "
         );
         put(public::MANIFEST, text.as_bytes());
@@ -488,6 +503,7 @@ digest = \"00000002\"
         assert!(pack.join(&object.art).is_file());
         assert_eq!(opened.bg.layer.len(), 1);
         assert!(opened.bg.layer[0].source.is_empty(), "no source picture of the game");
+        assert!(opened.pose_art.is_empty(), "a pack without bigger art has none");
         // The work folder, the store and the lock are gone, and a second install does nothing
         let folder = pack.parent().unwrap();
         let names: Vec<String> = std::fs::read_dir(folder)
@@ -499,6 +515,68 @@ digest = \"00000002\"
             install(&rom, &zip, &cache, &mut |_| {}, false).unwrap(),
             Outcome::Current(_)
         ));
+    }
+
+    #[test]
+    fn a_pack_with_bigger_pose_art_installs_it_and_replaces_one_without() {
+        let dir = tempfile::tempdir().unwrap();
+        let rom = vec![0_u8; 0x10_0000];
+        let crc = ssd_rom::crc32(&rom);
+        let cache = dir.path().join("cache");
+        // The pack as it was shipped, without the art: installed, and as it was
+        // (each in a folder of its own: both are `hd-pack.zip`)
+        let (old_dir, new_dir) = (dir.path().join("old"), dir.path().join("new"));
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::create_dir_all(&new_dir).unwrap();
+        let old = shared_pack(&old_dir, crc);
+        let Outcome::Installed { pack, .. } =
+            install(&rom, &old, &cache, &mut |_| {}, false).unwrap()
+        else {
+            panic!("the first install does the work")
+        };
+        assert!(
+            ssd_hd::pack::Pack::open(&pack).unwrap().pose_art.is_empty(),
+            "a pack without bigger art has none"
+        );
+        // The new pack: another digest, so the installed pack is made again, with the art
+        let new = shared_pack_of(&new_dir, crc, true);
+        let Outcome::Installed { pack, report } =
+            install(&rom, &new, &cache, &mut |_| {}, false).unwrap()
+        else {
+            panic!("a new pack is installed over the old one")
+        };
+        assert_eq!(report.variants, 1);
+        let opened = ssd_hd::pack::Pack::open(&pack).unwrap();
+        assert_eq!(opened.pose_art.len(), 1);
+        let variant = &opened.pose_art[0];
+        assert_eq!(
+            (variant.art.as_str(), variant.margin),
+            ("p", 1),
+            "the margin: 4 art pixels, a game pixel"
+        );
+        assert_eq!(format!("{:?}", variant.when), "Always");
+        assert!(pack.join(&variant.file).is_file(), "{}", variant.file);
+        assert!(
+            Path::new(&variant.file).extension().is_some_and(|ext| ext == "webp"),
+            "the picture is the pack's own WebP"
+        );
+        // The poses are what they were
+        assert_eq!(opened.art.objects().len(), 1);
+        assert_eq!(opened.bg.layer.len(), 1);
+        assert!(matches!(
+            install(&rom, &new, &cache, &mut |_| {}, false).unwrap(),
+            Outcome::Current(_)
+        ));
+        // And the old zip installs again over the new pack, without the art
+        let Outcome::Installed { pack, .. } =
+            install(&rom, &old, &cache, &mut |_| {}, false).unwrap()
+        else {
+            panic!("an old pack is installed over a new one")
+        };
+        assert!(
+            ssd_hd::pack::Pack::open(&pack).unwrap().pose_art.is_empty(),
+            "a pack without bigger art has none"
+        );
     }
 
     #[test]

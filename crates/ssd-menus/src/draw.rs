@@ -66,6 +66,19 @@ pub enum Align {
     Right,
 }
 
+/// A part of a card of the hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CardPart {
+    /// The whole card.
+    Whole,
+    /// The ball in the top-left corner (the attack value).
+    Attack,
+    /// The kanji square in the middle.
+    Symbol,
+    /// The ball in the bottom-right corner (the defence value).
+    Defence,
+}
+
 /// One step of a draw list.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -105,6 +118,15 @@ pub enum Op {
     /// to fit `rect`, which is the outside of the card's frame. A backend with no card art paints
     /// [`crate::screens::pixel_card`] instead.
     Card { rect: Rect, attack_z: bool, defence_z: bool },
+    /// A card of the hand of the Cards screen, or a part of it, drawn from the 4 x 6 tile words the game wrote for it
+    /// (`tiles`, row by row) to fit `rect`. A backend with no card art paints [`crate::screens::cards::flat_part`].
+    HandCard { rect: Rect, tiles: Vec<u16>, part: CardPart },
+    /// A small orange triangle pointing down (the cursor over a card), 18 wide and 16 high, with its top-left corner at
+    /// (`x`, `y`).
+    CursorDown { x: f32, y: f32 },
+    /// The kanji or emblem of a card symbol (0 to 6, a fighter's class) in the HD art, filling `rect`. A backend with no
+    /// card art paints nothing there.
+    Symbol { rect: Rect, symbol: u8 },
     /// A bar filled to `fraction` (0 to 1) of its well, with a white border. `rect` is the outside.
     Bar { rect: Rect, fraction: f32, color: Color },
 }

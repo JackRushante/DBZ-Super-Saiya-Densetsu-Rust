@@ -254,6 +254,95 @@ pub struct Pack {
     pub mode7: crate::mode7art::Index,
     /// The pose variants of the data packs drawn over this pack (empty without them; see [`Pack::with_overlay`]).
     pub variants: Vec<PoseVariant>,
+    /// The pack's own pose variants: art bigger than the box of the original sprite for the poses that need it (empty without
+    /// `art/variants/variants.toml`). The renderer draws one only while no data pack's variant of the same art holds
+    /// (`ArtState::pose_variant`).
+    pub pose_art: Vec<PoseVariant>,
+}
+
+/// Where the pack lists its own pose variants.
+pub const POSE_ART: &str = "art/variants/variants.toml";
+
+/// `art/variants/variants.toml`: the pack's own pose variants, as the art import writes them and [`Pack::open`] reads them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PoseArt {
+    #[serde(default, rename = "variant")]
+    pub variants: Vec<PoseArtEntry>,
+}
+
+/// One pose variant of the pack: the same fields as a data pack's `[[pose_variant]]` (`ssd_mod::PoseVariantEntry`),
+/// with the picture's file relative to the pack's folder.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PoseArtEntry {
+    /// The name of the object's art it replaces (its `id` in the art index).
+    pub art: String,
+    /// The condition under which it is drawn (`always` or `kaioken`).
+    pub when: String,
+    /// The margin on each side, in art pixels: a multiple of 4 up to 96 (`ssd_mod::pose::refusal`).
+    pub margin: u32,
+    /// The picture, relative to the pack's folder.
+    pub file: String,
+}
+
+impl PoseArtEntry {
+    /// The entry as the renderer's variant (the margin in game pixels), or why it is refused.
+    ///
+    /// # Errors
+    ///
+    /// The condition is not one the game has, or the margin is not a whole number of game pixels up to the limit.
+    pub fn variant(&self) -> Result<PoseVariant, String> {
+        let entry = ssd_mod::PoseVariantEntry {
+            art: self.art.clone(),
+            when: self.when.clone(),
+            file: self.file.clone(),
+            margin: self.margin,
+        };
+        if let Some(reason) = ssd_mod::pose::refusal(&entry) {
+            return Err(reason);
+        }
+        let when = ssd_mod::pose::Condition::from_name(&self.when).ok_or("a condition")?;
+        Ok(PoseVariant {
+            art: self.art.clone(),
+            when,
+            margin: self.margin / 4,
+            file: self.file.clone(),
+        })
+    }
+}
+
+/// The pose variants `art/variants/variants.toml` of the pack in `dir` lists: none when there is no such file. An entry that
+/// is refused is left out, and the log says why.
+fn read_pose_art(dir: &Path) -> Result<Vec<PoseVariant>, PackError> {
+    let path = dir.join(POSE_ART);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(PackError::Read {
+                path: dir.to_path_buf(),
+                message: format!("{POSE_ART}: {e}"),
+            });
+        }
+    };
+    let listed: PoseArt = toml::from_str(&text).map_err(|e| PackError::Read {
+        path: dir.to_path_buf(),
+        message: format!("{POSE_ART}: {e}"),
+    })?;
+    Ok(listed
+        .variants
+        .iter()
+        .filter_map(|entry| match entry.variant() {
+            Ok(variant) => Some(variant),
+            Err(reason) => {
+                log::warn!(
+                    "the pack's pose variant {} of {} is left out: {reason}",
+                    entry.file,
+                    entry.art
+                );
+                None
+            }
+        })
+        .collect())
 }
 
 /// A pose variant of a data pack (its `[[pose_variant]]` entry, `ssd_mod::pose`): the picture drawn in place of the art of the
@@ -329,6 +418,7 @@ impl Pack {
             bg,
             mode7,
             variants: Vec::new(),
+            pose_art: read_pose_art(dir)?,
         })
     }
 }
@@ -583,6 +673,7 @@ mod tests {
             bg: crate::bgart::Index::default(),
             mode7: crate::mode7art::Index::default(),
             variants: Vec::new(),
+            pose_art: Vec::new(),
         }
     }
 
@@ -713,5 +804,41 @@ mod tests {
             assert_eq!(ssd_mod::derive::FIRST_PICTURE[cell], first);
         }
         assert_eq!(picture.name, "a");
+    }
+
+    #[test]
+    fn a_pack_lists_its_own_pose_variants_and_one_that_is_refused_is_left_out() {
+        let cache = tempfile::tempdir().unwrap();
+        let dir = cache.path().join("pack");
+        write_pack(&dir, 1);
+        assert!(Pack::open(&dir).unwrap().pose_art.is_empty(), "an old pack lists none");
+        std::fs::create_dir_all(dir.join("art/variants")).unwrap();
+        let entry = |art: &str, when: &str, margin: u32| PoseArtEntry {
+            art: art.to_owned(),
+            when: when.to_owned(),
+            margin,
+            file: format!("art/variants/{art}.webp"),
+        };
+        let listed = PoseArt {
+            variants: vec![
+                entry("battle-goku-ssj-000", "always", 76),
+                entry("battle-goku-ssj-001", "bloom", 76),
+                entry("battle-goku-ssj-002", "always", 77),
+                entry("battle-goku-ssj-003", "kaioken", 96),
+            ],
+        };
+        std::fs::write(dir.join(POSE_ART), toml::to_string(&listed).unwrap()).unwrap();
+        let pack = Pack::open(&dir).unwrap();
+        let drawn: Vec<(&str, u32)> =
+            pack.pose_art.iter().map(|variant| (variant.art.as_str(), variant.margin)).collect();
+        assert_eq!(
+            drawn,
+            [("battle-goku-ssj-000", 19), ("battle-goku-ssj-003", 24)],
+            "the margin in game pixels; an unknown condition and half a game pixel are left out"
+        );
+        assert_eq!(pack.pose_art[0].file, "art/variants/battle-goku-ssj-000.webp");
+        assert!(pack.variants.is_empty(), "the data packs' variants are apart");
+        std::fs::write(dir.join(POSE_ART), "variant = 3").unwrap();
+        assert!(Pack::open(&dir).is_err(), "a list that is not a list is an error");
     }
 }

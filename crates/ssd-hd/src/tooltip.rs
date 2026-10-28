@@ -31,6 +31,13 @@ pub(crate) const TIPS: [Tip; 7] = [
     Tip { code: 0xFC, reading: "Chou", meaning: "Super" },
 ];
 
+/// The reading and the meaning of each of the seven symbols, symbol 0 to 6, as the tooltip says them: the HD Cards screen
+/// of the menus says the same words.
+#[must_use]
+pub fn symbol_words() -> [(&'static str, &'static str); 7] {
+    std::array::from_fn(|symbol| (TIPS[symbol].reading, TIPS[symbol].meaning))
+}
+
 /// Draws that follow the cursor for this many frames after it was last seen.
 const KEEP: u32 = 48;
 /// The cards of a hand and the width of one, in pixels: the hand spans five of them, whatever is

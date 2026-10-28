@@ -70,15 +70,29 @@ Screens (`$0D5F`), seen unless marked:
 | 5 | `01:8F81` | Land: the landing, with the same steps as 1; `travel_mode` becomes 1 and the menu closes (seen, M4 task 2; not a use-on-member list) |
 | 6 | `01:903F` | Cards |
 | 7 | `01:90C4` | Status (the full-screen status page, `game_mode` 3) |
-| 8 | `01:939B` | Order (the party order; copies `party_records` to `$7E:3800`, swaps, writes back, rebuilds the order list with `01:967A`) |
-| 9 | `01:96AD` | Text speed: five speeds, the choice is saved in `$01D0` |
-| 10 | `01:96CD` | Save: the question (step 0), the slot list (step 1, the slot in `$0D62`), `03:E556` (the battery save of `save-format.md`) on the A that chooses the slot, then "Completed!" (step 2) |
+| 8 | `01:939B` | Order (the party order; see below) |
+| 9 | `01:96AD` | Text speed: five speeds, the choice is saved in `$01D0` (Left and Right move the cursor `$0D62`, 0 to 4; the A that chooses stores it in `$01D0` and the menu closes through screen 3; seen headless) |
+| 10 | `01:96CD` | Save: the question (step 0), the slot list (step 1, the slot in `$0D62`), `03:E556` (the battery save of `save-format.md`) on the A that chooses the slot, then "Completed!" (step 2). The Enhanced mode's HD Save screen asks neither question: it answers step 0 with the original's own A (Yes is where the cursor starts), moves the slot list's cursor with Down and presses A (`menu-test diff menu-save`: the same work RAM and battery save as the original's own presses) |
 | 13 | `01:970F` | the town command menu (Talk, Look, Item, Menu: no Fly); the shop runs on top of it |
 | 17, 21 | | battle command and the battle's item effect (seen: 17 with the battle command window, `$15` while a battle item works) |
 
 The other numbers of the table (11, 12, 14 to 16, 18 to 20, 22 to 29) are the battle's and the story's small screens; not
 decoded. The command menu's choice goes through `01:BE70`: the table at `01:89B6` turns the cursor (Talk, Look, Fly, Item,
 Menu) into a *window set* (0, 1, 80 = fly, 2, 3); Item with no items opens set `$25` (a "no items" message) instead.
+
+### Order (screen 8)
+
+Four steps (`$0D68`): 0 copies the nine `party_records` to `$7E:3800` and clears the slot count `$0D6B`; 1 takes the picks; 2 asks
+Yes or No; 3 returns to the field. The list's rows are the party records in their slots (`$0D62` is the row of the cursor, the size
+of the party is `$01BB`). On step 1, A copies the record under the cursor into the next slot of the copy (slot `$0D6B`), clears
+bit 7 of its flags (a row taken: the cursor skips it from then on, in both directions), moves the cursor to the next row left
+and counts the slot. When one row is left it is taken by itself and step 2 starts (the question's cursor is on Yes, `$0D62` = 0).
+B takes back the last pick (the count goes down, the row's bit 7 comes back, the cursor stays where it is) and leaves the screen for
+the Menu list when no pick is left. On step 2, A on Yes copies `$7E:3800` back over `party_records`, clears the records past the party
+(`01:967A`), redraws the corner portraits (`01:C715`) and goes to step 3, which returns to the field (the menu closes); A on No
+gives every row its bit 7 back and starts step 1 again; B takes back the last two picks. The record order is the party order the
+game plays with. The list `party_order` (`$0190`) is not touched: the game writes it when it saves (`03:E4D1`), so a reader of the
+party in play reads the records (`ssd_game::menu::MenuProbe`). Seen on a party of two and on a staged party of five (`menu-test field menu-order`).
 
 ### The window engine
 
@@ -111,6 +125,24 @@ Entries met in the field and the Item screen (seen from the order the Item scree
 | `$08`, `$09` | the Talk and Look message boxes |
 
 The money is shown in **Pt**: the `P` after the zeni (300P) is the unit, and every price below is in the same unit.
+
+## The Status screen
+
+Screen 7 (`$0D5F`) has two pages: page 1 lists the party (steps 0 to 2: the nine record slots, three columns of LV, HP, KI and
+BP with the corner picture), and A on a member opens page 2 (his figures and his techniques), where B comes back to page 1. The
+HD screen (`ssd-game`'s `menu/status.rs`) shows both at once and reads the party records, so it never presses A: the original
+sits on its page 1 while the HD cursor moves, and B (or Start) is a plan of the original's own B presses back to the Menu list
+(and out). What page 2's figures are (SEEN, compared on the reference capture of the party with Goku at level 47, Gohan at 40):
+
+| Shown | Source |
+|---|---|
+| LV, HP, KI, BP | the record's level, HP, KI and 24-bit BP (`characters.md`) |
+| PLA. | the record's byte `+0E` (the byte copied from the level row; 8 for Goku, 6 for Gohan in the capture). What it counts is not known; the label is the original's |
+| EX | the record's EXP, `+0F` to `+11` |
+| EX LV UP. | the EXP at which the next level begins (the level row after the current one, `character_level_rows`) less the EXP; 0 at the character's level cap (`03:850E`: 47 for Goku, whose 48th row, 3370000, is no level), SEEN on Goku at 47 |
+| the kanji under the picture | the record's byte `+1B`, the class, the same number as a card's symbol (`cards.md`) |
+| the technique lines | the unit's command list (`unit_command_lists`, led by the record's unit id `+01`): the slots after the plain attack, a blank slot (`$FF`) skipped, each named by `attack_name_pointers` |
+| KI-USE | the command cost table `03:884B`, one byte per command id (not a named symbol: read at one place, `03:87CC`) |
 
 ## The item list
 
@@ -282,6 +314,43 @@ attribute; the stock list of the shop or, when selling, a copy of `item_list`) a
   the screen at the first sale (the second one sold another object). The names fill the window's two columns (nine tiles
   each), so the list has no room for a count: the HD draws it on the price box (the purple strip at pixels 64..96 by
   118..135, under the object's portrait), joined to its right.
+
+## The Cards screen (`$0D5F` = 6)
+
+The routine at `01:903F` has three steps (`$0D68`). Step 0 marks the five slots of the hand face down (the flag byte of each
+slot, `$7E:0140 + 6 n`, becomes `$40`), puts the first slot's position word at `$05D4` (the others follow, 8 bytes on each) and
+draws the five backs: the pink-and-yellow card with the dragon is a card face down. Step 1 turns one card over every 16 frames
+(the flag goes to 0 and the slot is drawn by `01:C18A`, from `card_hand`), and when the fifth is over it clears `menu_busy`.
+Step 2 waits for A, which jumps to the routine that follows a message (`01:894A`): the whole menu closes and the field is free.
+Any other press only sounds. The original has no cursor over the hand.
+
+A slot is six bytes from the flag: the flag (bit 7 empty, bit 6 face down), the position word, the first value (attack), the second
+value (defence) and the symbol (`cards.md`). The position word is an offset into the tile-map buffer at `$7E:3000` (32 tile words
+a row, so a row is `$40` bytes): the card is 4 x 6 tile words from there, row by row, each word a tile number in the low ten
+bits, the palette row in bits 10 to 12 and the flips in bits 14 and 15 (seen: the hand of the `menus` and crafted-save runs reads
+back as the cards the screen shows). `01:C18A` builds the card from blocks of the bank 2 pointer table: the card's body (`$27`), the
+ball of the first value (`$0F` + value), the kanji (`$20` + symbol; `$43` for symbol 7) and the ball of the second value (`$17` +
+value). The kanji square is in palette row 0 (blue on cream) or row 6 (black on yellow).
+
+### The HD Cards screen
+
+In Enhanced mode the Menu list's Cards entry presses the original's A and the HD draws what the original dealt
+(`ssd_game::menu::cards`): the face-down slots as backs, the turned-over ones from the tile words the original wrote, so every
+kanji, ball and numeral is the game's own (`ssd_hd::CardArt::compose` draws a card or a part of it from the art of those tiles,
+the pack's card art that the battle's HD cards use). Left and Right move the HD cursor over the hand and the original stays on
+its screen. The numbers in the panel are the slot's values (a Z ball, value 8, counts as 10 in battle: `05:B7A5`), the kanji's
+reading and meaning are the battle tooltip's, and the party row shows each member, ringed when the card favours him or her.
+
+Who a card favours is the battle's own test (`05:B6F2`): the fighter's battle power is raised by a quarter (the power shifted
+right twice and added) when the card's symbol (record `+16`) is the fighter's class (record `+1B`) or is 7. `06:E8EE` copies the
+class from `unit_stats` byte 0 of the fighter's unit (record `+01`) at the start of every battle, so the HD takes it from the
+same table through the character's unit id (`party_unit_ids`; `ssd_catalogue::menu_labels`): Goku, Krillin, Tien, Yamcha and
+Chiaotzu are class 1 (Kami), Gohan and Piccolo class 2 (Ma), and Vegeta, Nail, Tsumuri, Maima and Dende class 3 (Waku). The
+test is skipped for a fighter whose id category (`id_category_table`, `0D:8200`) has bit 7 set; no party member has it.
+
+B goes back to the Menu list. The original's screen takes only A, which closes the menu, so the HD plan presses A, waits for the
+field, opens the menu again and chooses Menu: the Menu list comes back with its cursor on Cards. Start presses A and leaves the
+menu closed.
 
 ## Facts for the HD menus
 

@@ -14,6 +14,28 @@ pub struct Labels {
     pub characters: Vec<CharacterLabel>,
     /// One entry per object id.
     pub objects: Vec<ObjectLabel>,
+    /// What the Status screen reads from the cartridge's tables.
+    pub status: StatusLabels,
+}
+
+/// The cartridge's tables the Status screen needs: the techniques of each unit with their names and KI costs, and the
+/// EXP each level of a character begins at. Built from the catalogue by the application.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatusLabels {
+    /// One entry per command id (the attack names): its name and KI cost.
+    pub commands: Vec<CommandLabel>,
+    /// One entry per unit id: the command ids of its list the original's Status page draws, in order (the plain
+    /// attack and the blank lines left out).
+    pub techniques: Vec<Vec<u8>>,
+    /// One entry per character id: the EXP at which each level begins, from level 1.
+    pub levels: Vec<Vec<u32>>,
+}
+
+/// A command (a technique) of the unit tables: its name and its KI cost.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandLabel {
+    pub name: String,
+    pub ki_cost: u8,
 }
 
 /// A playable character.
@@ -23,6 +45,9 @@ pub struct CharacterLabel {
     /// The face index of the character's corner picture (the field menu's `face_portrait_pointers`), when it
     /// has one.
     pub face: Option<u8>,
+    /// The fighter's class (`unit_stats` byte 0 of its unit): a card whose symbol is the class favours the fighter, +25
+    /// percent battle power (`docs/re/data/cards.md`). `None` when the unit table has no row for it.
+    pub class: Option<u8>,
 }
 
 /// The picture a portrait box shows: an object's (the item screen's picture box) or a corner face of the field
@@ -77,6 +102,16 @@ pub enum Screen {
     Options,
     /// The data packs: the installed packs, the set the game runs with, and the chapters (M10).
     Mods,
+    /// The Cards screen: the hand of five, with what the card under the cursor is and who it favours.
+    Cards,
+    /// The Text screen: the speed of the messages, with a preview (Menu > Text).
+    Text,
+    /// The Save screen: the three slots with what each holds (Menu > Save).
+    Save,
+    /// The Order screen: the party's order, edited in place and applied at the foot (Menu > Order).
+    Order,
+    /// Status: the party at the left, the member under the cursor at the right.
+    Status,
 }
 
 /// The Data packs screen as it shows: the packs, "Install a pack...", then the chapters of the packs that are on (with "Main

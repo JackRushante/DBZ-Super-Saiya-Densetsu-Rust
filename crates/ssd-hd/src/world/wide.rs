@@ -2382,6 +2382,7 @@ mod tests {
             bg: crate::bgart::Index::default(),
             mode7: crate::mode7art::Index::default(),
             variants: Vec::new(),
+            pose_art: Vec::new(),
         })
     }
 
@@ -2411,6 +2412,7 @@ mod tests {
             bg: crate::bgart::Index::default(),
             mode7: crate::mode7art::Index::default(),
             variants: Vec::new(),
+            pose_art: Vec::new(),
         })
     }
 

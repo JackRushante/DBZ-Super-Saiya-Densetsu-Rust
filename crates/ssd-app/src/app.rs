@@ -2035,6 +2035,10 @@ fn windowed_loop(
             for key in hd::keys_pressed(hd_previous, pad) {
                 hd.key(key, machine.wram());
             }
+            // Start closes the Cards screen (a key of its own: the other screens have none)
+            if pad.start && !hd_previous.start {
+                hd.close_menu();
+            }
         }
         hd_previous = pad;
         // A request of the Data packs screen: the game restarts into the set or the chapter it asks for, and this run ends.
@@ -2485,6 +2489,12 @@ fn run_script_line(
                     }
                     run_hd_choice(state, machine, session)?;
                 }
+                MenuCommand::Close => {
+                    if let Some(hd) = state.hd.as_mut() {
+                        hd.close_menu();
+                    }
+                    run_hd_choice(state, machine, session)?;
+                }
                 MenuCommand::Tab(tab) => {
                     if let Some(hd) = state.hd.as_mut() {
                         hd.set_tab(tab);
@@ -2517,6 +2527,11 @@ fn run_script_line(
                         MenuShow::Cheats => Screen::Cheats,
                         MenuShow::Options => Screen::Options,
                         MenuShow::Mods => Screen::Mods,
+                        MenuShow::Status => Screen::Status,
+                        MenuShow::Cards => Screen::Cards,
+                        MenuShow::Text => Screen::Text,
+                        MenuShow::Save => Screen::Save,
+                        MenuShow::Order => Screen::Order,
                     };
                     let hd = state.hd.as_ref().context("menu lines need --mode enhanced")?;
                     let curtain = hd.driver().curtain();

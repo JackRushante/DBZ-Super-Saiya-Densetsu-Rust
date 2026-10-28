@@ -25,8 +25,19 @@ pub(crate) struct FakeMenu {
     pub cursor: u8,
     /// `menu_busy`.
     pub busy: bool,
+    /// `text_speed` (`$01D0`): the Text screen opens its cursor on it and A stores the cursor in it.
+    pub text_speed: u8,
     /// `menu_step`.
     pub step: u8,
+    /// The slots the original's Save wrote, in order (its A on the slot list).
+    pub saved: Vec<u8>,
+    /// The party's characters, in the order of the original's records (empty: the menu holds no party).
+    pub party: Vec<u8>,
+    /// The party list the game keeps at `party_order` (`$0190`): it is written when the game saves, so an order applied
+    /// leaves it as it was.
+    pub listed: Vec<u8>,
+    /// The rows of the party the original's Order screen has taken so far, slot by slot.
+    pub picks: Vec<u8>,
     /// `travel_mode`: 2 flying.
     pub flying: bool,
     /// `effect_pending` bit 7: an item effect runs.
@@ -50,6 +61,11 @@ pub(crate) struct FakeMenu {
 }
 
 impl FakeMenu {
+    /// A menu on the field that holds the party `party` (character ids, in the order of the original's records).
+    pub(crate) fn with_party(party: &[u8]) -> Self {
+        Self { party: party.to_vec(), listed: party.to_vec(), ..Self::default() }
+    }
+
     /// The rows of the command window now: five on foot, three flying.
     fn rows(&self) -> u8 {
         if self.flying { 3 } else { 5 }
@@ -78,6 +94,21 @@ impl FakeMenu {
         // The window queue is empty once the timed draws are over.
         put(d::MENU_DRAW_DONE, if self.timer == 0 { 0x80 } else { 0 });
         put(d::MAP_ENTRY_VALUE, self.cursor);
+        put(d::TEXT_SPEED, self.text_speed);
+        if !self.party.is_empty() {
+            put(0x7E_01BB, self.party.len() as u8);
+            put(0x7E_0D6B, self.picks.len() as u8);
+            for (row, &character) in self.party.iter().enumerate() {
+                let record = d::PARTY_RECORDS + 32 * row as u32;
+                // A row the Order screen has taken loses bit 7 of its flags.
+                put(record, if self.picks.contains(&(row as u8)) { 0x40 } else { 0xC0 });
+                put(record + 0x1C, character);
+            }
+            for (index, &character) in self.listed.iter().enumerate() {
+                put(d::PARTY_ORDER + index as u32, character);
+            }
+            put(d::PARTY_ORDER + self.listed.len() as u32, 0xFF);
+        }
         put(d::TRAVEL_MODE, if self.flying { 2 } else { 1 });
         put(d::EFFECT_PENDING, if self.effect { 0x80 } else { 0 });
         put(d::ITEM_COUNT, if self.list.is_empty() { 3 } else { self.list.len() as u8 });
@@ -126,6 +157,8 @@ impl FakeMenu {
         let up = pad.up && !self.last.up;
         let a = pad.a && !self.last.a;
         let b = pad.b && !self.last.b;
+        let left = pad.left && !self.last.left;
+        let right = pad.right && !self.last.right;
         self.last = pad;
         if self.timer > 0 {
             self.timer -= 1;
@@ -143,6 +176,10 @@ impl FakeMenu {
                     self.busy = true;
                     self.timer = OPENING_FRAMES;
                 }
+            }
+            1 if self.screen == 9 => self.text_screen(left, right, a),
+            1 if self.screen == 8 && !self.party.is_empty() => {
+                self.order_screen(Edges { down, up, a, b });
             }
             1 | 5 => self.menu(down, a, b),
             2 if self.battle => self.battle_menu(Edges { down, up, a, b }),
@@ -202,6 +239,111 @@ impl FakeMenu {
                 self.busy = false;
             }
             _ => {}
+        }
+    }
+
+    /// The original's Text screen: Left and Right move the cursor along the five speeds (no wrapping), and A stores the
+    /// cursor in `text_speed` and goes on to the field, closing the menu.
+    fn text_screen(&mut self, left: bool, right: bool, a: bool) {
+        if left {
+            self.cursor = self.cursor.saturating_sub(1);
+        }
+        if right {
+            self.cursor = (self.cursor + 1).min(4);
+        }
+        if a {
+            self.text_speed = self.cursor;
+            self.field = 0;
+            self.screen = 0;
+            self.busy = false;
+        }
+    }
+
+    /// The original's Save: the question (step 0: A is Yes), the slot list (step 1: Down moves the cursor over the three
+    /// slots, A writes the slot and shows "Completed!", step 2), and the A that returns to the field.
+    fn save_screen(&mut self, down: bool, a: bool, b: bool) {
+        match self.step {
+            0 if a => {
+                self.step = 1;
+                self.cursor = 0;
+            }
+            1 if down => self.cursor = (self.cursor + 1) % 3,
+            1 if a => {
+                self.saved.push(self.cursor);
+                self.step = 2;
+                self.cursor = 0;
+            }
+            2 if a => {
+                self.field = 0;
+                self.screen = 0;
+                self.busy = false;
+            }
+            _ if b && self.step < 2 => {
+                self.screen = 4;
+                self.cursor = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// The original's Order screen, as the disassembly and the real game have it: step 1 takes the picks (the cursor skips
+    /// the rows taken and moves to the next row left after a pick; the last row is taken by itself, and the Yes or No is
+    /// asked), step 2 asks (Yes writes the order back and closes the menu, No empties the slots).
+    fn order_screen(&mut self, edges: Edges) {
+        let Edges { down, up, a, b } = edges;
+        let size = self.party.len() as u8;
+        let next = |from: u8, picks: &[u8], step: i8| {
+            let mut row = from;
+            for _ in 0..size {
+                row = (i16::from(row) + i16::from(step)).rem_euclid(i16::from(size)) as u8;
+                if !picks.contains(&row) {
+                    return row;
+                }
+            }
+            from
+        };
+        if self.step == 1 {
+            if down {
+                self.cursor = next(self.cursor, &self.picks, 1);
+            }
+            if up {
+                self.cursor = next(self.cursor, &self.picks, -1);
+            }
+            if a {
+                self.picks.push(self.cursor);
+                if self.picks.len() + 1 >= self.party.len() {
+                    // The last row is taken by itself, and the order is asked for.
+                    if let Some(last) = (0..size).find(|row| !self.picks.contains(row)) {
+                        self.picks.push(last);
+                    }
+                    self.step = 2;
+                    self.cursor = 0;
+                } else {
+                    self.cursor = next(self.cursor, &self.picks, 1);
+                }
+            } else if b && self.picks.pop().is_none() {
+                self.screen = 4;
+                self.cursor = 2;
+            }
+        } else if self.step == 2 {
+            if down || up {
+                self.cursor = (self.cursor + 1) % 2;
+            }
+            if a && self.cursor == 0 {
+                self.party = self.picks.iter().map(|&row| self.party[usize::from(row)]).collect();
+                self.picks.clear();
+                self.screen = 0;
+                self.step = 0;
+                self.field = 0;
+                self.busy = false;
+            } else if a {
+                self.picks.clear();
+                self.step = 1;
+                self.cursor = 0;
+            } else if b {
+                self.picks.truncate(self.picks.len().saturating_sub(2));
+                self.step = 1;
+            }
         }
     }
 
@@ -270,12 +412,31 @@ impl FakeMenu {
                     self.busy = false;
                 } else if a {
                     self.screen = 6 + self.cursor;
-                    self.cursor = 0;
+                    self.step = 0;
+                    self.cursor = if self.screen == 9 { self.text_speed } else { 0 };
+                    if self.screen == 8 {
+                        self.step = 1;
+                        self.picks.clear();
+                    }
+                    // The original's Status page 1 idles on step 2 with its busy flag set.
+                    if self.screen == 7 {
+                        self.step = 2;
+                        self.busy = true;
+                    }
                 }
             }
+            // The Cards screen takes only A, which closes the whole menu
+            6 if a => {
+                self.screen = 0;
+                self.field = 0;
+                self.busy = false;
+            }
+            10 => self.save_screen(down, a, b),
             6..=10 if b => {
                 self.screen = 4;
                 self.cursor = 0;
+                self.step = 0;
+                self.busy = false;
             }
             _ => {}
         }
@@ -327,6 +488,8 @@ pub(crate) fn held(button: Button) -> Joypad {
     match button {
         Button::Up => pad.up = true,
         Button::Down => pad.down = true,
+        Button::Left => pad.left = true,
+        Button::Right => pad.right = true,
         Button::A => pad.a = true,
         Button::B => pad.b = true,
     }

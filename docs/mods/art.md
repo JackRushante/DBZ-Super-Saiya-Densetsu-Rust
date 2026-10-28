@@ -88,6 +88,14 @@ picture in the HD art (its file's stem). `when` is a condition, by name:
 - An object's variant for one condition is a slot, as a data entry is: two packs that give one object a variant for the same
   condition are refused together, and the set names both packs. A variant for `always` in one pack and one for `kaioken`
   of the same object in another are two slots: both are drawn, with the precedence above.
+- The HD pack itself can carry variants: the shared `hd-pack.zip` has a `variants/` folder (`variants/index.json` and a picture for
+  each), which the install puts in `art/variants` of the installed pack (`ssd_hd::pack::Pack::pose_art`). They are the same
+  thing as a data pack's: the same margin, drawing and rules, the Goku rule included (the pack gives the 27 poses of
+  Super Saiyan Goku, `battle-goku-ssj-000` to `026`, an `always` variant with the hair standing up, margin 76). The precedence
+  is a data pack's before the HD pack's own: while a variant of a data pack holds for an object (`always` or `kaioken`), it is
+  drawn and the HD pack's own is not; the HD pack's own is drawn in every other frame (so `ssj-kaioken` shows its Kaioken poses
+  while the Kaioken is on, and the pack's hair otherwise), and when the data pack's picture cannot be drawn. An old
+  `hd-pack.zip` has no variants: its poses are drawn in their box, as before. The `ssj-goku-hd` mod is redundant with the pack.
 - Only the Enhanced picture draws variants; the Classic game is not changed. A `.ssdpack` zip's variants are drawn from its
   files unpacked into the cache (see "Limits").
 

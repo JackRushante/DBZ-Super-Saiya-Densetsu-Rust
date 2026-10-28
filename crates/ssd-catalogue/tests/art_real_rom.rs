@@ -185,3 +185,19 @@ fn each_character_has_the_face_index_the_field_menu_draws_for_it() {
         ]
     );
 }
+
+#[test]
+#[ignore = "needs the ROM"]
+fn each_character_has_the_class_the_battle_copies_from_its_unit_row() {
+    let rom = rom();
+    let catalogue = ssd_catalogue::Catalogue::from_rom(&rom).unwrap();
+    let labels = ssd_catalogue::menu_labels(&catalogue);
+    let classes: Vec<Option<u8>> = labels.characters.iter().map(|c| c.class).collect();
+    // Goku, Gohan, Piccolo, Krillin, Tien, Yamcha, Chiaotzu, Vegeta, Nail, Tsumuri, Maima, Dende: the Kami fighters
+    // are class 1, Gohan and Piccolo class 2 (Demon), the rest 3 (Doubt)
+    assert_eq!(
+        classes,
+        [1, 2, 2, 1, 1, 1, 1, 3, 3, 3, 3, 3].map(Some),
+        "the cards favour Kami (1): Goku, Krillin, Tien, Yamcha, Chiaotzu; Ma (2): Gohan, Piccolo"
+    );
+}

@@ -3,7 +3,7 @@
 
 use crate::Catalogue;
 use crate::translation::{self, Translation};
-use ssd_menus::{CharacterLabel, Labels, ObjectLabel};
+use ssd_menus::{CharacterLabel, CommandLabel, Labels, ObjectLabel, StatusLabels};
 
 /// The face index of each character, in the order of the catalogue's characters (the second byte of its party
 /// record, which the field menu uses for the corner face). Measured on the field menu: Goku 00, Piccolo 01, Gohan
@@ -35,6 +35,12 @@ pub fn labels(catalogue: &Catalogue) -> Labels {
         .map(|(index, character)| CharacterLabel {
             name: plain(character.name.trimmed()),
             face: CHARACTER_FACES.get(index).copied().flatten(),
+            // The class the battle copies into the fighter's record: its unit's row of the unit table
+            class: catalogue
+                .enemies
+                .iter()
+                .find(|unit| unit.id == character.unit_id)
+                .map(|unit| unit.unknown_00),
         })
         .collect();
     let objects = catalogue
@@ -54,7 +60,36 @@ pub fn labels(catalogue: &Catalogue) -> Labels {
             ally: catalogue.characters.iter().any(|c| c.name.trimmed() == item.name.trimmed()),
         })
         .collect();
-    Labels { characters, objects }
+    Labels { characters, objects, status: status(catalogue) }
+}
+
+/// The tables of the Status screen: the commands' names and KI costs, the techniques each unit's list has, and the EXP
+/// each level of a character begins at (up to the character's level cap).
+fn status(catalogue: &Catalogue) -> StatusLabels {
+    let commands = catalogue
+        .attacks
+        .iter()
+        .map(|attack| CommandLabel { name: plain(attack.name.trimmed()), ki_cost: attack.ki_cost })
+        .collect();
+    let techniques = catalogue.enemies.iter().map(|unit| techniques(&unit.commands)).collect();
+    let levels = catalogue
+        .characters
+        .iter()
+        .map(|character| {
+            // The rows up to the character's cap: the row after the last level is no level to reach.
+            let reachable = character.levels.iter().take(usize::from(character.level_cap));
+            reachable.map(|row| row.exp_start).collect()
+        })
+        .collect();
+    StatusLabels { commands, techniques, levels }
+}
+
+/// The command ids of a unit's list that the original's Status page draws: the list is its slot count, then one command id
+/// per slot (`docs/re/data/kaioken-bp.md`, section 3); slot 0 is the plain attack and has no line, and a blank line
+/// (`$FF`) has no technique.
+fn techniques(list: &[u8]) -> Vec<u8> {
+    let Some((&count, rest)) = list.split_first() else { return Vec::new() };
+    rest.iter().take(usize::from(count)).skip(1).copied().filter(|&id| id != 0xFF).collect()
 }
 
 /// `labels` in the words of `table` (a translation, see [`crate::translation`]): a character's name is its
@@ -112,6 +147,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_units_techniques_are_its_slots_after_the_plain_attack_without_the_blank_lines() {
+        // Six slots: the plain attack, two moves, a blank line and two more, then their attributes and factors.
+        let list = [6, 0x00, 0x01, 0x38, 0xFF, 0x04, 0x05, 9, 9, 9, 9, 9, 9, 4, 0, 6, 0];
+        assert_eq!(techniques(&list), [0x01, 0x38, 0x04, 0x05]);
+        assert_eq!(techniques(&[]), Vec::<u8>::new());
+        assert_eq!(techniques(&[1, 0x00]), Vec::<u8>::new(), "the plain attack alone has no line");
+    }
+
+    #[test]
     fn text_codes_the_catalogue_cannot_spell_become_an_ellipsis() {
         assert_eq!(plain("Change a card's attack to <FC>"), "Change a card's attack to \u{2026}");
         assert_eq!(plain("<FA>!<FD>"), "\u{2026}!\u{2026}");
@@ -122,9 +166,10 @@ mod tests {
     #[test]
     fn a_translation_changes_the_words_and_nothing_else() {
         let labels = Labels {
+            status: StatusLabels::default(),
             characters: vec![
-                CharacterLabel { name: "Ann".into(), face: Some(3) },
-                CharacterLabel { name: "Bob".into(), face: None },
+                CharacterLabel { name: "Ann".into(), face: Some(3), class: None },
+                CharacterLabel { name: "Bob".into(), face: None, class: None },
             ],
             objects: vec![ObjectLabel {
                 name: "Stone".into(),
@@ -150,7 +195,8 @@ mod tests {
     #[test]
     fn a_character_without_an_object_of_its_name_has_no_face() {
         let labels = Labels {
-            characters: vec![CharacterLabel { name: "Krillin".into(), face: None }],
+            status: StatusLabels::default(),
+            characters: vec![CharacterLabel { name: "Krillin".into(), face: None, class: None }],
             objects: vec![ObjectLabel::default()],
         };
         assert_eq!(labels.characters[0].face, None);

@@ -85,7 +85,7 @@ fn parse(args: &[&str]) -> Option<Options> {
         masks: Vec::new(),
         sources: None,
         maps_quality: MAPS_QUALITY,
-        revision: "1".to_owned(),
+        revision: "2".to_owned(),
         jobs: std::thread::available_parallelism().map_or(2, |n| n.get().min(4)),
         verify: true,
         with_masks: true,
@@ -394,6 +394,34 @@ fn plan(reference: &Path, with_masks: bool, maps_quality: f32) -> anyhow::Result
         planner.counts.insert("pose outlines".to_owned(), masks.len());
     }
 
+    // The poses' bigger art
+    let listed =
+        std::fs::read_to_string(reference.join(ssd_hd::pack::POSE_ART)).unwrap_or_default();
+    let listed: ssd_hd::pack::PoseArt = toml::from_str(&listed)?;
+    if !listed.variants.is_empty() {
+        let mut variants = Vec::new();
+        for variant in &listed.variants {
+            let id = stem(variant.file.rsplit('/').next().unwrap_or(&variant.file)).to_owned();
+            planner.add(
+                reference.join(&variant.file),
+                format!("variants/{id}"),
+                "pose variants",
+                Codec::Lossless,
+            );
+            variants.push(serde_json::json!({
+                "id": id,
+                "art": variant.art,
+                "when": variant.when,
+                "margin": variant.margin,
+                "file": format!("{id}.webp"),
+            }));
+        }
+        texts.push((
+            "variants/index.json".to_owned(),
+            json(&serde_json::json!({ "variants": variants }))?,
+        ));
+    }
+
     // The cards
     let cards_text = std::fs::read_to_string(reference.join(ssd_hd::cards::INDEX));
     if let Ok(text) = cards_text {
@@ -619,6 +647,15 @@ fn compare(reference: &Path, installed: &Path, out: &mut dyn Write) -> anyhow::R
         );
         outlines += usize::from(!x.mask.is_empty());
     }
+    anyhow::ensure!(want.pose_art.len() == got.pose_art.len(), "the pose variants differ");
+    for (x, y) in want.pose_art.iter().zip(&got.pose_art) {
+        anyhow::ensure!(
+            (&x.art, x.when, x.margin) == (&y.art, y.when, y.margin)
+                && stem(&x.file) == stem(&y.file),
+            "the pose variant {} differs",
+            x.art
+        );
+    }
     anyhow::ensure!(want.bg.layer.len() == got.bg.layer.len(), "the background layers differ");
     for (x, y) in want.bg.layer.iter().zip(&got.bg.layer) {
         let mut y = y.clone();
@@ -649,9 +686,10 @@ fn compare(reference: &Path, installed: &Path, out: &mut dyn Write) -> anyhow::R
     );
     writeln!(
         out,
-        "hd-pack-public: verified: the installed pack has the same {} pictures, {} poses ({outlines} with an outline), {} background layers, {} map layers and {} planes as the import",
+        "hd-pack-public: verified: the installed pack has the same {} pictures, {} poses ({outlines} with an outline), {} pose variants, {} background layers, {} map layers and {} planes as the import",
         want.art.pictures().len(),
         want.art.objects().len(),
+        want.pose_art.len(),
         want.bg.layer.len(),
         want.maps.layer.len(),
         want.mode7.plane.len()

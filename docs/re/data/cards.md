@@ -90,6 +90,12 @@ The Enhanced picture shows the tooltip (two lines: the reading, then the meaning
 left; the texts are in `crates/ssd-hd/src/tooltip.rs`) while the cursor is over a card and for about a second after it
 blinks off.
 
+The classes of the party's fighters, read through `party_unit_ids` from `unit_stats` byte 0 (what 06:E8EE copies into record `+1B`): Goku,
+Krillin, Tien, Yamcha and Chiaotzu 1; Gohan and Piccolo 2; Vegeta, Nail, Tsumuri, Maima and Dende 3 (`xtask catalogue --kind enemies`,
+units 0, 1, 9 to 13, 80, 34 to 36 and 97). The favoured fighters of a card are therefore decided by its symbol alone: 1 favours
+the Kami fighters, 2 Gohan and Piccolo, 3 Vegeta and the later fighters, 0, 4, 5 and 6 nobody in the party (7 everyone). The
+HD Cards screen shows this under each card (`menus.md`, "The HD Cards screen").
+
 ### The original's own message for a favourite card
 
 While the pick cursor is on a card whose symbol is the fighter's class (the card that adds 25 percent), the original opens

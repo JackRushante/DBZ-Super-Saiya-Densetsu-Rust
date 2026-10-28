@@ -83,6 +83,7 @@ fn pack_of(dir: &std::path::Path, assets: Vec<Asset>, art: ArtIndex) -> Arc<Pack
         bg: crate::bgart::Index::default(),
         mode7: crate::mode7art::Index::default(),
         variants: Vec::new(),
+        pose_art: Vec::new(),
     })
 }
 
@@ -2137,5 +2138,127 @@ fn an_always_variant_of_super_saiyan_goku_is_drawn_for_the_pixels_he_shares_only
     renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
     let ssj = renderer.render_hd(&frame, options(4)).unwrap();
     assert_eq!(pixel(&ssj, x, y), [255, 255, 0], "Super Saiyan Goku: the variant");
+    assert_eq!(pixel(&ssj, 38 * 4, 48 * 4), [255, 255, 0], "and its margin");
+}
+
+#[test]
+fn the_packs_own_variant_is_drawn_with_its_margin_in_every_frame_and_a_pack_without_one_is_unchanged()
+ {
+    use ssd_mod::pose::Condition::{Always, Kaioken};
+    let dir = tempfile::tempdir().unwrap();
+    let (frame, pose) = fighter_log(40, 50);
+    let red = [255, 0, 0];
+    let mut pack = variant_pack(&dir, &pose, None);
+    let mut renderer = Renderer::new();
+    renderer.set_art(Some(Arc::new((*pack).clone())));
+    let without = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(
+        pixel(&without, 41 * 4 + 1, 51 * 4 + 1),
+        [0, 0, 255],
+        "no variant: the object's picture"
+    );
+    assert_ne!(pixel(&without, 38 * 4, 48 * 4), red, "and nothing past its box");
+    // The pack's own variants, an `always` one and a `kaioken` one (listed first: the order does not decide)
+    Arc::get_mut(&mut pack).unwrap().pose_art = vec![
+        flat_variant(&dir, "own-kaioken", "battle-x-000", Kaioken, [255, 255, 0]),
+        flat_variant(&dir, "own", "battle-x-000", Always, red),
+    ];
+    renderer.set_art(Some(pack));
+    for kaioken in [false, true] {
+        renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(kaioken, 0)));
+        let drawn = renderer.render_hd(&frame, options(4)).unwrap();
+        let first = if kaioken { [255, 255, 0] } else { red };
+        assert_eq!(pixel(&drawn, 41 * 4 + 1, 51 * 4 + 1), first, "the sprite's pixels");
+        assert_eq!(pixel(&drawn, 38 * 4, 48 * 4), first, "the margin's first pixel");
+        assert_eq!(pixel(&drawn, 57 * 4 + 3, 67 * 4 + 3), first, "the margin's last pixel");
+        assert_ne!(pixel(&drawn, 37 * 4 + 3, 50 * 4), first, "nothing past the margin");
+        assert_eq!(
+            pixel(&drawn, 5, 5),
+            pixel(&without, 5, 5),
+            "away from the pose nothing changes"
+        );
+    }
+}
+
+#[test]
+fn a_data_packs_variant_of_the_same_art_wins_over_the_packs_own() {
+    use ssd_mod::pose::Condition::{Always, Kaioken};
+    let dir = tempfile::tempdir().unwrap();
+    let (frame, pose) = fighter_log(40, 50);
+    let (red, yellow, green) = ([255, 0, 0], [255, 255, 0], [0, 255, 0]);
+    let mut pack = variant_pack(&dir, &pose, None);
+    let own = vec![flat_variant(&dir, "own", "battle-x-000", Always, red)];
+    Arc::get_mut(&mut pack).unwrap().pose_art = own;
+    let (off, on) = (
+        Conditions::of_work_ram(&wram_with_kaioken(false, 0)),
+        Conditions::of_work_ram(&wram_with_kaioken(true, 0)),
+    );
+    let corner = |pack: Arc<Pack>, conditions: Conditions| {
+        let mut renderer = Renderer::new();
+        renderer.set_art(Some(pack));
+        renderer.set_conditions(conditions);
+        pixel(&renderer.render_hd(&frame, options(4)).unwrap(), 38 * 4, 48 * 4)
+    };
+    // A data pack's `kaioken` variant (the `ssj-kaioken` mod): drawn while the Kaioken is on, the pack's own art otherwise
+    let mut kaioken = Arc::new((*pack).clone());
+    Arc::get_mut(&mut kaioken).unwrap().variants =
+        vec![flat_variant(&dir, "mod-kaioken", "battle-x-000", Kaioken, yellow)];
+    assert_eq!(corner(Arc::new((*kaioken).clone()), on), yellow, "the Kaioken on: the data pack's");
+    assert_eq!(corner(kaioken, off), red, "the Kaioken off: the pack's own art");
+    // A data pack's `always` variant (the `ssj-goku-hd` mod): drawn in every frame
+    let mut always = Arc::new((*pack).clone());
+    Arc::get_mut(&mut always).unwrap().variants =
+        vec![flat_variant(&dir, "mod-always", "battle-x-000", Always, green)];
+    for conditions in [off, on] {
+        assert_eq!(
+            corner(Arc::new((*always).clone()), conditions),
+            green,
+            "the data pack's `always`"
+        );
+    }
+    // ... even over an own `kaioken` variant while the Kaioken is on
+    let own_kaioken = flat_variant(&dir, "own-kaioken", "battle-x-000", Kaioken, [0, 0, 128]);
+    Arc::get_mut(&mut always).unwrap().pose_art.push(own_kaioken);
+    assert_eq!(corner(always, on), green, "a data pack's variant beats any of the pack's own");
+    // A data pack's variant whose picture is missing is not drawn: the pack's own art is
+    let mut broken = Arc::new((*pack).clone());
+    let mut missing = flat_variant(&dir, "mod-missing", "battle-x-000", Always, green);
+    missing.file = dir.path().join("art/none.png").to_string_lossy().into_owned();
+    Arc::get_mut(&mut broken).unwrap().variants = vec![missing];
+    assert_eq!(corner(broken, off), red, "no picture: the pack's own art");
+}
+
+#[test]
+fn the_packs_own_variant_of_super_saiyan_goku_is_drawn_for_the_pixels_he_shares_only_while_he_is_in_the_party()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let (frame, pose) = fighter_log(40, 50);
+    write_png(&dir.path().join("art/normal.png"), 64, 64, |_, _| [0, 0, 255, 255]);
+    write_png(&dir.path().join("art/ssj.png"), 64, 64, |_, _| [255, 0, 0, 255]);
+    write_png(&dir.path().join("art/other.png"), 64, 64, |_, _| [0, 255, 0, 255]);
+    let goku = |id: &str, key: u64, art: &str| Object {
+        id: id.to_owned(),
+        key,
+        ..object(&pose, art, false)
+    };
+    let objects = vec![
+        goku("battle-goku-000", pose.key, "art/normal.png"),
+        goku("battle-goku-001", pose.key ^ 1, "art/other.png"),
+        goku("battle-goku-ssj-000", pose.key, "art/ssj.png"),
+    ];
+    let mut pack = pack_of(dir.path(), Vec::new(), ArtIndex::new(Vec::new(), objects));
+    let always = ssd_mod::pose::Condition::Always;
+    Arc::get_mut(&mut pack).unwrap().pose_art =
+        vec![flat_variant(&dir, "hair", "battle-goku-ssj-000", always, [255, 255, 0])];
+    let mut renderer = Renderer::new();
+    renderer.set_art(Some(pack));
+    renderer.set_conditions(Conditions::default());
+    let normal = renderer.render_hd(&frame, options(4)).unwrap();
+    let blue = pixel(&normal, 41 * 4 + 1, 51 * 4 + 1);
+    assert_eq!(blue, [0, 0, 255], "the normal Goku: the normal art");
+    assert_ne!(pixel(&normal, 38 * 4, 48 * 4), [255, 255, 0], "no bigger art past the sprite");
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
+    let ssj = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&ssj, 41 * 4 + 1, 51 * 4 + 1), [255, 255, 0], "Super Saiyan Goku: bigger art");
     assert_eq!(pixel(&ssj, 38 * 4, 48 * 4), [255, 255, 0], "and its margin");
 }

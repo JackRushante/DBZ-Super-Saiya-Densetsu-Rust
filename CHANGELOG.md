@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.9 (2026-10-28)
+
+### Features
+
+- HD Save screen (Menu > Save): the three slots show what each holds (the party's portraits, the place, the leader's level, the money and
+  the items) beside a strip for the game you are in; an empty slot says so, and A on a slot that holds a game asks "Overwrite slot 0N?"
+  with the cursor on No. The original's first "Save?" question is gone: the HD answers it itself, and the original's own Save writes the slot
+  (so the bag, the cheats and the mods keep saving with it). Enhanced only.
+- HD Order screen (Menu > Order): the party in its slots with a portrait and a number each, slot 1 labelled as the one that leads
+  on the map. A grabs a member, Up and Down carry it to its new place, A drops it, B undoes the last move (or goes back when nothing
+  was moved), and "Apply order" has the original's own Order screen take the members one by one in the new order, so the game
+  writes the order itself. Enhanced only.
+- HD Status screen (Menu > Status): the original's two pages on one screen. The party is at the left (portrait, LV, HP and KI bars
+  with figures, nine slots, a count like 5/9) and the member under the cursor at the right (big portrait, class kanji with its
+  reading and meaning, HP, KI, BP, PLA., EXP, the EXP to the next level, and every technique with its KI cost). Up and Down
+  change the member, B goes back and Start closes the menu. Read-only. Enhanced only.
+- The HD Cards screen (Enhanced): the Menu list's Cards shows the hand of five drawn big from the game's own cards, dealt one
+  by one as the original deals them, with a cursor over it (Left and Right), the kanji named with its reading and meaning,
+  the attack and defence numbers (a Z counts as 10) and the party members the card favours (+25% battle power, the battle's
+  own rule), with a help line in plain words. B goes back to the Menu list and Start closes the menu.
+- HD Text screen (Menu > Text): the five message speeds drawn like the Options sliders, with a sample line that writes itself at the speed under
+  the cursor; it is the same setting as Options > Gameplay > Text speed. A keeps the speed (the original's own Text screen takes it), B
+  leaves the old one. Enhanced only.
+- The HD pack carries Super Saiyan Goku's new art: his 27 battle poses with the hair standing up past the box of the original
+  sprite, in the pack itself, with no mod needed (the `ssj-goku-hd` mod becomes redundant; Super Saiyan Kaioken keeps its
+  Kaioken poses while the Kaioken is on). The pack can now hold pose art bigger than the original sprite's box (pose variants,
+  `variants/` in `hd-pack.zip`); a data pack's variant of the same art wins over it. Download the new `hd-pack.zip` and install it
+  again (the game does it on the next Enhanced launch). Enhanced only.
+
+### Fixes
+
+- HD portraits: Yamcha's corner portrait was a battle-worn Goku and is now Yamcha, Vegeta's showed only his forehead and now
+  shows his face, and the Saibaman's picture has the bright green of the original. In the new `hd-pack.zip`.
+
 ## 0.3.8 (2026-10-28)
 
 ### Features

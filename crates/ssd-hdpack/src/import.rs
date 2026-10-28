@@ -26,6 +26,12 @@
 //!   one plane redrawn at 4x in tiles of 256 x 256 game pixels, with the key of the plane's VRAM and the palette it was
 //!   made in (`ssd_hd::mode7art`); linked into `art/mode7` of the pack and listed in `art/mode7/mode7.toml`.
 //!
+//! * `variants\index.json` and the PNGs beside it (optional): the poses' bigger art (the pose variants of the pack, see
+//!   `ssd_hd::pack::PoseArt`): each entry of `variants` names the pose's `art` (its `id` in class 2), `when` it is drawn
+//!   (`always`, or `kaioken`), the `margin` (art pixels on each side, a multiple of 4 up to 96) and the `file`: the pose's
+//!   picture grown by the margin. Copied to `art/variants` of the pack and listed in `art/variants/variants.toml`; a data
+//!   pack's variant of the same art wins over them.
+//!
 //! The art files are copied into the pack (`art/picture`, `art/object`, `art/cards`) and listed in
 //! `art.bin` (the cards in `art/cards/cards.toml`). The pack must exist (`hd-convert`); running
 //! `hd-convert` again removes the art, so the import is run after it.
@@ -61,6 +67,8 @@ pub struct Report {
     pub bg: usize,
     /// Mode 7 planes with art.
     pub mode7: usize,
+    /// Pose variants (bigger poses' art).
+    pub variants: usize,
     pub luma: usize,
     pub keys: usize,
     /// Objects with no silhouette (they are only found by their key).
@@ -599,6 +607,82 @@ fn import_mode7(mode7: &Path, pack_dir: &Path) -> anyhow::Result<usize> {
     Ok(count)
 }
 
+/// The name of a pose variant's picture, and its `id` in the art store's index: the art's name for `always`, else the art's name
+/// and the condition.
+#[must_use]
+pub fn variant_id(art: &str, when: &str) -> String {
+    if when == "always" { art.to_owned() } else { format!("{art}-{when}") }
+}
+
+/// Puts the pose variants of `<art>/variants/index.json` into `<pack>/art/variants` and lists them in
+/// `art/variants/variants.toml`; returns their number (0 when there is no such folder). An entry names the `art` of an object
+/// of `objects`, the condition it is drawn `when`, its `margin` and its `file`, which must be the object's picture grown by the
+/// margin: a size that is not that, a margin or a condition the game does not have, or two variants of one art for one
+/// condition is an error; an entry with no file, or of art the pack has no pose of, is skipped.
+fn import_variants(
+    variants: &Path,
+    pack_dir: &Path,
+    objects: &[Object],
+    report: &mut Report,
+) -> anyhow::Result<usize> {
+    let index_path = variants.join("index.json");
+    if !index_path.is_file() {
+        return Ok(0);
+    }
+    let text = std::fs::read_to_string(&index_path)?;
+    let index: serde_json::Value = serde_json::from_str(&text).context("variants/index.json")?;
+    let mut listed = Vec::new();
+    for entry in index["variants"].as_array().context("variants: a `variants` list")? {
+        let art = json_str(entry, "art")?;
+        let when = json_str(entry, "when")?;
+        let margin = u32::try_from(entry["margin"].as_u64().context("a margin")?)?;
+        let name = json_str(entry, "file")?;
+        let listed_entry = ssd_hd::pack::PoseArtEntry {
+            art: art.to_owned(),
+            when: when.to_owned(),
+            margin,
+            file: name.to_owned(),
+        };
+        listed_entry
+            .variant()
+            .map_err(|reason| anyhow::anyhow!("variant {art} ({when}): {reason}"))?;
+        anyhow::ensure!(
+            !listed
+                .iter()
+                .any(|done: &ssd_hd::pack::PoseArtEntry| done.art == art && done.when == when),
+            "variant {art} ({when}) twice"
+        );
+        let Some(object) = objects.iter().find(|object| object.id == art) else {
+            report.skipped.push(format!("variant {art} ({when}): no pose of that art"));
+            continue;
+        };
+        let from = variants.join(name);
+        if !from.is_file() {
+            report.skipped.push(format!("variant {art} ({when}): no art file"));
+            continue;
+        }
+        let relative =
+            with_extension_of(&format!("art/variants/{}.png", variant_id(art, when)), &from);
+        copy_art(
+            &from,
+            pack_dir,
+            &relative,
+            (u32::from(object.width) * 4 + 2 * margin, u32::from(object.height) * 4 + 2 * margin),
+        )
+        .with_context(|| format!("variant {art} ({when})"))?;
+        listed.push(ssd_hd::pack::PoseArtEntry { file: relative, ..listed_entry });
+    }
+    if listed.is_empty() {
+        return Ok(0);
+    }
+    let count = listed.len();
+    std::fs::write(
+        pack_dir.join(ssd_hd::pack::POSE_ART),
+        toml::to_string(&ssd_hd::pack::PoseArt { variants: listed })?,
+    )?;
+    Ok(count)
+}
+
 /// The folders of the art store that hold the sprites' art (`class2`, `class3`, any other `classN`
 /// with an `index.json`), sorted by name. Every folder with an `index.json` is read: one that no
 /// reader knows is an error, so a branch that predates a folder never drops it from the pack
@@ -625,7 +709,7 @@ fn object_folders(art_dir: &Path) -> anyhow::Result<Vec<String>> {
 }
 
 /// Folders of the art store with their own readers.
-const KNOWN_OTHER: [&str; 4] = ["cards", "maps", "bg", "mode7"];
+const KNOWN_OTHER: [&str; 5] = ["cards", "maps", "bg", "mode7", "variants"];
 
 /// Imports the art under `art_dir` into the pack in `pack_dir`, for the ROM `rom`. `sources` is
 /// the folder of the portraits' source pictures (`<id>.png`, 32 x 32, in the palette the art was
@@ -805,6 +889,7 @@ pub fn run(
     import_maps(&art_dir.join("maps"), pack_dir, &palettes.maps, &mut report)?;
     report.bg = import_bg(&art_dir.join("bg"), pack_dir, &palettes.bg, &mut report)?;
     report.mode7 = import_mode7(&art_dir.join("mode7"), pack_dir)?;
+    report.variants = import_variants(&art_dir.join("variants"), pack_dir, &objects, &mut report)?;
 
     let index = ArtIndex::new(pictures, objects);
     std::fs::write(pack_dir.join(ssd_hd::art_index::FILE), index.encode())?;
@@ -844,6 +929,9 @@ pub fn run(
     }
     if report.mode7 > 0 {
         writeln!(out, "hd-import: {} Mode 7 planes", report.mode7)?;
+    }
+    if report.variants > 0 {
+        writeln!(out, "hd-import: {} pose variants (bigger poses' art)", report.variants)?;
     }
     if report.pictures
         + report.objects
@@ -1069,6 +1157,73 @@ mod tests {
         );
         png("a.png", 1024, 32);
         assert!(import_bg(&art, &pack, &BTreeMap::new(), &mut report).is_err());
+    }
+
+    #[test]
+    fn the_pose_variants_are_checked_by_size_copied_and_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (art, pack) = (dir.path().join("hd/variants"), dir.path().join("pack"));
+        std::fs::create_dir_all(&art).unwrap();
+        let png = |name: &str, width: u32, height: u32| {
+            let rgba = vec![7_u8; (width * height * 4) as usize];
+            ssd_hd::png::write_rgba(&art.join(name), width, height, &rgba).unwrap();
+        };
+        let object = |id: &str| Object {
+            key: 1,
+            id: id.to_owned(),
+            luma: false,
+            palette: Palette::default(),
+            mask: Vec::new(),
+            width: 4,
+            height: 5,
+            art: String::new(),
+        };
+        let objects = [object("battle-a-000"), object("battle-a-001")];
+        // The pose is 4 x 5 game pixels (16 x 20 art pixels): with a margin of 8 art pixels each side, 32 x 36
+        png("a.png", 32, 36);
+        let index = |body: &str| format!(r#"{{"variants": [{body}]}}"#);
+        let entry = |art: &str, when: &str, margin: u32, file: &str| {
+            format!(r#"{{"art": "{art}", "when": "{when}", "margin": {margin}, "file": "{file}"}}"#)
+        };
+        let write = |body: String| std::fs::write(art.join("index.json"), index(&body)).unwrap();
+        let mut report = Report::default();
+        write(entry("battle-a-000", "always", 8, "a.png"));
+        assert_eq!(import_variants(&art, &pack, &objects, &mut report).unwrap(), 1);
+        assert!(pack.join("art/variants/battle-a-000.png").is_file());
+        let text = std::fs::read_to_string(pack.join(ssd_hd::pack::POSE_ART)).unwrap();
+        let listed = toml::from_str::<ssd_hd::pack::PoseArt>(&text).unwrap().variants;
+        assert_eq!((listed[0].art.as_str(), listed[0].margin), ("battle-a-000", 8));
+        assert_eq!(listed[0].file, "art/variants/battle-a-000.png");
+        // A condition other than `always` names its file after it
+        write(entry("battle-a-000", "kaioken", 8, "a.png"));
+        assert_eq!(import_variants(&art, &pack, &objects, &mut report).unwrap(), 1);
+        assert!(pack.join("art/variants/battle-a-000-kaioken.png").is_file());
+        // No folder, no variants; an entry with no file, or of art the pack has no pose of, is skipped
+        assert_eq!(
+            import_variants(&dir.path().join("none"), &pack, &objects, &mut report).unwrap(),
+            0
+        );
+        write(format!(
+            "{}, {}",
+            entry("battle-a-000", "always", 8, "none.png"),
+            entry("battle-b-000", "always", 8, "a.png")
+        ));
+        assert_eq!(import_variants(&art, &pack, &objects, &mut report).unwrap(), 0);
+        assert_eq!(report.skipped.len(), 2, "{report:?}");
+        // A picture of another size, a margin that is not a whole game pixel, a condition the game does not have, and two
+        // variants of one art for one condition are refused
+        write(entry("battle-a-000", "always", 4, "a.png"));
+        assert!(import_variants(&art, &pack, &objects, &mut report).is_err(), "the size");
+        write(entry("battle-a-000", "always", 7, "a.png"));
+        assert!(import_variants(&art, &pack, &objects, &mut report).is_err(), "the margin");
+        write(entry("battle-a-000", "bloom", 8, "a.png"));
+        assert!(import_variants(&art, &pack, &objects, &mut report).is_err(), "the condition");
+        write(format!(
+            "{}, {}",
+            entry("battle-a-000", "always", 8, "a.png"),
+            entry("battle-a-000", "always", 8, "a.png")
+        ));
+        assert!(import_variants(&art, &pack, &objects, &mut report).is_err(), "twice");
     }
 
     #[test]

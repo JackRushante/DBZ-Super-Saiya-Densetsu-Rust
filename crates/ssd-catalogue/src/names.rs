@@ -23,7 +23,7 @@ pub(crate) fn table_name(rom: RomView<'_>, table: u32, index: u32) -> Result<Nam
     Ok(name_at(rom, rom.pointer(table + 2 * index, TEXT_BANK)?))
 }
 
-/// A special attack: only its name is known so far.
+/// A special attack: its name and its KI cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attack {
     /// Index in the name table (the id the text engine takes).
@@ -31,7 +31,14 @@ pub struct Attack {
     /// The name; empty for the two entries that point at nothing, and partly or wholly kana for
     /// the attacks the translation left in Japanese (see [`Name::is_text`]).
     pub name: Name,
+    /// The KI the attack costs (the command cost table, `03:884B`, one byte per command id; the
+    /// menu's own KI-USE figure). The table is not a named symbol: it is read at one place by the
+    /// original, see `docs/re/data/kaioken-bp.md`.
+    pub ki_cost: u8,
 }
+
+/// The command cost table (bank 3): one byte per command id, as many as the attack names.
+const COMMAND_COSTS: u32 = 0x03_884B;
 
 /// A named person or object of the story: the table the text engine reads for the second kind
 /// of name. It holds the key items (Scouter, Radar, the seven dragon balls...) next to the
@@ -74,6 +81,7 @@ pub(crate) fn read_attacks(rom: RomView<'_>) -> Result<Vec<Attack>, CatalogueErr
             Ok(Attack {
                 id: u8::try_from(i).expect("fewer than 256 attacks"),
                 name: table_name(rom, d::ATTACK_NAME_POINTERS, i)?,
+                ki_cost: rom.u8(COMMAND_COSTS + i)?,
             })
         })
         .collect()

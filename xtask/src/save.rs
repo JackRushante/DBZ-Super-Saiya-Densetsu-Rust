@@ -612,6 +612,7 @@ mod tests {
             unit_id: id + 20,
             levels,
             fixed_stats_unit: None,
+            level_cap: 47,
         };
         let characters = vec![
             character(0, "Goku", rows([416, 84, 98])),

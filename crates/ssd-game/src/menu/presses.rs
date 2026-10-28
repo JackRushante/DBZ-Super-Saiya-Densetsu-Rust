@@ -9,7 +9,7 @@
 //! [`Player::next`] is asked once per frame, after the frame before has run, and says which joypad
 //! the next frame runs with, so the same plan runs in the window, in a UI snapshot and in a test.
 
-use super::MenuProbe;
+use super::{MenuProbe, SAVE_DONE_STEP, SAVE_LIST_STEP, SAVE_SCREEN, order};
 use ssd_oracle::Joypad;
 
 /// The rows of a page of the original's item list (`map_entry_value` 0 to 7; `map_entry_0d63` is the page).
@@ -20,6 +20,8 @@ const LIST_ROWS: u8 = 8;
 pub enum Button {
     Up,
     Down,
+    Left,
+    Right,
     A,
     B,
 }
@@ -70,9 +72,19 @@ pub enum Until {
     Moved,
     /// The field is free, or the menu is open on its command window (the field's or a town's).
     Settled,
+    /// The original's Save shows its slot list (screen 10, step 1).
+    SaveList,
+    /// The original's Save wrote the slot and shows "Completed!" (screen 10, step 2).
+    SaveDone,
     /// The command window of a battle is up and idle (screen 17 in a battle), where B from the battle's Item list
     /// goes.
     BattleCommand,
+    /// The original's Order screen is on this step (screen 8): 1 takes the picks, 2 asks Yes or No.
+    OrderStep(u8),
+    /// The original's Order screen has filled this many slots (`$0D6B`), or more.
+    Picked(u8),
+    /// The cursor of the open list is not on this row any more (`map_entry_value`): a list whose cursor skips rows moved.
+    CursorMoved(u8),
 }
 
 /// One step of a plan.
@@ -81,6 +93,12 @@ pub enum Step {
     /// Presses Down until the cursor is on `row` of a list of `rows` rows. Down wraps around, as the
     /// menu's own lists do, so pressing Down alone reaches every row.
     Row { row: u8, rows: u8 },
+    /// Presses Left or Right until the cursor of a row of `columns` choices (the Text screen's five speeds) is on
+    /// `column`. The list does not wrap, so the presses go the short way, one cell each.
+    Column { column: u8, columns: u8 },
+    /// Presses Down until the cursor of a list of `rows` rows is on `row`, one press at a time, each until the cursor has
+    /// moved (the Order screen's cursor skips the rows already taken, so a press does not always move it by one row).
+    Seek { row: u8, rows: u8 },
     /// Moves the cursor of the original's item list to its first entry (row 0 of page 0) with the original's own Up,
     /// after a stage put the chosen stack there. The original reads the id of the entry under its cursor
     /// (`menu_item_id`) when the cursor moves, not when A is pressed, so the cursor moves even when it is on the first
@@ -180,6 +198,8 @@ pub struct Player {
     answering: u32,
     /// The list's cursor has moved during the current [`Step::ListTop`].
     moved: bool,
+    /// Presses the current [`Step::Seek`] has made.
+    seeks: u8,
 }
 
 impl Player {
@@ -194,6 +214,7 @@ impl Player {
             retries: 0,
             answering: 0,
             moved: false,
+            seeks: 0,
         }
     }
 
@@ -277,6 +298,33 @@ impl Player {
                         }
                         _ => self.abort("the list has no cursor"),
                     },
+                    Step::Column { column, columns } => match probe.cursor() {
+                        Some(cursor) if cursor == column => self.advance(),
+                        Some(_) if column >= columns => self.abort("the choice is not on the list"),
+                        Some(cursor) if cursor < column => {
+                            let until = Until::Cursor(cursor + 1);
+                            self.phase = Phase::Holding { button: Button::Right, until, held: 0 };
+                        }
+                        Some(cursor) => {
+                            let until = Until::Cursor(cursor - 1);
+                            self.phase = Phase::Holding { button: Button::Left, until, held: 0 };
+                        }
+                        None => self.abort("the list has no cursor"),
+                    },
+                    Step::Seek { row, rows } => match probe.cursor() {
+                        Some(cursor) if cursor == row => self.advance(),
+                        // Every press moves the cursor to the next row left: more presses than rows means the row is
+                        // not on the list.
+                        Some(_) if self.seeks > rows.saturating_add(PRESS_RETRIES) => {
+                            self.abort("the row is not on the list");
+                        }
+                        Some(cursor) => {
+                            self.seeks += 1;
+                            let until = Until::CursorMoved(cursor);
+                            self.phase = Phase::Holding { button: Button::Down, until, held: 0 };
+                        }
+                        None => self.abort("the list has no cursor"),
+                    },
                     Step::Row { row, rows } => match probe.cursor() {
                         Some(cursor) if cursor == row => self.advance(),
                         // The cursor moves down one row per press, and the list wraps.
@@ -324,7 +372,13 @@ impl Player {
                 Phase::Settle { until, waited } => {
                     if satisfied(probe, until) {
                         // A row step is not done until its cursor is on the row: check again.
-                        if matches!(self.steps[self.index], Step::Row { .. } | Step::ListTop) {
+                        if matches!(
+                            self.steps[self.index],
+                            Step::Row { .. }
+                                | Step::Column { .. }
+                                | Step::Seek { .. }
+                                | Step::ListTop
+                        ) {
                             self.phase = Phase::Ready { waited: 0 };
                         } else {
                             self.advance();
@@ -343,7 +397,7 @@ impl Player {
                                 self.phase = Phase::Holding { button, until, held: 0 };
                             }
                             // The list's cursor press is repeated the same way.
-                            Step::ListTop if self.retries < PRESS_RETRIES => {
+                            Step::ListTop | Step::Seek { .. } if self.retries < PRESS_RETRIES => {
                                 self.retries += 1;
                                 self.phase = Phase::Ready { waited: 0 };
                             }
@@ -396,6 +450,7 @@ impl Player {
         self.index += 1;
         self.retries = 0;
         self.moved = false;
+        self.seeks = 0;
         self.phase = Phase::Ready { waited: 0 };
     }
 
@@ -409,7 +464,13 @@ impl Player {
     fn needs_ready(&self) -> bool {
         matches!(
             self.steps.get(self.index),
-            Some(Step::Row { .. } | Step::ListTop | Step::Press { .. })
+            Some(
+                Step::Row { .. }
+                    | Step::Column { .. }
+                    | Step::Seek { .. }
+                    | Step::ListTop
+                    | Step::Press { .. }
+            )
         )
     }
 }
@@ -471,7 +532,26 @@ fn satisfied(probe: &MenuProbe<'_>, until: Until) -> bool {
                 || probe.battle_command()
                 || (probe.menu_open() && matches!(probe.screen(), Some(0 | 13)))
         }
+        Until::SaveList => {
+            probe.menu_open()
+                && probe.screen() == Some(SAVE_SCREEN)
+                && probe.step() == Some(SAVE_LIST_STEP)
+        }
+        Until::SaveDone => {
+            probe.menu_open()
+                && probe.screen() == Some(SAVE_SCREEN)
+                && probe.step() == Some(SAVE_DONE_STEP)
+        }
         Until::BattleCommand => probe.battle_command(),
+        Until::OrderStep(step) => {
+            probe.menu_open() && probe.screen() == Some(order::SCREEN) && probe.step() == Some(step)
+        }
+        Until::Picked(count) => {
+            probe.menu_open()
+                && probe.screen() == Some(order::SCREEN)
+                && probe.order_picked() >= count
+        }
+        Until::CursorMoved(from) => probe.menu_open() && probe.cursor() != Some(from),
     }
 }
 
@@ -481,6 +561,8 @@ fn pad(button: Option<Button>) -> Joypad {
     match button {
         Some(Button::Up) => joypad.up = true,
         Some(Button::Down) => joypad.down = true,
+        Some(Button::Left) => joypad.left = true,
+        Some(Button::Right) => joypad.right = true,
         Some(Button::A) => joypad.a = true,
         Some(Button::B) => joypad.b = true,
         None => {}
