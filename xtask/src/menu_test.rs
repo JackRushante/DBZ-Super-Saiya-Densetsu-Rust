@@ -15,7 +15,7 @@ use ssd_game::menu::presses::{Next, Outcome};
 use ssd_game::scripts;
 use ssd_menus::Key;
 use ssd_menus::bag::{Bag, Class, Rules, Sidecar};
-use ssd_menus::view::Sheet;
+use ssd_menus::view::{Labels, Sheet};
 use ssd_oracle::{
     CORE_VERSION, HostEvent, Joypad, MODE_ENHANCED, Machine, MemorySaveStore, NullAudio, Recorder,
     Replay, apply_events,
@@ -67,8 +67,10 @@ pub struct Args {
 pub fn parse_args(args: &[&str]) -> Result<Args, String> {
     let mut it = args.iter();
     let suite = match it.next() {
-        Some(&suite @ ("field" | "town" | "diff" | "items" | "cheats")) => suite.to_owned(),
-        _ => return Err("menu-test takes field, town, diff, items or cheats".to_owned()),
+        Some(&suite @ ("field" | "town" | "diff" | "items" | "cheats" | "battle")) => {
+            suite.to_owned()
+        }
+        _ => return Err("menu-test takes field, town, diff, items, cheats or battle".to_owned()),
     };
     let mut save = None;
     let mut slot = 0;
@@ -1678,6 +1680,12 @@ pub fn run(rom: &[u8], args: &Args, out: &mut dyn std::io::Write) -> anyhow::Res
         write!(out, "{text}")?;
         return Ok(u8::from(!ok));
     }
+    if args.suite == "battle" {
+        let mut text = format!("{}\n", header(args));
+        let ok = battle_suite(rom, &args.start, &args.only, &mut text)?;
+        write!(out, "{text}")?;
+        return Ok(u8::from(!ok));
+    }
     let starts = start_of(rom, &args.start)?;
     let mut text = format!("{}\n", header(args));
     let ok = match args.suite.as_str() {
@@ -2696,4 +2704,249 @@ fn original_items(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+// --- the battle's Items screen (suite `battle`): a battle of a replay, the bag bound to crafted stacks ----------------
+
+/// Frames a use may take from the HD's Use to the plan's end. The original ignores a press that comes within three
+/// frames of the one before, so a plan that presses back to back loses presses and waits 150 frames for each: a use from
+/// a list of two stacks took 327 frames (a visible freeze on a phone), and one that keeps its gaps takes about 60.
+const BATTLE_PLAN_LIMIT: u32 = 120;
+
+/// The first frame of the replay `path` (within `limit` frames) where the battle's command window is up and idle. The
+/// replay's own presses are not played after it: the window waits for the scenario's.
+fn battle_frame(rom: &[u8], path: &Path, limit: u64) -> anyhow::Result<u64> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let replay = Replay::from_bytes(&bytes, ssd_rom::crc32(rom), CORE_VERSION)?;
+    let mut machine = replay.power_on(rom.to_vec())?;
+    let labels = Labels::default();
+    for frame in 0..limit {
+        machine.run_frame(replay.input(frame), &mut NullAudio)?;
+        if ssd_game::menu::MenuProbe::new(machine.wram(), &labels).battle_command() {
+            return Ok(frame + 1);
+        }
+    }
+    bail!("no idle battle command window in the first {limit} frames of {}", path.display())
+}
+
+/// A battle scenario: the harness is in the battle with the bag bound to the scenario's objects (one unit each).
+type BattleScenario = fn(&mut Harness, &mut Report) -> anyhow::Result<()>;
+
+/// The battle scenarios by name, with the objects of the bag each starts with.
+const BATTLE_SCENARIOS: [(&str, &[u8], BattleScenario); 5] = [
+    ("self", &[6, 6, 6], battle_self),
+    ("long-bag", &[2, 2, 2, 6, 6, 6, 18, 18], battle_long_bag),
+    ("ally", &[2, 2], battle_ally),
+    ("card", &[13, 13], battle_card),
+    ("gohan", &[26], battle_gohan),
+];
+
+fn battle_suite(
+    rom: &[u8],
+    start: &Start,
+    only: &[String],
+    out: &mut String,
+) -> anyhow::Result<bool> {
+    let Start::Replay { path, frames } = start else {
+        bail!(
+            "menu-test battle takes --replay <a replay with a battle> --frames <the most frames to scan>"
+        );
+    };
+    let at = battle_frame(rom, path, *frames)?;
+    let starts = start_of(rom, &Start::Replay { path: path.clone(), frames: at })?;
+    let catalogue = ssd_catalogue::Catalogue::from_rom(rom)?;
+    let labels = ssd_catalogue::menu_labels(&catalogue);
+    {
+        let mut h = harness(rom, &starts)?;
+        h.frames(1)?;
+        writeln!(
+            out,
+            "the battle's command window is idle at frame {at}: group {}, party of {}",
+            h.byte(d::ENCOUNTER_GROUP_INDEX),
+            party_len(&h)
+        )?;
+    }
+    let mut all_ok = true;
+    let mut ran = 0;
+    for &(name, objects, scenario) in &BATTLE_SCENARIOS {
+        if !only.is_empty() && !only.iter().any(|o| o == name) {
+            continue;
+        }
+        ran += 1;
+        let mut report = Report::default();
+        let result = battle_harness(&starts, &labels, objects)
+            .and_then(|mut h| scenario(&mut h, &mut report));
+        if let Err(error) = &result {
+            report.check(false, &format!("the scenario failed: {error:#}"));
+        }
+        let ok = report.passed();
+        all_ok &= ok;
+        writeln!(out, "{} {name}", if ok { "ok  " } else { "FAIL" })?;
+        for (passed, what) in &report.lines {
+            if !passed {
+                writeln!(out, "       - {what}")?;
+            }
+        }
+    }
+    writeln!(
+        out,
+        "menu-test battle: {ran} scenarios, {}",
+        if all_ok { "all ok" } else { "FAILED" }
+    )?;
+    Ok(all_ok)
+}
+
+/// A harness in the battle of the start, with the bag bound (as a recorded bind) to one unit of each of `objects`.
+fn battle_harness(starts: &Starts, labels: &Labels, objects: &[u8]) -> anyhow::Result<Harness> {
+    let mut machine = (starts.fresh)()?;
+    machine.load_state(&starts.state)?;
+    enhanced_hooks(&mut machine);
+    let mut driver = Driver::with_bag(labels.clone(), Rules::default(), Sidecar::empty())
+        .with_cheats(ssd_menus::cheats::CheatSidecar::empty());
+    let mut bag = Bag::new(Rules::default());
+    for &object in objects {
+        let story = labels.objects.get(usize::from(object)).is_some_and(|label| label.story);
+        bag.add(object, 0, Class::of(object, story)).map_err(|_| anyhow::anyhow!("bag full"))?;
+    }
+    let events = driver
+        .replay_event(ssd_game::menu::keeper::BIND_TAG, &bag.to_bytes(), machine.wram())
+        .map_err(anyhow::Error::msg)?;
+    apply_events(&mut machine, &events)?;
+    let mut h = Harness::new(machine, driver);
+    h.frames(20)?;
+    Ok(h)
+}
+
+/// The player's Item on the battle's command window: Down to the row and A. The HD's Items screen goes over the list.
+fn open_battle_items(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+    r.check(h.driver.curtain() == Curtain::Down, "the battle's command window is the game's");
+    while h.byte(d::MAP_ENTRY_VALUE) != 1 {
+        h.press(Joypad { down: true, ..Joypad::default() })?;
+        h.frames(10)?;
+    }
+    h.press(a())?;
+    h.frames(60)?;
+    r.check(
+        h.driver.curtain() == Curtain::Up && h.driver.nav().screen() == ssd_menus::Screen::Items,
+        &format!(
+            "the HD's Items screen is over the battle's list (curtain {:?}, screen {})",
+            h.driver.curtain(),
+            h.byte(d::MENU_SCREEN)
+        ),
+    );
+    Ok(())
+}
+
+/// Opens the HD's Items screen in the battle, moves to the stack `pick` and uses it: Use or Drop, then Use. Checks that
+/// the plan reaches its state without a lost press's wait ([`BATTLE_PLAN_LIMIT`]); from there the original's screens are
+/// the player's.
+fn battle_use(h: &mut Harness, r: &mut Report, pick: usize) -> anyhow::Result<()> {
+    open_battle_items(h, r)?;
+    for _ in 0..pick {
+        h.key(Key::Down)?;
+    }
+    h.key(Key::Confirm)?;
+    r.check(h.driver.nav().sheet() == Sheet::Choose, "Use or Drop for the stack");
+    h.driver.key(Key::Confirm, h.machine.wram());
+    let mut frames = 0;
+    loop {
+        h.frame(Joypad::default())?;
+        frames += 1;
+        if !h.driver.busy() || frames > CHOICE_LIMIT {
+            break;
+        }
+    }
+    r.check(
+        h.driver.last_outcome() == Some(Outcome::Reached),
+        &format!("the plan reached its state: {:?}", h.driver.last_outcome()),
+    );
+    r.check(
+        frames <= BATTLE_PLAN_LIMIT,
+        &format!("the plan took {frames} frames (at most {BATTLE_PLAN_LIMIT}): a press was lost"),
+    );
+    Ok(())
+}
+
+/// The player's answers on the original's screens to the end of a use, and the checks of its end: the battle has its
+/// command window back, and one unit of `object` is gone from the bag.
+fn battle_finish(h: &mut Harness, r: &mut Report, object: u8, before: u32) -> anyhow::Result<()> {
+    h.answer()?;
+    h.frames(SETTLE)?;
+    r.check(
+        h.driver.curtain() == Curtain::Down && h.byte(d::MENU_SCREEN) == 17,
+        &format!(
+            "the battle has its command window back (curtain {:?}, screen {})",
+            h.driver.curtain(),
+            h.byte(d::MENU_SCREEN)
+        ),
+    );
+    let after = h.driver.bag().map_or(0, |bag| bag.units_of(object));
+    r.check(
+        after + 1 == before,
+        &format!("one unit of object {object} is used: {before} to {after}"),
+    );
+    Ok(())
+}
+
+fn units(h: &Harness, object: u8) -> u32 {
+    h.driver.bag().map_or(0, |bag| bag.units_of(object))
+}
+
+/// An object that works on the user (Guru, BP +50%), from a stack of three.
+fn battle_self(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+    let before = units(h, 6);
+    battle_use(h, r, 0)?;
+    battle_finish(h, r, 6, before)
+}
+
+/// A bag of three stacks and the last one used: the plan presses Down and Up on a list of several rows (the presses the
+/// original ignores when they come too soon after each other), then A and the use.
+fn battle_long_bag(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+    let before = units(h, 18);
+    battle_use(h, r, 2)?;
+    r.check(h.byte(d::MENU_SCREEN) == 21, "Yajirobe's effect waits on the battle's action screen");
+    battle_finish(h, r, 18, before)
+}
+
+/// An object used on an ally: Bulma on the party's second member, whose HP is low, heals him and not the first.
+fn battle_ally(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+    anyhow::ensure!(party_len(h) >= 2, "the battle's party has one member");
+    set_member_hp(h, 0, 150)?;
+    set_member_hp(h, 1, 30)?;
+    let before = units(h, 2);
+    battle_use(h, r, 0)?;
+    // The original asks on whom with its party window (the cursor on the first member): Down to the second, and A.
+    h.frames(20)?;
+    r.check(
+        h.driver.curtain() == Curtain::Lifted && h.byte(d::MENU_SCREEN) == 2,
+        "the original's own screen asks on whom",
+    );
+    h.press(Joypad { down: true, ..Joypad::default() })?;
+    h.frames(20)?;
+    h.press(a())?;
+    h.frames(ANSWER_GAP)?;
+    battle_finish(h, r, 2, before)?;
+    let (first, second) = (member_hp(h, 0), member_hp(h, 1));
+    r.check(second == 55, &format!("the second member heals 25: 30 to {second}"));
+    r.check(first == 150, &format!("the first member is not healed: {first}"));
+    Ok(())
+}
+
+/// A card object (Oolong changes the whole hand), from a stack of two: its use is taken and the battle goes on.
+fn battle_card(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+    let before = units(h, 13);
+    battle_use(h, r, 0)?;
+    battle_finish(h, r, 13, before)
+}
+
+/// The story's Gohan, who can be called from the list of the first Raditz battle only (encounter group 5).
+fn battle_gohan(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
+    if h.byte(d::ENCOUNTER_GROUP_INDEX) != 5 {
+        // Another battle: the HD refuses him there (the driver's unit tests say so), and there is nothing to use.
+        r.check(true, "not the first Raditz battle: skipped");
+        return Ok(());
+    }
+    let before = units(h, 26);
+    battle_use(h, r, 0)?;
+    battle_finish(h, r, 26, before)
 }

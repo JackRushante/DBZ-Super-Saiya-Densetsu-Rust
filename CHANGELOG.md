@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.10 (2026-10-28)
+
+### Fixes
+
+- Using an object from the HD Items screen no longer freezes the game for about two seconds when the bag holds two or more stacks.
+  The plan that stages the stack pressed the original's keys back to back, the original ignores a key that comes within three
+  frames of the one before, and each lost key waited 150 frames before it was pressed again (327 frames in all, about 60 now). From the
+  Use on, the original's own screens (who the object is for, its message) are still the player's, as before. Enhanced only.
+
 ## 0.3.9 (2026-10-28)
 
 ### Features

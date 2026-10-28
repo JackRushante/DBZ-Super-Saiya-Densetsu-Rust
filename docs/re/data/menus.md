@@ -432,6 +432,16 @@ screen 17. The HD's battle use (`Driver`, the Items screen over a battle) follow
 effect's screen as taken; from the Use on, the original's screens are the player's (the HD covers the battle's list only on
 its step 1, not on the use-on list of step 5).
 
+**Presses in quick succession (measured on the battle's Item list).** The list ignores a press that comes within three frames of
+the one before: a Down held for two frames and released, and then an Up on the next frame, leaves the cursor where the Down put it,
+and so does an A on the frame after that Up. The HD's plan for a use of a stack moves the original's cursor to the top of its
+list (Down, then Up, when the list has more than one entry) and presses A for the Use or Drop choice, so it waits for the state of
+each press and then lets four frames pass before the next one (`PRESS_GAP`, eight in the code). Without the wait each of the
+two lost presses cost the 150 frames the plan allows before it repeats one, and a use from a bag of two stacks or more took
+327 frames. After the Use of a battle object that works on a fighter (BP, HP, KI), the original draws its party window (step 3,
+the cursor on the first member, A takes it) over the list, with the object's help line in the box at the bottom left; it is the
+original's own "on whom" question, and the HD leaves it to the player.
+
 **Stale `menu_screen` while the menu opens.** `menu_screen` (`$0D5F`) is not cleared when a menu closes: the Radar's
 exit leaves it at 2, and the next opening shows `$25` = `$0F` with that 2 for a couple of frames before it is set to 0. A
 probe that reads the screen at `$0F` sees the Item screen; the curtain therefore goes up on `$0F` itself (a menu opened

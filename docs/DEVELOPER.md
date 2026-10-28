@@ -1212,6 +1212,7 @@ art came from) and `SCENES_COLOUR=1` turns on the `colour` check (the background
     cargo run --release -p xtask -- menu-test diff --save <file.sav> [--slot N] [name...]
     cargo run --release -p xtask -- menu-test items --save <file.sav> [name...]
     cargo run --release -p xtask -- menu-test cheats [--save <file.sav>] [--replays <dir>] [name...]
+    cargo run --release -p xtask -- menu-test battle --replay <file.ssdreplay> --frames N [name...]
 
 plays the HD menus (`--mode enhanced`) headless, as a player plays them, from a crafted save (its Continue, then the
 field) or from a replay's frame N (the town: the shop replay at frame 4340, before its town menu opens). `field` runs
@@ -1229,7 +1230,13 @@ healed: the scenarios answer the original's screens with A, as a player does); t
 consumed, a card's list and the Radar's screen are left to the player, and no use is refused); `dead-input`, the Item
 screen's keys on an empty tab and the way back; a pickup, a purchase, a drop (one unit), a save then Continue, a save
 changed by Classic play, a full bag, and the recording of an Enhanced session (format 2) played back to the same final
-state.
+state. `battle` plays the HD Items screen in a battle: it plays the replay (any replay with a battle; `--frames` is the most
+frames it scans) up to the first frame where the battle's command window is idle, binds a bag of crafted stacks and uses one
+object from the HD screen, then answers the original's screens as a player does. The scenarios: `self` (a stack of three of an
+object that works on the user), `long-bag` (the third of three stacks: the plan's presses may not come so close that the
+original ignores them, so the use takes at most 120 frames, not 327), `ally` (Bulma on the second member, whose HP is low),
+`card` (a card object) and `gohan` (the story's Gohan, on a replay of the first Raditz battle, encounter group 5; skipped in
+another battle).
 Nothing is written but the report (the crafted saves of `items` go to a temporary directory it removes).
 
 ### Recompiler (M3)

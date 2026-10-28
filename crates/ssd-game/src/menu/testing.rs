@@ -52,8 +52,12 @@ pub(crate) struct FakeMenu {
     pub battle: bool,
     /// `encounter_group_index`: the encounter group of the battle.
     pub group: u8,
+    /// The original ignores a press that comes within three frames of the one before, as the battle's Item list does.
+    pub strict: bool,
     /// The item list the game holds (object and state word of each entry), as the keeper last wrote it.
     pub list: Vec<(u8, u16)>,
+    /// Frames until the original takes a press again (see [`FakeMenu::strict`]).
+    quiet: u32,
     /// Frames until the timed change of the state (opening, take-off, the Item list).
     timer: u32,
     /// The joypad of the last frame, for the presses.
@@ -153,13 +157,18 @@ impl FakeMenu {
 
     /// One frame with `pad` held: the presses of the frame, then the frame's timed changes.
     pub(crate) fn tick(&mut self, pad: Joypad) {
-        let down = pad.down && !self.last.down;
-        let up = pad.up && !self.last.up;
-        let a = pad.a && !self.last.a;
-        let b = pad.b && !self.last.b;
-        let left = pad.left && !self.last.left;
-        let right = pad.right && !self.last.right;
+        let (mut down, mut up) = (pad.down && !self.last.down, pad.up && !self.last.up);
+        let (mut a, mut b) = (pad.a && !self.last.a, pad.b && !self.last.b);
+        let (mut left, mut right) = (pad.left && !self.last.left, pad.right && !self.last.right);
         self.last = pad;
+        if self.strict {
+            if self.quiet > 0 {
+                self.quiet -= 1;
+                (down, up, a, b, left, right) = (false, false, false, false, false, false);
+            } else if down || up || a || b || left || right {
+                self.quiet = 3;
+            }
+        }
         if self.timer > 0 {
             self.timer -= 1;
             if self.timer == 0 {

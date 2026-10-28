@@ -158,6 +158,11 @@ const HELD: u8 = 2;
 /// Times a press that does not reach its state is repeated before the plan aborts: the original
 /// takes a press only some of the time just after a window is drawn.
 const PRESS_RETRIES: u8 = 4;
+/// Frames the plan lets pass after a press ends before it starts the next one: the original ignores a press that comes
+/// within three frames of the one before (measured on the battle's Item list: an Up right after a Down, and an A right
+/// after that Up, were lost, and each lost press cost [`SETTLE_FRAMES`] before it was repeated, so a use from a list of two
+/// or more stacks froze the screen for 327 frames). Four frames are enough; eight leave room.
+const PRESS_GAP: u32 = 8;
 /// B presses a plan may spend closing the menu after an abort.
 const CLOSE_PRESSES: u32 = 12;
 /// Frames the close waits after each B press for the menu to close.
@@ -200,6 +205,8 @@ pub struct Player {
     moved: bool,
     /// Presses the current [`Step::Seek`] has made.
     seeks: u8,
+    /// Frames left of the gap after the last press ([`PRESS_GAP`]): the next press waits for it.
+    cool: u32,
 }
 
 impl Player {
@@ -215,11 +222,29 @@ impl Player {
             answering: 0,
             moved: false,
             seeks: 0,
+            cool: 0,
         }
     }
 
     /// The next frame of the plan, given the menu state after the frame before it.
     pub fn next(&mut self, probe: &MenuProbe<'_>) -> Next {
+        let next = self.next_step(probe);
+        if matches!(next, Next::Frame(_)) {
+            self.cool = self.cool.saturating_sub(1);
+        }
+        next
+    }
+
+    /// Starts holding `button` for a press, or lets the gap after the last press pass first.
+    fn hold(&mut self, button: Button, until: Until) {
+        self.phase = if self.cool > 0 {
+            Phase::Pausing { left: self.cool }
+        } else {
+            Phase::Holding { button, until, held: 0 }
+        };
+    }
+
+    fn next_step(&mut self, probe: &MenuProbe<'_>) -> Next {
         loop {
             match self.phase {
                 Phase::Finished(outcome) => return Next::Done(outcome),
@@ -288,13 +313,13 @@ impl Player {
                         (Some(0), Some(0)) => {
                             self.moved = true;
                             let until = Until::Cursor(1);
-                            self.phase = Phase::Holding { button: Button::Down, until, held: 0 };
+                            self.hold(Button::Down, until);
                         }
                         (Some(row), Some(_)) => {
                             self.moved = true;
                             // Up from a page's first row goes to the last row of the page before.
                             let until = Until::Cursor(row.checked_sub(1).unwrap_or(LIST_ROWS - 1));
-                            self.phase = Phase::Holding { button: Button::Up, until, held: 0 };
+                            self.hold(Button::Up, until);
                         }
                         _ => self.abort("the list has no cursor"),
                     },
@@ -303,11 +328,11 @@ impl Player {
                         Some(_) if column >= columns => self.abort("the choice is not on the list"),
                         Some(cursor) if cursor < column => {
                             let until = Until::Cursor(cursor + 1);
-                            self.phase = Phase::Holding { button: Button::Right, until, held: 0 };
+                            self.hold(Button::Right, until);
                         }
                         Some(cursor) => {
                             let until = Until::Cursor(cursor - 1);
-                            self.phase = Phase::Holding { button: Button::Left, until, held: 0 };
+                            self.hold(Button::Left, until);
                         }
                         None => self.abort("the list has no cursor"),
                     },
@@ -321,7 +346,7 @@ impl Player {
                         Some(cursor) => {
                             self.seeks += 1;
                             let until = Until::CursorMoved(cursor);
-                            self.phase = Phase::Holding { button: Button::Down, until, held: 0 };
+                            self.hold(Button::Down, until);
                         }
                         None => self.abort("the list has no cursor"),
                     },
@@ -330,7 +355,7 @@ impl Player {
                         // The cursor moves down one row per press, and the list wraps.
                         Some(cursor) => {
                             let until = Until::Cursor((cursor + 1) % rows.max(1));
-                            self.phase = Phase::Holding { button: Button::Down, until, held: 0 };
+                            self.hold(Button::Down, until);
                         }
                         None => self.abort("the list has no cursor"),
                     },
@@ -356,7 +381,7 @@ impl Player {
                         self.advance();
                     }
                     Step::Press { button, until } => {
-                        self.phase = Phase::Holding { button, until, held: 0 };
+                        self.hold(button, until);
                     }
                     Step::Wait { until } => self.phase = Phase::Settle { until, waited: 0 },
                 },
@@ -366,6 +391,7 @@ impl Player {
                         return Next::Frame(pad(Some(button)));
                     }
                     // The release frame: the press is over, and its state is checked from the next frame.
+                    self.cool = PRESS_GAP;
                     self.phase = Phase::Settle { until, waited: 0 };
                     return Next::Frame(pad(None));
                 }
@@ -394,7 +420,7 @@ impl Player {
                                     again @ (Until::ItemChoice | Until::ItemReply | Until::UseTaken),
                             } if self.retries < PRESS_RETRIES && again == until => {
                                 self.retries += 1;
-                                self.phase = Phase::Holding { button, until, held: 0 };
+                                self.hold(button, until);
                             }
                             // The list's cursor press is repeated the same way.
                             Step::ListTop | Step::Seek { .. } if self.retries < PRESS_RETRIES => {

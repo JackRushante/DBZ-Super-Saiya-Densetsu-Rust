@@ -2116,6 +2116,30 @@ mod tests {
     }
 
     #[test]
+    fn a_use_from_a_list_of_stacks_does_not_wait_on_presses_the_original_ignored() {
+        // The original ignores a press within three frames of the one before: the plan's Up after its Down, and its A after
+        // the Up, must come a few frames apart, or each lost press costs a long wait for nothing.
+        let (mut driver, mut menu) = battle_with_bag();
+        open_battle_list(&mut driver, &mut menu);
+        menu.strict = true;
+        // Yajirobe, the third row.
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Down, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        driver.key(Key::Confirm, &menu.wram());
+        let mut frames = 0;
+        while driver.busy() {
+            let frame = driver.frame(&menu.wram(), None, Joypad::default());
+            menu.tick(frame.pad);
+            menu.absorb(&frame.events);
+            frames += 1;
+            assert!(frames < 2_000, "the plan did not end");
+        }
+        assert_eq!(driver.last_outcome(), Some(Outcome::Reached));
+        assert!(frames < 120, "the use took {frames} frames: a press was lost and waited for");
+    }
+
+    #[test]
     fn back_from_the_battle_list_gives_the_battle_its_keys_back_on_its_command_window() {
         let (mut driver, mut menu) = battle_with_bag();
         open_battle_list(&mut driver, &mut menu);
