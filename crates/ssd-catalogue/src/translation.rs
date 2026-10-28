@@ -1,6 +1,6 @@
-//! A translation of the game's text, read at run time from a tab-separated file (`zh-hk.tsv`): the Enhanced mode
-//! draws it over the original's windows. Nothing of the game's text is held here: the file is the player's, beside
-//! the game or in its data folder, and this module only reads it.
+//! A translation of the game's text, read at run time from a tab-separated file (`<code>.tsv`, such as `zh-hk.tsv`):
+//! the Enhanced mode draws it over the original's windows. Nothing of the game's text is held here: the file is the
+//! player's, beside the game or in its data folder, and this module only reads it.
 //!
 //! The file is a header line naming the columns (`key`, `zh`, then any others, such as `note`), and one row per page
 //! of a string, name or block. The keys are those of `xtask text-dump` ([`string_key`], [`page_key`]: `str3:0x3E`,
@@ -16,8 +16,12 @@
 //! | `{auto}`, `{portrait:..}`, `{FC}`, `{tile:..}` | what the engine does by itself: nothing to draw |
 //!
 //! A row with an empty text, and a key the file does not have, are not translated: the game's own text stays.
+//!
+//! Before the header, the file may say how its language is presented ([`Header`]): `#name<TAB>...`, the language's
+//! name in itself, and `#font<TAB>...`, the font to take first. Any other line that starts with `#` there is a note.
 
 use std::collections::HashMap;
+use std::io::BufRead as _;
 use std::path::Path;
 
 /// How many `{same:KEY}` links are followed before a text is taken as missing (a loop in the file).
@@ -51,10 +55,8 @@ impl Translation {
     /// The header does not name the `key` and `zh` columns.
     pub fn parse(text: &str) -> Result<Self, TranslationError> {
         let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-        let mut lines = text.lines();
-        let header: Vec<&str> = lines.next().unwrap_or("").split('\t').map(str::trim).collect();
-        let column = |name: &str| header.iter().position(|&column| column == name);
-        let (Some(key), Some(zh)) = (column("key"), column("zh")) else {
+        let mut lines = text.lines().skip_while(|line| is_header_line(line));
+        let Some((key, zh)) = columns(lines.next().unwrap_or("")) else {
             return Err(TranslationError::Header);
         };
         let mut rows = HashMap::new();
@@ -100,6 +102,80 @@ impl Translation {
             text = self.rows.get(other)?.as_str();
         }
         None
+    }
+}
+
+/// Whether `line` is a line of the [`Header`] (it starts with `#`), before the line of the columns.
+fn is_header_line(line: &str) -> bool {
+    line.starts_with('#')
+}
+
+/// The places of the `key` and `zh` columns in the line of the columns; `None` when it does not name both.
+fn columns(line: &str) -> Option<(usize, usize)> {
+    let header: Vec<&str> = line.split('\t').map(str::trim).collect();
+    let column = |name: &str| header.iter().position(|&column| column == name);
+    Some((column("key")?, column("zh")?))
+}
+
+/// What a translation file says of its language in its first lines, before the line of its columns: the language's
+/// name in itself (`#name<TAB>繁體中文（香港）`), shown by the first launch's choice and the Options' Language row,
+/// and the font to take first (`#font<TAB>NotoSansHK`: the start of a font file's name in the `fonts` folder). Both
+/// are optional: without them the app names the language by its code and looks for a font as it always has.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Header {
+    /// The `#name` line's text.
+    pub name: Option<String>,
+    /// The `#font` line's text.
+    pub font: Option<String>,
+}
+
+impl Header {
+    /// The header of the text of a translation file. `None` when the text is not a translation: after the `#`
+    /// lines, the next line does not name the `key` and `zh` columns.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+        let mut header = Self::default();
+        for line in text.lines() {
+            if !is_header_line(line) {
+                return columns(line).map(|_| header);
+            }
+            header.read_line(line);
+        }
+        None
+    }
+
+    /// The header of the translation file at `path`, reading only its first lines (up to the line of the columns),
+    /// so that the app can list the languages without reading every text. `None` as for [`Header::parse`].
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be read.
+    pub fn read(path: &Path) -> Result<Option<Self>, TranslationError> {
+        let mut text = String::new();
+        for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
+            let line = line?;
+            text.push_str(&line);
+            text.push('\n');
+            if !is_header_line(line.trim_start_matches('\u{FEFF}')) {
+                break;
+            }
+        }
+        Ok(Self::parse(&text))
+    }
+
+    /// Takes a `#key<TAB>text` line: `#name` and `#font` (any case) with a text are kept, the rest is a note.
+    fn read_line(&mut self, line: &str) {
+        let Some((key, text)) = line[1..].split_once('\t') else { return };
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        match key.trim().to_ascii_lowercase().as_str() {
+            "name" => self.name = Some(text.to_owned()),
+            "font" => self.font = Some(text.to_owned()),
+            _ => {}
+        }
     }
 }
 
@@ -228,6 +304,26 @@ mod tests {
         assert_eq!(table.text("a:1"), Some("你好"));
         assert!(matches!(Translation::parse("key\tenglish\n"), Err(TranslationError::Header)));
         assert!(matches!(Translation::parse(""), Err(TranslationError::Header)));
+    }
+
+    #[test]
+    fn the_header_lines_name_the_language_and_its_font_and_the_rows_follow_them() {
+        let text = "\u{FEFF}#name\t測試語\n# a note\n#FONT\t MadeUpSans \nkey\tzh\na:1\t你好\n";
+        let header = Header::parse(text).expect("a translation");
+        assert_eq!(header.name.as_deref(), Some("測試語"));
+        assert_eq!(header.font.as_deref(), Some("MadeUpSans"), "any case, trimmed");
+        assert_eq!(Translation::parse(text).unwrap().text("a:1"), Some("你好"));
+        assert_eq!(Header::parse("key\tzh\n"), Some(Header::default()), "no header: nothing said");
+        assert_eq!(Header::parse("#name\t\nkey\tzh\n"), Some(Header::default()), "an empty name");
+        assert_eq!(Header::parse("#name\tx\nnote\tthing\n"), None, "not a translation");
+        assert_eq!(Header::parse("#name\tx\n"), None, "no columns");
+        let row = Translation::parse("key\tzh\n#name\tx\n").unwrap();
+        assert_eq!(row.len(), 1, "a `#` line after the columns is a row");
+        let path = std::env::temp_dir().join(format!("ssd-header-{}.tsv", std::process::id()));
+        std::fs::write(&path, text).unwrap();
+        let read = Header::read(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read.unwrap(), Some(header));
     }
 
     #[test]

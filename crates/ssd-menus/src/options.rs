@@ -9,6 +9,7 @@
 //! value that lives elsewhere (the cheat block, the original's text speed), so there is one truth.
 
 use crate::cheats::{Cheats, Setting};
+use crate::language::{Language, Locale};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -36,8 +37,13 @@ pub enum Category {
 #[cfg(test)]
 pub(crate) static GAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The tests that set the languages offered hold this lock.
+#[cfg(test)]
+pub(crate) static LANGUAGES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 static GAME_PAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static LANGUAGE_ROW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The translations the player has, besides English, sorted by code (see [`offer_languages`]).
+static LANGUAGES: std::sync::Mutex<Vec<Locale>> = std::sync::Mutex::new(Vec::new());
 static GAME_INFO: std::sync::Mutex<(String, String)> =
     std::sync::Mutex::new((String::new(), String::new()));
 
@@ -47,16 +53,36 @@ pub fn show_game_page(on: bool) {
     GAME_PAGE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Shows (or hides) the Accessibility page's Language row: the app turns it on where the player has a translation
-/// (its files in the data folder). Off by default, so without one the page is as it was.
-pub fn show_language_row(on: bool) {
-    LANGUAGE_ROW.store(on, std::sync::atomic::Ordering::Relaxed);
+/// Offers the translations the player has (their files in the data folder): the app sets them. With one or more,
+/// the Accessibility page shows the Language row and the first launch asks, both offering English and these sorted
+/// by code; with none (the default) the page is as it was and nothing is asked. English and a code given twice are
+/// left out.
+pub fn offer_languages(mut locales: Vec<Locale>) {
+    locales.retain(|locale| !locale.language.is_english());
+    locales.sort_by_key(|locale| locale.language);
+    locales.dedup_by(|a, b| a.language == b.language);
+    *LANGUAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = locales;
+}
+
+/// The languages offered: English first, then the translations the player has, sorted by code.
+#[must_use]
+pub fn offered_languages() -> Vec<Locale> {
+    let locales = LANGUAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::iter::once(Locale::english()).chain(locales.iter().cloned()).collect()
 }
 
 /// Whether the player has a translation: the Language row shows, and the language can be chosen.
 #[must_use]
 pub fn language_row_shown() -> bool {
-    LANGUAGE_ROW.load(std::sync::atomic::Ordering::Relaxed)
+    !LANGUAGES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
+}
+
+/// The choice of the Language row that shows the stored language among `offered`: English (the first) when none is
+/// stored or the stored one is not offered (its files are gone).
+fn language_choice(values: &Values, offered: &[Locale]) -> usize {
+    Language::from_values(values)
+        .and_then(|language| offered.iter().position(|locale| locale.language == language))
+        .unwrap_or(0)
 }
 
 /// The texts of the Game page's two read-only rows: the current mode, and the HD pack's state.
@@ -189,6 +215,9 @@ impl Category {
 pub enum Kind {
     /// The options side by side, the current one highlighted; Left and Right move it, wrapping.
     Choice(&'static [&'static str]),
+    /// The languages offered ([`offered_languages`]), by their names: side by side as a [`Kind::Choice`] where
+    /// they fit, else as a [`Kind::Cycle`].
+    Languages,
     /// An arrow, the value and an arrow; Left and Right move it, wrapping.
     Cycle(&'static [&'static str]),
     /// A button that opens something (`A`); the text is on the button.
@@ -223,6 +252,9 @@ pub enum Opens {
 pub enum Source {
     /// A small stored number (the index of the choice), under the row's key, in the category's file.
     Stored { default: u8 },
+    /// The language of the text: the choices are the languages offered ([`offered_languages`]), the value stored
+    /// is the language's code (`Language::store`), English by default.
+    Language,
     /// The original's text speed (`$01D0`, five speeds): the same setting as the Menu's Text entry.
     TextSpeed,
     /// The encounter rate of the Cheats: Off is "random battles off", the rest the rate x1/4 to x4.
@@ -302,9 +334,10 @@ impl RowDef {
 
     /// The number of values the row has.
     #[must_use]
-    pub const fn count(&self) -> usize {
+    pub fn count(&self) -> usize {
         match self.kind {
             Kind::Choice(labels) | Kind::Cycle(labels) => labels.len(),
+            Kind::Languages => offered_languages().len(),
             Kind::Slider { steps } => steps as usize,
             Kind::Button(_) | Kind::Info | Kind::Note(_) => 1,
             Kind::Key => 256,
@@ -317,7 +350,8 @@ impl RowDef {
         match self.kind {
             Kind::Choice(labels) | Kind::Cycle(labels) => labels.get(index).copied().unwrap_or("?"),
             Kind::Button(text) | Kind::Note(text) => text,
-            Kind::Slider { .. } | Kind::Info | Kind::Key => "",
+            // The names are the player's files' (see `offered_languages`).
+            Kind::Languages | Kind::Slider { .. } | Kind::Info | Kind::Key => "",
         }
     }
 
@@ -331,6 +365,7 @@ impl RowDef {
                 .get(self.key)
                 .and_then(|value| usize::try_from(value).ok())
                 .unwrap_or(usize::from(default)),
+            Source::Language => language_choice(values, &offered_languages()),
             Source::TextSpeed => usize::from(TEXT_SPEED_LAST - text_speed.min(TEXT_SPEED_LAST)),
             Source::Encounters => {
                 if cheats.random_battles_off() {
@@ -362,7 +397,9 @@ impl RowDef {
             Source::TextSpeed => usize::from(TEXT_SPEED_LAST - TEXT_SPEED_DEFAULT),
             Source::Encounters => ENCOUNTERS_NEUTRAL,
             Source::Preset => difficulty::NORMAL,
-            Source::View(_) | Source::Opens(_) | Source::Info | Source::None => 0,
+            Source::Language | Source::View(_) | Source::Opens(_) | Source::Info | Source::None => {
+                0
+            }
         }
     }
 
@@ -372,6 +409,11 @@ impl RowDef {
         match self.source {
             Source::Stored { .. } | Source::Key { .. } => {
                 values.set(self.key, index as i64);
+                Effect::Stored
+            }
+            Source::Language => {
+                let offered = offered_languages();
+                offered.get(index).map(|locale| locale.language).unwrap_or_default().store(values);
                 Effect::Stored
             }
             Source::TextSpeed => Effect::TextSpeed(
@@ -418,7 +460,7 @@ impl RowDef {
         match self.source {
             Source::Opens(_) | Source::Info | Source::View(_) | Source::None => Effect::None,
             // A stored row forgets its number: the file only holds what differs from the defaults.
-            Source::Stored { .. } | Source::Key { .. } => {
+            Source::Stored { .. } | Source::Key { .. } | Source::Language => {
                 values.remove(self.key);
                 Effect::Stored
             }
@@ -442,9 +484,13 @@ pub enum Effect {
     Open(Opens),
 }
 
-/// The integers the options keep, by key. Keys the game does not know are kept and written back.
+/// The integers the options keep, by key, and the few words (a language's code, see
+/// [`crate::language::Language::store`]). Keys the game does not know are kept and written back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Values(BTreeMap<String, i64>);
+pub struct Values {
+    numbers: BTreeMap<String, i64>,
+    words: BTreeMap<String, String>,
+}
 
 impl Values {
     /// An empty map: every row is at its default.
@@ -453,20 +499,35 @@ impl Values {
         Self::default()
     }
 
-    /// The value under `key`.
+    /// The value under `key`, when it is a number.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<i64> {
-        self.0.get(key).copied()
+        self.numbers.get(key).copied()
     }
 
-    /// Stores `value` under `key`.
+    /// Stores `value` under `key` (in place of a word there).
     pub fn set(&mut self, key: &str, value: i64) {
-        self.0.insert(key.to_owned(), value);
+        self.words.remove(key);
+        self.numbers.insert(key.to_owned(), value);
+    }
+
+    /// The value under `key`, when it is a word.
+    #[must_use]
+    pub fn word(&self, key: &str) -> Option<&str> {
+        self.words.get(key).map(String::as_str)
+    }
+
+    /// Stores the word `value` under `key` (in place of a number there). A word is one line without `=`, trimmed
+    /// as the file reads it back.
+    pub fn set_word(&mut self, key: &str, value: &str) {
+        self.numbers.remove(key);
+        self.words.insert(key.to_owned(), value.trim().replace(['\n', '\r', '='], ""));
     }
 
     /// Forgets the value of `key` (the row is at its default again).
     pub fn remove(&mut self, key: &str) {
-        self.0.remove(key);
+        self.numbers.remove(key);
+        self.words.remove(key);
     }
 
     /// Forgets every key that starts with `prefix`.
@@ -476,13 +537,14 @@ impl Values {
 
     /// Keeps the keys `keep` says yes to.
     pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
-        self.0.retain(|key, _| keep(key));
+        self.numbers.retain(|key, _| keep(key));
+        self.words.retain(|key, _| keep(key));
     }
 
     /// Whether nothing is stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.numbers.is_empty() && self.words.is_empty()
     }
 
     /// The keys that belong to `category`'s rows are forgotten.
@@ -500,8 +562,12 @@ const SLOTS_MAGIC: &str = "ssd-options";
 /// The version of both files. A file of a newer version is read as far as it is understood.
 pub const VERSION: u32 = 1;
 
-/// The `key=value` lines of `text` after its header line, the header being `magic` and a version number.
-fn lines<'a>(text: &'a str, magic: &str) -> Result<impl Iterator<Item = (&'a str, i64)>, String> {
+/// The `key=value` lines of `text` after its header line, the header being `magic` and a version number: the
+/// value as written (trimmed).
+fn lines<'a>(
+    text: &'a str,
+    magic: &str,
+) -> Result<impl Iterator<Item = (&'a str, &'a str)>, String> {
     let mut all = text.lines();
     let header = all.next().unwrap_or("").trim();
     let version = header
@@ -513,22 +579,26 @@ fn lines<'a>(text: &'a str, magic: &str) -> Result<impl Iterator<Item = (&'a str
     let _ = version;
     Ok(all.filter_map(|line| {
         let (key, value) = line.split_once('=')?;
-        Some((key.trim(), value.trim().parse::<i64>().ok()?))
+        Some((key.trim(), value.trim()))
     }))
 }
 
 impl Values {
-    /// The PC file: a header line, then `key=value` lines.
+    /// The PC file: a header line, then `key=value` lines, the numbers then the words.
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut text = format!("{PC_MAGIC} {VERSION}\n");
-        for (key, value) in &self.0 {
+        for (key, value) in &self.numbers {
+            let _ = writeln!(text, "{key}={value}");
+        }
+        for (key, value) in &self.words {
             let _ = writeln!(text, "{key}={value}");
         }
         text
     }
 
-    /// Reads [`Values::to_text`]. A line that is not `key=number` is skipped; a key nobody knows is kept.
+    /// Reads [`Values::to_text`]: a value that reads as a number is a number, any other a word. A line without a key
+    /// or a value is skipped; a key nobody knows is kept.
     ///
     /// # Errors
     ///
@@ -536,8 +606,12 @@ impl Values {
     pub fn from_text(text: &str) -> Result<Self, String> {
         let mut values = Self::new();
         for (key, value) in lines(text, PC_MAGIC)? {
-            if !key.is_empty() {
-                values.set(key, value);
+            if key.is_empty() || value.is_empty() {
+                continue;
+            }
+            match value.parse::<i64>() {
+                Ok(number) => values.set(key, number),
+                Err(_) => values.set_word(key, value),
             }
         }
         Ok(values)
@@ -585,7 +659,7 @@ impl SlotOptions {
         let mut text = format!("{SLOTS_MAGIC} {VERSION}\n");
         for (slot, entry) in &self.entries {
             let _ = writeln!(text, "s{slot}.sum={}", entry.checksum);
-            for (key, value) in &entry.values.0 {
+            for (key, value) in &entry.values.numbers {
                 let _ = writeln!(text, "s{slot}.{key}={value}");
             }
         }
@@ -602,6 +676,7 @@ impl SlotOptions {
         let mut sums: BTreeMap<u8, u16> = BTreeMap::new();
         let mut values: BTreeMap<u8, Values> = BTreeMap::new();
         for (key, value) in lines(text, SLOTS_MAGIC)? {
+            let Ok(value) = value.parse::<i64>() else { continue };
             let Some((slot, name)) = key.strip_prefix('s').and_then(|rest| rest.split_once('.'))
             else {
                 continue;
@@ -779,6 +854,7 @@ mod tests {
         assert_eq!(read.get("video.look"), None);
         assert_eq!(read.get("audio.music"), Some(-2));
         assert_eq!(read.get(""), None);
+        assert_eq!(read.word("video.look"), Some("x"), "a word is kept as a word");
         assert!(Values::from_text("").is_err() && Values::from_text("ssd-options 1\n").is_err());
         assert!(
             Values::from_text("ssd-settings\n").is_err()
@@ -789,6 +865,77 @@ mod tests {
             Values::new(),
             "no keys: all defaults"
         );
+    }
+
+    #[test]
+    fn the_language_row_offers_english_then_the_translations_sorted_by_code_and_stores_the_code() {
+        let _guard = LANGUAGES_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let code = |code| Language::from_code(code).unwrap();
+        let row = accessibility::ROWS_WITH_LANGUAGE
+            .iter()
+            .find(|row| row.key == Language::KEY)
+            .expect("the Language row");
+        offer_languages(Vec::new());
+        assert!(!language_row_shown());
+        assert_eq!(offered_languages(), [Locale::english()], "English alone: nothing to choose");
+        offer_languages(vec![
+            Locale { language: code("zz"), name: "Zed".to_owned() },
+            Locale::unnamed(Language::ZH_HK),
+            Locale::english(),
+            Locale { language: code("xx"), name: "Made up".to_owned() },
+            Locale { language: code("zz"), name: "Again".to_owned() },
+        ]);
+        assert!(language_row_shown());
+        let offered = offered_languages();
+        let codes: Vec<&str> = offered.iter().map(|locale| locale.language.code()).collect();
+        assert_eq!(codes, ["en", "xx", "zh-hk", "zz"], "English, then by code, each once");
+        let names: Vec<&str> = offered.iter().map(|locale| locale.name.as_str()).collect();
+        assert_eq!(names, ["English", "Made up", "繁體中文（香港）", "Zed"]);
+        assert_eq!(row.count(), 4);
+        let (mut values, mut cheats) = (Values::new(), Cheats::neutral());
+        assert_eq!(row.index(&values, &cheats, 0), 0, "nothing stored: English");
+        assert_eq!(row.set(&mut values, &mut cheats, 1), Effect::Stored);
+        assert_eq!(values.word(Language::KEY), Some("xx"), "the code, not the row's index");
+        assert_eq!(row.step(&mut values, &mut cheats, 0, 1), Effect::Stored);
+        assert_eq!(Language::from_values(&values), Some(Language::ZH_HK));
+        assert_eq!(row.index(&values, &cheats, 0), 2);
+        values.set(Language::KEY, 1);
+        assert_eq!(
+            row.index(&values, &cheats, 0),
+            2,
+            "an index of the first versions is Hong Kong"
+        );
+        offer_languages(vec![Locale { language: code("xx"), name: "Made up".to_owned() }]);
+        assert_eq!(row.index(&values, &cheats, 0), 0, "Hong Kong is not offered: English shows");
+        assert_eq!(row.reset(&mut values, &mut cheats), Effect::Stored);
+        assert_eq!(Language::from_values(&values), None, "reset: asked again");
+        offer_languages(Vec::new());
+    }
+
+    #[test]
+    fn the_pc_file_keeps_a_word_and_a_key_holds_a_number_or_a_word() {
+        let mut values = Values::new();
+        values.set("video.scale", 4);
+        values.set_word("access.language", "xx");
+        let text = values.to_text();
+        assert_eq!(text, "ssd-settings 1\nvideo.scale=4\naccess.language=xx\n");
+        assert_eq!(Values::from_text(&text).unwrap(), values);
+        values.set("access.language", 1);
+        assert_eq!(
+            (values.get("access.language"), values.word("access.language")),
+            (Some(1), None)
+        );
+        values.set_word("access.language", " x=y\n");
+        assert_eq!(
+            (values.get("access.language"), values.word("access.language")),
+            (None, Some("xy"))
+        );
+        values.remove("access.language");
+        assert_eq!(values.word("access.language"), None);
+        values.retain(|key| key != "video.scale");
+        assert!(values.is_empty());
+        let read = Values::from_text("ssd-settings 1\nkey=\n").unwrap();
+        assert!(read.is_empty(), "no value: skipped");
     }
 
     #[test]

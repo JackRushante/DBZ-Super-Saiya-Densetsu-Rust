@@ -1,7 +1,7 @@
 //! The Accessibility page (this PC): the text size, high contrast and the cursor of the HD menus, with a sample
 //! window under the rows that shows them at once. See [`crate::style::Style`] for what they do. Where the player has
 //! a translation, the page also holds the language of the game's text ([`crate::language::Language`],
-//! [`super::show_language_row`]).
+//! [`super::offer_languages`]).
 
 use super::{Kind, RowDef, Source, Values};
 use crate::cheats::Cheats;
@@ -20,8 +20,8 @@ const LANGUAGE: RowDef = RowDef {
     label: "Language",
     group: "Text",
     help: "The story's text and the HD menus in Enhanced mode, from the translation in the data folder.",
-    kind: Kind::Choice(&["English", "繁體中文"]),
-    source: Source::Stored { default: 0 },
+    kind: Kind::Languages,
+    source: Source::Language,
 };
 const CONTRAST: RowDef = RowDef {
     key: "access.contrast",

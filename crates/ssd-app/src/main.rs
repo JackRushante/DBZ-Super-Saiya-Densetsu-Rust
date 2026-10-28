@@ -180,28 +180,18 @@ struct Cli {
     /// --ui-snapshot the script's `touch` lines set what they show.
     #[arg(long)]
     touch_ui: bool,
-    /// The language of the game's text in Enhanced mode: `en`, or `zh-hk` (Traditional Chinese for Hong Kong, drawn
-    /// from `zh-hk.tsv` and a Noto Sans HK font in the data folder) [default: the Options' choice, else English]. For
-    /// this run only: the Options' choice is not changed.
-    #[arg(long, value_enum)]
-    lang: Option<LangArg>,
+    /// The language of the game's text in Enhanced mode: `en`, or the code of a translation in the data folder
+    /// (`<code>.tsv`, such as `zh-hk` for `zh-hk.tsv`, drawn with a font in its `fonts` folder) [default: the Options'
+    /// choice, else English]. For this run only: the Options' choice is not changed.
+    #[arg(long, value_parser = parse_lang)]
+    lang: Option<ssd_menus::Language>,
 }
 
-/// `--lang`: the languages of the game's text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum LangArg {
-    En,
-    #[value(name = "zh-hk")]
-    ZhHk,
-}
-
-impl From<LangArg> for ssd_menus::Language {
-    fn from(lang: LangArg) -> Self {
-        match lang {
-            LangArg::En => Self::English,
-            LangArg::ZhHk => Self::ZhHk,
-        }
-    }
+/// `--lang`: a language's code (see `ssd_menus::Language::from_code`).
+fn parse_lang(text: &str) -> Result<ssd_menus::Language, String> {
+    ssd_menus::Language::from_code(text).ok_or_else(|| {
+        format!("`{text}` is not a language's code: letters, digits and `-`, such as en or zh-hk")
+    })
 }
 
 /// `--mode`: the two modes of the game (spec §5.8).
@@ -344,7 +334,7 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
         overlays,
         image,
     });
-    lang::configure(cli.lang.map(ssd_menus::Language::from));
+    lang::configure(cli.lang);
     // Only a windowed run writes the player's files (see `persists`): set before the first read.
     paths::set_persistent(persists(&cli));
     // The chapter's fresh files: a run that persists writes them, any other keeps them in memory (see `chapter`).
@@ -687,6 +677,19 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("ssd-recompiled").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn the_language_is_any_code_and_english_is_en() {
+        assert_eq!(parse(&[]).lang, None, "the Options' choice");
+        assert_eq!(parse(&["--lang", "en"]).lang, Some(ssd_menus::Language::ENGLISH));
+        assert_eq!(parse(&["--lang", "zh-hk"]).lang, Some(ssd_menus::Language::ZH_HK));
+        let made_up = parse(&["--lang", "XX_YY"]).lang.unwrap();
+        assert_eq!(made_up.code(), "xx-yy");
+        for bad in ["", "x/y", "ui-xx"] {
+            let args = ["ssd-recompiled", "--lang", bad];
+            assert!(Cli::try_parse_from(args).is_err(), "{bad:?} is not a code");
+        }
     }
 
     #[test]

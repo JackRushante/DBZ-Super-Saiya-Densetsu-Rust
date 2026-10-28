@@ -1187,11 +1187,12 @@ mod tests {
         let mut t = touch();
         t.mode = Mode::Game;
         let ids = |t: &Touch| t.panel().unwrap().buttons.iter().map(|b| b.id).collect::<Vec<_>>();
-        ssd_menus::options::show_language_row(false);
+        ssd_menus::options::offer_languages(Vec::new());
         assert!(!ids(&t).contains(&PBtn::ChangeLanguage));
-        ssd_menus::options::show_language_row(true);
+        let hong_kong = ssd_menus::language::Locale::unnamed(ssd_menus::Language::ZH_HK);
+        ssd_menus::options::offer_languages(vec![hong_kong]);
         assert!(ids(&t).contains(&PBtn::ChangeLanguage));
-        ssd_menus::options::show_language_row(false);
+        ssd_menus::options::offer_languages(Vec::new());
     }
 
     #[test]

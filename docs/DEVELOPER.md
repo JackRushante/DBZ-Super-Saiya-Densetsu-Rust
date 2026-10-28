@@ -1377,6 +1377,18 @@ unknown tiles and lines longer than their window. The files are derived from the
 (the default is `.work/text/strings-en.tsv`, which git ignores). The tables, the codes and the WRAM bytes that identify the string on
 screen are in `docs/re/data/text-engine.md`.
 
+A translation is the player's files in the data folder (or beside the executable), named by the language's code:
+`<code>.tsv`, the game's text keyed as `text-dump` writes it (a `key` and a `zh` column), `ui-<code>.tsv`, the HD menus'
+words (optional), and a font in `fonts/`. Every `<code>.tsv` there is offered on the first launch and in Options >
+Accessibility > Language, after English and sorted by code, and `--lang <code>` picks it for a run. The file may start
+with lines that say how to present it, before its columns:
+
+    #name<TAB>the language's name in itself (without it, the code; zh-hk keeps 繁體中文（香港）)
+    #font<TAB>the start of the font file's name to take first, such as NotoSansTC (without it, Noto Sans HK, then TC)
+
+The choice is kept in `ssd.settings` as the code (`access.language=zh-hk`); the index the first versions kept is turned
+into the code the first time the file is read.
+
 ### Saves
 
 The battery save (8 KiB, `ssd.sav` in `saves\`) is three slots of party records, items, money, cards, map and

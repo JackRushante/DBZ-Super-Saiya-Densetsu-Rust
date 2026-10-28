@@ -4,7 +4,7 @@
 //! ground, one orange button, the quiet ones in dark red. Pure Rust: the page and its status in, a draw list and
 //! the buttons (with their rectangles, for touch) out. The app drives it and does the work (picker, copy, install).
 use crate::draw::{Align, Color, DrawList, Op, Rect};
-use crate::language::Language;
+use crate::language::{Language, Locale};
 use crate::layout::{ADVANCE, palette};
 use crate::nav::Key;
 use crate::screens::wrap;
@@ -38,7 +38,7 @@ pub enum Page {
     Mode,
     /// Choose hd-pack.zip, or skip.
     Pack,
-    /// The language of the game's text (Enhanced): English or Traditional Chinese (Hong Kong). Shown by the game's
+    /// The language of the game's text (Enhanced): English or a translation the player has. Shown by the game's
     /// own window before the first frame, on every platform, while no language is saved.
     Language,
 }
@@ -103,13 +103,21 @@ pub struct Setup {
     status: Status,
     /// The index of the button the keys have.
     focus: usize,
+    /// The languages the Language page offers (`options::offered_languages` when the screen is made).
+    languages: Vec<Locale>,
 }
 
 impl Setup {
     /// The screen of `page`, nothing said yet.
     #[must_use]
     pub fn new(page: Page) -> Self {
-        let mut setup = Self { page, status: Status::Idle, focus: 0 };
+        Self::with_languages(page, crate::options::offered_languages())
+    }
+
+    /// The screen of `page`, its Language page offering `languages` (English first, as the Options offer them).
+    #[must_use]
+    pub fn with_languages(page: Page, languages: Vec<Locale>) -> Self {
+        let mut setup = Self { page, status: Status::Idle, focus: 0, languages };
         setup.focus_first();
         setup
     }
@@ -246,22 +254,26 @@ impl Setup {
                     done,
                 ),
             ],
-            Page::Language => Language::ALL
-                .iter()
-                .enumerate()
-                .map(|(n, &language)| {
-                    button(
-                        24.0,
-                        112.0 + 76.0 * n as f32,
-                        330.0,
-                        56.0,
-                        language.native_name(),
-                        Command::Language(language),
-                        Look::Primary,
-                        true,
-                    )
-                })
-                .collect(),
+            Page::Language => {
+                let grid = LanguageGrid::of(self.languages.len());
+                self.languages
+                    .iter()
+                    .enumerate()
+                    .map(|(n, locale)| {
+                        let (x, y) = grid.place(n);
+                        button(
+                            x,
+                            y,
+                            grid.width,
+                            grid.height,
+                            &locale.name,
+                            Command::Language(locale.language),
+                            Look::Primary,
+                            true,
+                        )
+                    })
+                    .collect()
+            }
         }
     }
 
@@ -332,7 +344,7 @@ impl Setup {
             Page::Patch => self.patch_page(&mut list),
             Page::Mode => mode_page(&mut list),
             Page::Pack => self.pack_page(&mut list),
-            Page::Language => language_page(&mut list),
+            Page::Language => language_page(&mut list, &self.languages),
         }
         for (index, button) in self.buttons().iter().enumerate() {
             draw_button(&mut list, button, index == self.focus);
@@ -478,20 +490,66 @@ fn mode_page(list: &mut DrawList) {
     }
 }
 
-fn language_page(list: &mut DrawList) {
+/// Where the Language page's buttons go: one column of buttons as tall as the other pages' with a line beside each
+/// for up to three languages, else two columns, the rows closer together when there are more than three.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LanguageGrid {
+    columns: usize,
+    step: f32,
+    width: f32,
+    height: f32,
+}
+
+impl LanguageGrid {
+    /// The top of the first button and the bottom of the last row's, in window coordinates.
+    const TOP: f32 = 112.0;
+    const BOTTOM: f32 = 320.0;
+
+    fn of(count: usize) -> Self {
+        let columns = if count <= 3 { 1 } else { 2 };
+        let rows = count.div_ceil(columns).max(1);
+        // 76 between the tops and 56 high, as the Mode page, while three rows fit
+        let step = (Self::BOTTOM - Self::TOP + 20.0) / rows as f32;
+        let step = step.min(76.0);
+        let width = if columns == 1 { 330.0 } else { 314.0 };
+        Self { columns, step, width, height: step * 56.0 / 76.0 }
+    }
+
+    /// The top left corner of button `n`, in window coordinates (row by row).
+    fn place(self, n: usize) -> (f32, f32) {
+        let (row, column) = (n / self.columns, n % self.columns);
+        (24.0 + 338.0 * column as f32, Self::TOP + self.step * row as f32)
+    }
+}
+
+/// What the Language page says beside a language's button (one column only).
+fn language_lines(language: Language) -> [String; 2] {
+    let enhanced = "in the HD windows of Enhanced.".to_owned();
+    match language.code() {
+        "en" => ["The game's own English text.".to_owned(), String::new()],
+        "zh-hk" => ["Traditional Chinese (Hong Kong),".to_owned(), enhanced],
+        code => [format!("The translation {code}.tsv,"), enhanced],
+    }
+}
+
+fn language_page(list: &mut DrawList, languages: &[Locale]) {
     paragraph(list, 24.0, 62.0, 640.0, 15.0, "The language of the story's text. 故事文字的語言。");
-    for (top, lines) in [
-        (112.0, ["The game's own English text.", ""]),
-        (188.0, ["Traditional Chinese (Hong Kong),", "in the HD windows of Enhanced."]),
-    ] {
-        for (n, line) in lines.iter().enumerate() {
-            text(list, 372.0, top + 14.0 + 20.0 * n as f32, 14.0, line, QUIET, Align::Left);
+    let grid = LanguageGrid::of(languages.len());
+    if grid.columns == 1 {
+        for (n, locale) in languages.iter().enumerate() {
+            let (_, top) = grid.place(n);
+            for (k, line) in language_lines(locale.language).iter().enumerate() {
+                text(list, 372.0, top + 14.0 + 20.0 * k as f32, 14.0, line, QUIET, Align::Left);
+            }
         }
     }
+    // Under the last row, at 280 as with two languages.
+    let (_, last) = grid.place(languages.len().saturating_sub(1));
+    let below = (last + grid.height + 16.0).max(280.0);
     let note = "Change it later: Options > Accessibility > Language. 之後可在「選項」中更改。";
     let chars = (650.0 / (ADVANCE * 13.0)) as usize;
     for (n, line) in wrap(note, chars).iter().enumerate() {
-        text(list, 24.0, 280.0 + 19.0 * n as f32, 13.0, line, QUIET, Align::Left);
+        text(list, 24.0, below + 19.0 * n as f32, 13.0, line, QUIET, Align::Left);
     }
 }
 
@@ -653,23 +711,72 @@ mod tests {
         assert!(pick.enabled, "the HD pack can still be picked");
     }
 
+    /// English and the translation of Hong Kong, as the Options offer them with its files alone.
+    fn hong_kong() -> Vec<Locale> {
+        vec![Locale::english(), Locale::unnamed(Language::ZH_HK)]
+    }
+
     #[test]
     fn the_language_page_offers_each_language_by_keys_and_by_touch() {
-        let mut setup = Setup::new(Page::Language);
+        let mut setup = Setup::with_languages(Page::Language, hong_kong());
         let shown = texts(&setup.scene());
         assert!(shown.iter().any(|t| t == "English"));
         assert!(shown.iter().any(|t| t == "繁體中文（香港）"));
-        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(Language::English)));
+        assert!(shown.iter().any(|t| t == "Traditional Chinese (Hong Kong),"));
+        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(Language::ENGLISH)));
         assert_eq!(setup.key(Key::Down), None);
-        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(Language::ZhHk)));
+        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(Language::ZH_HK)));
         assert_eq!(setup.key(Key::Down), None, "wraps to the first");
-        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(Language::English)));
+        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(Language::ENGLISH)));
         assert_eq!(setup.key(Key::Cancel), None, "there is no going back: a language is needed");
         let second = setup.buttons()[1].rect;
         assert_eq!(
             setup.hit(second.x + 10.0, second.y + 10.0),
-            Some(Command::Language(Language::ZhHk))
+            Some(Command::Language(Language::ZH_HK))
         );
+        let rects: Vec<Rect> = setup.buttons().iter().map(|button| button.rect).collect();
+        assert_eq!(
+            rects,
+            [inner(24.0, 112.0, 330.0, 56.0), inner(24.0, 188.0, 330.0, 56.0)],
+            "the two buttons where they always were"
+        );
+    }
+
+    #[test]
+    fn the_language_page_names_each_language_offered_and_fits_any_number_of_them() {
+        let made_up = |code: &str, name: &str| Locale {
+            language: Language::from_code(code).unwrap(),
+            name: name.to_owned(),
+        };
+        let mut languages = hong_kong();
+        languages.insert(1, made_up("xx", "Made-up language"));
+        let mut setup = Setup::with_languages(Page::Language, languages.clone());
+        let shown = texts(&setup.scene());
+        assert!(shown.iter().any(|t| t == "Made-up language"));
+        assert!(shown.iter().any(|t| t == "The translation xx.tsv,"));
+        assert_eq!(setup.key(Key::Down), None);
+        let xx = Language::from_code("xx").unwrap();
+        assert_eq!(setup.key(Key::Confirm), Some(Command::Language(xx)));
+        for count in 3..=12 {
+            while languages.len() < count {
+                let code = format!("q{}", languages.len());
+                languages.push(made_up(&code, &code));
+            }
+            let setup = Setup::with_languages(Page::Language, languages.clone());
+            let buttons = setup.buttons();
+            assert_eq!(buttons.len(), count);
+            for (n, button) in buttons.iter().enumerate() {
+                let rect = button.rect;
+                assert!(rect.y + rect.h <= WINDOW.y + WINDOW.h - 6.0, "{count}: button {n} fits");
+                assert!(rect.x + rect.w <= WINDOW.x + WINDOW.w - 6.0, "{count}: button {n} fits");
+                assert!(rect.h >= 20.0, "{count}: button {n} can be read");
+                for other in &buttons[n + 1..] {
+                    let apart = other.rect.y >= rect.y + rect.h || other.rect.x >= rect.x + rect.w;
+                    assert!(apart, "{count}: button {n} is apart from the next ones");
+                }
+                assert_eq!(button.command, Command::Language(languages[n].language));
+            }
+        }
     }
 
     #[test]
