@@ -2039,3 +2039,103 @@ fn a_pose_variant_that_is_missing_or_of_another_size_is_not_drawn_and_the_object
         assert_ne!(pixel(&drawn, 38 * 4, 48 * 4), [255, 0, 0], "{variant:?}");
     }
 }
+
+/// A pose variant of the object `art` for `when`, margin 2 game pixels, for the 16 x 16 fighter of [`fighter_log`]: a picture
+/// of 80 x 80 art pixels of `rgb`, written to `dir` as `<name>.png`.
+fn flat_variant(
+    dir: &tempfile::TempDir,
+    name: &str,
+    art: &str,
+    when: ssd_mod::pose::Condition,
+    rgb: [u8; 3],
+) -> PoseVariant {
+    let path = dir.path().join(format!("art/{name}.png"));
+    write_png(&path, 80, 80, |_, _| [rgb[0], rgb[1], rgb[2], 255]);
+    PoseVariant { art: art.to_owned(), when, margin: 2, file: path.to_string_lossy().into_owned() }
+}
+
+#[test]
+fn an_always_variant_is_drawn_over_its_box_and_its_margin_in_every_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let (frame, pose) = fighter_log(40, 50);
+    let mut pack = variant_pack(&dir, &pose, None);
+    let always = ssd_mod::pose::Condition::Always;
+    Arc::get_mut(&mut pack).unwrap().variants =
+        vec![flat_variant(&dir, "always", "battle-x-000", always, [255, 0, 0])];
+    let mut renderer = Renderer::new();
+    let plain = renderer.render_hd(&frame, options(4)).unwrap();
+    renderer.set_art(Some(pack));
+    let red = [255, 0, 0];
+    // No condition of the game holds, and none is needed
+    for conditions in [Conditions::default(), Conditions::of_work_ram(&wram_with_kaioken(true, 0))]
+    {
+        renderer.set_conditions(conditions);
+        let drawn = renderer.render_hd(&frame, options(4)).unwrap();
+        assert_eq!(pixel(&drawn, 41 * 4 + 1, 51 * 4 + 1), red, "the sprite's pixels");
+        assert_eq!(pixel(&drawn, 38 * 4, 48 * 4), red, "the margin's first pixel");
+        assert_eq!(pixel(&drawn, 57 * 4 + 3, 67 * 4 + 3), red, "the margin's last pixel");
+        assert_ne!(pixel(&drawn, 37 * 4 + 3, 50 * 4), red, "nothing past the margin on the left");
+        assert_ne!(pixel(&drawn, 40 * 4, 47 * 4 + 3), red, "nor above it");
+        assert_eq!(pixel(&drawn, 5, 5), pixel(&plain, 5, 5), "away from the pose nothing changes");
+    }
+}
+
+#[test]
+fn the_kaioken_variant_of_an_object_is_drawn_while_it_holds_and_its_always_variant_otherwise() {
+    let dir = tempfile::tempdir().unwrap();
+    let (frame, pose) = fighter_log(40, 50);
+    let mut pack = variant_pack(&dir, &pose, None);
+    let (always, kaioken) = (ssd_mod::pose::Condition::Always, ssd_mod::pose::Condition::Kaioken);
+    // The `always` variant first: the order of the variants does not decide
+    Arc::get_mut(&mut pack).unwrap().variants = vec![
+        flat_variant(&dir, "always", "battle-x-000", always, [255, 0, 0]),
+        flat_variant(&dir, "kaioken", "battle-x-000", kaioken, [255, 255, 0]),
+    ];
+    let mut renderer = Renderer::new();
+    renderer.set_art(Some(pack));
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
+    let off = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&off, 38 * 4, 48 * 4), [255, 0, 0], "the Kaioken off: `always`");
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(true, 0)));
+    let on = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&on, 38 * 4, 48 * 4), [255, 255, 0], "the Kaioken on: `kaioken`");
+}
+
+#[test]
+fn an_always_variant_of_super_saiyan_goku_is_drawn_for_the_pixels_he_shares_only_while_he_is_in_the_party()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    // As in the test of the shared pixels above: the normal Goku's art is blue and has the most poses, Super Saiyan Goku's
+    // red; the variant of `battle-goku-ssj-000` is yellow.
+    let (frame, pose) = fighter_log(40, 50);
+    write_png(&dir.path().join("art/normal.png"), 64, 64, |_, _| [0, 0, 255, 255]);
+    write_png(&dir.path().join("art/ssj.png"), 64, 64, |_, _| [255, 0, 0, 255]);
+    write_png(&dir.path().join("art/other.png"), 64, 64, |_, _| [0, 255, 0, 255]);
+    let goku = |id: &str, key: u64, art: &str| Object {
+        id: id.to_owned(),
+        key,
+        ..object(&pose, art, false)
+    };
+    let objects = vec![
+        goku("battle-goku-000", pose.key, "art/normal.png"),
+        goku("battle-goku-001", pose.key ^ 1, "art/other.png"),
+        goku("battle-goku-ssj-000", pose.key, "art/ssj.png"),
+    ];
+    let mut pack = pack_of(dir.path(), Vec::new(), ArtIndex::new(Vec::new(), objects));
+    let always = ssd_mod::pose::Condition::Always;
+    Arc::get_mut(&mut pack).unwrap().variants =
+        vec![flat_variant(&dir, "hair", "battle-goku-ssj-000", always, [255, 255, 0])];
+    let mut renderer = Renderer::new();
+    renderer.set_art(Some(pack));
+    let (x, y) = (41 * 4 + 1, 51 * 4 + 1);
+    // The normal Goku (before the transformation): his own art, and no margin
+    renderer.set_conditions(Conditions::default());
+    let normal = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&normal, x, y), [0, 0, 255], "the normal Goku: the normal art");
+    assert_ne!(pixel(&normal, 38 * 4, 48 * 4), [255, 255, 0], "no variant past the sprite");
+    // Super Saiyan Goku in the party: the pose is drawn from his art, so his variant is drawn, margin included
+    renderer.set_conditions(Conditions::of_work_ram(&wram_with_kaioken(false, 0)));
+    let ssj = renderer.render_hd(&frame, options(4)).unwrap();
+    assert_eq!(pixel(&ssj, x, y), [255, 255, 0], "Super Saiyan Goku: the variant");
+    assert_eq!(pixel(&ssj, 38 * 4, 48 * 4), [255, 255, 0], "and its margin");
+}

@@ -1,0 +1,173 @@
+# Super Saiyan Goku HD: the Super Saiyan Goku's 27 battle poses redrawn with the hair standing up (not canon; Enhanced mode only, off unless the pack is enabled).
+[pack]
+id = "ssj.goku.hd"
+name = "Super Saiyan Goku HD"
+version = "1.0.0"
+game = "A8CF4F2A"
+description = "Redraws Super Saiyan Goku in battle: golden hair in tall sharp spikes that rise past the box of the original sprite."
+
+# Each picture is the pose redrawn, grown by 76 art pixels on each side so the hair can rise past the original box (docs/mods/art.md,
+# "Pose variants"). The pictures are made locally from the installed HD art and are never tracked; without them the pack loads and
+# the poses are drawn as they are.
+
+[[pose_variant]]
+art = "battle-goku-ssj-000"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-000.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-001"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-001.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-002"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-002.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-003"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-003.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-004"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-004.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-005"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-005.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-006"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-006.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-007"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-007.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-008"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-008.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-009"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-009.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-010"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-010.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-011"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-011.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-012"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-012.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-013"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-013.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-014"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-014.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-015"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-015.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-016"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-016.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-017"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-017.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-018"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-018.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-019"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-019.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-020"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-020.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-021"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-021.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-022"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-022.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-023"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-023.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-024"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-024.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-025"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-025.png"
+margin = 76
+
+[[pose_variant]]
+art = "battle-goku-ssj-026"
+when = "always"
+file = "art/hd/variants/battle-goku-ssj-026.png"
+margin = 76

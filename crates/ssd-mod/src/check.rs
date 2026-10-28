@@ -38,6 +38,7 @@ pub fn check_set(rom: &[u8], packs: &[Pack], options: CheckOptions) -> Result<()
     let rom_crc32 = ssd_rom::crc32(rom);
     let mut first_by_id: BTreeMap<&str, usize> = BTreeMap::new();
     let mut slots: BTreeMap<(Family, u16), &str> = BTreeMap::new();
+    let mut variants: BTreeMap<(&str, &str), &str> = BTreeMap::new();
     let mut all_chapters: Vec<(String, String, chapter::Chapter)> = Vec::new();
     for (index, pack) in packs.iter().enumerate() {
         let info = &pack.manifest.pack;
@@ -303,6 +304,22 @@ pub fn check_set(rom: &[u8], packs: &[Pack], options: CheckOptions) -> Result<()
                 }
             }
         }
+        // The pose variants: an object's variant for one condition is a slot, so two packs that give one collide like two data
+        // entries (a pack's own variants are checked when it is read).
+        for entry in &pack.manifest.pose_variant {
+            if let Some(first) = variants.insert((entry.art.as_str(), entry.when.as_str()), id)
+                && first != id
+            {
+                errors.push(PackError::Art {
+                    pack: id.to_owned(),
+                    file: entry.file.clone(),
+                    detail: format!(
+                        "the pack `{first}` gives the object `{}` a variant for `{}` already",
+                        entry.art, entry.when
+                    ),
+                });
+            }
+        }
     }
     let maps: Vec<u8> =
         packs.iter().flat_map(|pack| pack.manifest.map.iter().map(|map| map.id)).collect();
@@ -533,6 +550,30 @@ mod tests {
             matches!(errors.as_slice(), [PackError::DuplicateEntry { id: 5, .. }]),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn two_packs_that_give_one_object_a_variant_for_one_condition_collide() {
+        let with_variant = |id: &str, when: &str| {
+            let mut one = pack(id, "1.0.0", &[]);
+            one.manifest.pose_variant.push(crate::PoseVariantEntry {
+                art: "battle-goku-ssj-000".into(),
+                when: when.into(),
+                file: format!("art/hd/variants/{when}.png"),
+                margin: 24,
+            });
+            one
+        };
+        let packs = [with_variant("first.pack", "always"), with_variant("second.pack", "always")];
+        let errors = refused(&rom(), &packs, CheckOptions::default());
+        assert!(
+            matches!(errors.as_slice(), [PackError::Art { pack, detail, .. }]
+                if pack == "second.pack" && detail.contains("`first.pack`") && detail.contains("`always`")),
+            "{errors:?}"
+        );
+        // One pack's `always` and another's `kaioken` are two slots: the Kaioken's is drawn while it holds
+        let packs = [with_variant("first.pack", "always"), with_variant("second.pack", "kaioken")];
+        assert_eq!(check_set(&rom(), &packs, CheckOptions::default()), Ok(()));
     }
 
     /// A tables file of one new unit, `id` (its stats are the ones of the tests of `crate::tables`).

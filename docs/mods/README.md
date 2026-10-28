@@ -75,5 +75,5 @@ Each part has its own page. Its file is named in the manifest by a `[[...]]` ent
 - `maps.md`: the maps, made in Tiled, and their collision;
 - `triggers.md`: the triggers that start a pack's scenes, and the talk of the pack's maps;
 - `text.md`: the messages and names;
-- `art.md`: the HD art of the pack's faces and maps;
+- `art.md`: the HD art of the pack's faces and maps, and its pose variants;
 - `state.md`: the mod state a pack keeps in a save: the extended flags and the wide battle power.

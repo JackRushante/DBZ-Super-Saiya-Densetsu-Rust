@@ -122,7 +122,8 @@ struct Found {
 
 /// The translations in `places`, sorted by code: each `<code>.tsv` whose name is a language's code (lower case, as
 /// `--lang` writes it) and whose text is a translation (its columns after its header), the first place's file for a
-/// code. `en.tsv` (English is built in) and the menus' `ui-*.tsv` are not languages.
+/// code. `en.tsv` (English is built in) and the menus' `ui-*.tsv` are not languages. A translation under another name
+/// is not one either, and the log says which name it should have ([`suggested_name`]).
 fn found_in(places: &[PathBuf]) -> Vec<Found> {
     let mut found: Vec<Found> = Vec::new();
     for dir in places {
@@ -130,13 +131,16 @@ fn found_in(places: &[PathBuf]) -> Vec<Found> {
         let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
         paths.sort();
         for path in paths {
-            let Some(code) = path.file_name().and_then(|name| name.to_str()?.strip_suffix(".tsv"))
-            else {
-                continue;
-            };
+            let Some(file) = path.file_name().and_then(|name| name.to_str()) else { continue };
+            let Some(code) = file.strip_suffix(".tsv") else { continue };
             let Some(language) =
                 Language::from_code(code).filter(|language| language.code() == code)
             else {
+                if let Some(name) = suggested_name(file)
+                    && let Ok(Some(_)) = Header::read(&path)
+                {
+                    log::info!("{file} is not a language file name: rename it {name}");
+                }
                 continue;
             };
             if language.is_english() || found.iter().any(|known| known.locale.language == language)
@@ -160,6 +164,28 @@ fn found_in(places: &[PathBuf]) -> Vec<Found> {
     }
     found.sort_by_key(|known| known.locale.language);
     found
+}
+
+/// The name a `.tsv` should have when its own name is not a language's code as `--lang` writes it (lower case letters,
+/// digits and `-`): `zh_TW.tsv` should be `zh-tw.tsv`. `None` for a name that is one already, for English (built in),
+/// for the menus' `ui-*` files, and for a name no code can be made of.
+fn suggested_name(file: &str) -> Option<String> {
+    let stem = file.strip_suffix(".tsv")?;
+    let language = Language::from_code(&code_of(stem))?;
+    (!language.is_english() && language.code() != stem).then(|| format!("{}.tsv", language.code()))
+}
+
+/// `stem` made into a code: lower case, each run of other characters (`_`, `.`, a space) one `-`, no `-` at either end.
+fn code_of(stem: &str) -> String {
+    let mut code = String::new();
+    for c in stem.chars().map(|c| c.to_ascii_lowercase()) {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            code.push(c);
+        } else if !code.ends_with('-') {
+            code.push('-');
+        }
+    }
+    code.trim_matches('-').to_owned()
 }
 
 /// The translations of `places` the player can be offered: those with a font to draw them ([`find_font`]).
@@ -491,5 +517,31 @@ mod tests {
         let xx = Language::from_code("xx").unwrap();
         assert_eq!(font_of(&places, xx), Some(fonts.join("NotoSansTC-Regular.otf")));
         assert_eq!(font_of(&places, Language::ZH_HK), Some(fonts.join("NotoSansHK-Medium.otf")));
+    }
+
+    #[test]
+    fn a_translation_under_a_name_that_is_no_code_is_named_with_the_code_it_should_have() {
+        assert_eq!(suggested_name("zh_TW.tsv").as_deref(), Some("zh-tw.tsv"));
+        assert_eq!(suggested_name("ZH-HK.tsv").as_deref(), Some("zh-hk.tsv"));
+        assert_eq!(suggested_name("xx_yy.tsv").as_deref(), Some("xx-yy.tsv"));
+        assert_eq!(suggested_name("zh.hk.tsv").as_deref(), Some("zh-hk.tsv"));
+        assert_eq!(suggested_name("zh-tw.tsv"), None, "a code already");
+        assert_eq!(suggested_name("en.tsv"), None, "English is built in");
+        assert_eq!(suggested_name("ui-zh-tw.tsv"), None, "the menus' words");
+        assert_eq!(suggested_name("ui_zh_tw.tsv"), None, "the menus' words, misnamed");
+        assert_eq!(suggested_name("123.tsv"), None, "no letter, so no code");
+        assert_eq!(suggested_name("zh_TW.txt"), None, "not a table");
+    }
+
+    #[test]
+    fn a_misnamed_translation_is_not_offered_beside_the_file_named_as_its_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let places = [dir.path().to_path_buf()];
+        std::fs::write(dir.path().join("zh_TW.tsv"), made_up("#name\tMisnamed\n")).unwrap();
+        std::fs::write(dir.path().join("zh-tw.tsv"), made_up("#name\tRight\n")).unwrap();
+        let found = found_in(&places);
+        let codes: Vec<&str> = found.iter().map(|known| known.locale.language.code()).collect();
+        assert_eq!(codes, ["zh-tw"], "the file named as a code is the language");
+        assert_eq!(found[0].locale.name, "Right");
     }
 }

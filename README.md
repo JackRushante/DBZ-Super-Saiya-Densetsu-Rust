@@ -236,7 +236,8 @@ Download from the [Releases](../../releases) page:
   `ssd-recompiled.exe` without unpacking it**.
 - **`dbz-ssd-recompiled-android.apk`** (optional): the game for Android phones and tablets (64-bit ARM, Android 8 or
   later), see [Android](#android).
-- **`ssj-kaioken.ssdpack`** and **`free-progression.ssdpack`** (optional): the first two mods, see [Mods](#mods).
+- **`ssj-goku-hd.ssdpack`**, **`ssj-kaioken.ssdpack`** and **`free-progression.ssdpack`** (optional): three mods, see
+  [Mods](#mods).
 
 ### 4. First launch
 
@@ -270,15 +271,27 @@ A mod (a *data pack*) changes the Remastered game and never Classic. Download it
 **Options > Gameplay > Data packs** and choose **Install a pack...**: pick the file (on Android the system's file picker,
 on Windows the file dialog) and the game copies it into its `mods` folder. Switch the mod on (A) and apply (X); the game
 restarts at the title. On Windows you can also put the file in `%LOCALAPPDATA%\dbz-ssd-recompiled\mods\` yourself.
-Two mods come with this release:
+Three mods come with this release:
 
+- **Super Saiyan Goku HD**: the Super Saiyan Goku's 27 battle poses redrawn with his hair standing up, past the box of
+  the original sprite (which keeps it flat). For the HD pack.
 - **Super Saiyan Kaioken** (not canon): Goku can use the Kaioken while he is a Super Saiyan, up to x10; each move made in
-  both costs 10% of his maximum HP. With his Super Saiyan poses redrawn with both auras.
+  both costs 10% of his maximum HP. With his Super Saiyan poses redrawn with the Kaioken's aura, on the art of Super Saiyan
+  Goku HD (switch both on).
 - **Free progression** (**under test**): the story moves on events, never on levels or battle power, and every enemy
   follows your party's level, with a difficulty of `easy`, `normal` (the default) or `hard` (the `difficulty` line of the
   `pack.toml` inside the `.ssdpack`, which is a zip). The balance of the scaled bosses has not been played end to end yet: save often.
 
 Making your own: the format of a pack is in [`docs/mods/`](docs/mods/README.md).
+
+### Translations
+
+The game's text and the HD menus can be translated by players, without any change to the game. A translation is a
+`<code>.tsv` file of the game's text, and optionally a `ui-<code>.tsv` of the HD menus' words, in the data folder
+(`%LOCALAPPDATA%\dbz-ssd-recompiled\`) or beside the executable; a `#name` line gives the name the game shows and a `#font`
+line the font to draw it with (put the font in `fonts\`). The first launch and **Options > Accessibility > Language** list
+English and every translation found. No translation is included: the format and the tool that lists the game's text are in
+[`docs/DEVELOPER.md`](docs/DEVELOPER.md) (`text-dump`).
 
 ## Building from source
 

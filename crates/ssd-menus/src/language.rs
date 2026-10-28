@@ -81,7 +81,7 @@ impl Language {
 
     /// The language of a code: `en` (or `english`) is English, any other code is a translation's. Any case, `_` for
     /// `-`. `None` for a code that cannot name a file: empty, longer than 32, with a character other than a letter,
-    /// a digit or `-`, or starting with `ui-` (the HD menus' files).
+    /// a digit or `-`, without a letter (`123` would read back as an index), or starting with `ui-` (the HD menus' files).
     #[must_use]
     pub fn from_code(code: &str) -> Option<Self> {
         let code = code.trim().to_ascii_lowercase().replace('_', "-");
@@ -92,6 +92,8 @@ impl Language {
         if code.is_empty()
             || code.len() > CODE_MAX
             || !code.chars().all(fine)
+            // A code of digits alone would be stored as a number and read back as an index of the first versions.
+            || !code.chars().any(|c| c.is_ascii_lowercase())
             || code.starts_with("ui-")
         {
             return None;
@@ -200,7 +202,7 @@ mod tests {
         assert_eq!(made_up.code(), "xx-yy");
         assert_eq!(Language::from_code("xx-yy"), Some(made_up));
         assert!(!made_up.is_english() && Language::ENGLISH.is_english());
-        for bad in ["", "x/y", "x.y", "ui-xx", "x y", "é", &"x".repeat(33)] {
+        for bad in ["", "x/y", "x.y", "ui-xx", "x y", "é", "123", "-", "-5", &"x".repeat(33)] {
             assert_eq!(Language::from_code(bad), None, "{bad:?}");
         }
         assert_eq!(Language::default(), Language::ENGLISH);

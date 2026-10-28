@@ -2,8 +2,8 @@
 
 A data pack can give its own pictures in three places: the HD art of a pack map (what the Enhanced picture draws over
 the map), the picture of a face (the portrait the game shows for a face index, which the game draws in its own
-small size), and the picture of a battle pose while a condition holds (a pose variant). All are optional. Without them
-a pack draws the game's own art.
+small size), and the picture of a battle pose, in every frame or while a condition holds (a pose variant). All are
+optional. Without them a pack draws the game's own art.
 
 Packs are data: nothing here is code. The Enhanced picture reads the HD files at 4x the game's size. The game itself
 reads only the SNES art, which is derived from the HD picture of a face when the pack is built.
@@ -56,38 +56,61 @@ file = "art/hd/variants/battle-goku-ssj-000.png"
 margin = 24
 ```
 
-A variant replaces the picture of one battle pose while a condition holds. `art` is the name of the object's picture in the
-HD art (its file's stem). `when` is a condition the game has, by name: `kaioken` is the Kaioken of Super Saiyan Goku, on when
-`$0C36` bit 7 is set and a party record has unit `$3B` (`docs/re/data/kaioken-bp.md`, section 4). `file` is a PNG: the
-object's own picture, grown by `margin` pixels on each side. The pixels are four to a game pixel, so `margin` is a multiple of
-4 (a whole game pixel), up to 96.
+A variant replaces the picture of one battle pose, in every frame or while a condition holds. `art` is the name of the object's
+picture in the HD art (its file's stem). `when` is a condition, by name:
+
+- `always`: every frame. The variant is drawn whenever the renderer draws the object, so a pack can give any battle pose bigger
+  art (for Super Saiyan Goku, hair that stands up past the box of the original sprite).
+- `kaioken`: the Kaioken of Super Saiyan Goku, on when `$0C36` bit 7 is set and a party record has unit `$3B`
+  (`docs/re/data/kaioken-bp.md`, section 4).
+
+`file` is a PNG: the object's own picture, grown by `margin` pixels on each side. The pixels are four to a game pixel, so
+`margin` is a multiple of 4 (a whole game pixel), up to 96.
 
 - While the condition holds, the variant is drawn over the box of the object's picture grown by the margin: the margin shows
   past the sprites it grows from. Its colours are its own (the palette of the pose does not recolour it); the screen's fade
-  still dims it. A pixel that another object shows is not drawn over.
-- The variant is drawn only where the renderer draws the object it names. When another unit has the same pixels (for Goku,
-  `battle-goku-000` for `battle-goku-ssj-000`), the renderer draws the unit with the most poses in the index, recoloured to
-  the pose's palette, and the variant of the other unit does not apply. While Super Saiyan Goku is in the party (a party
-  record has unit `$3B`), the renderer draws the Super Saiyan art for those pixels, where the index has it.
+  still dims it. A pixel that another object shows is not drawn over. These rules are the same for every condition.
+- An object has at most one variant for each condition: one `always` and one `kaioken` variant of the same art are allowed.
+  When both hold, the specific condition wins: the `kaioken` variant is drawn while the Kaioken is on, the `always` variant
+  in every other frame. The order of the entries does not change this.
+- The variant is drawn only where the renderer draws the object it names. When several units have the same pixels, the
+  renderer draws the pose from one unit's art, and only that unit's variants apply: for Goku, the rule below; for the others
+  (the three Saibamen), the unit with the most poses in the index, recoloured to the pose's palette.
+- Goku: Super Saiyan Goku's poses `battle-goku-ssj-000` to `007` have the same pixels as the normal Goku's `battle-goku-000`
+  to `007`. While a party record has unit `$3B` (Super Saiyan Goku), those pixels are drawn from `battle-goku-ssj-NNN`, so
+  its variants (an `always` one included) are drawn, margin included. Without that unit in the party (the normal Goku,
+  before the transformation), they are drawn from `battle-goku-NNN`, whatever the number of poses of each set, and no
+  variant of `battle-goku-ssj-NNN` is drawn; a variant of `battle-goku-NNN` is drawn then, and not for Super Saiyan Goku.
 - A file that is missing, or whose size is not the object's picture plus the margin, is not drawn (the log says why): the object
   is drawn as it is. The pack loads without its pictures.
 - A pack is refused at load when a variant names no condition the game has, a margin that is not a whole game pixel or is
   over 96, or a second variant of one object for one condition.
-- Only the Enhanced picture draws variants; the Classic game is not changed. A `.ssdpack` zip's variants are not drawn (as the
-  zip's HD art is not), so unzip the pack into a folder.
+- An object's variant for one condition is a slot, as a data entry is: two packs that give one object a variant for the same
+  condition are refused together, and the set names both packs. A variant for `always` in one pack and one for `kaioken`
+  of the same object in another are two slots: both are drawn, with the precedence above.
+- Only the Enhanced picture draws variants; the Classic game is not changed. A `.ssdpack` zip's variants are drawn from its
+  files unpacked into the cache (see "Limits").
 
 The example pack `examples/ssj-kaioken` gives the 27 poses of the Super Saiyan Goku, `battle-goku-ssj-000` to `026`. Their
-pictures are the poses redrawn with the Kaioken's aura, made locally from the installed HD art: `xtask kaioken-art
+pictures are the poses redrawn with the Kaioken's aura (since 1.1.0 on the art of `examples/ssj-goku-hd`, with a
+margin of 96 to hold the hair and the aura), made locally from the installed HD art: `xtask kaioken-art
 examples/ssj-kaioken` copies them from `.work/m10/kk-art/variants/`. They are derived from the game, so the pack's `art/`
 folder is not tracked. The variants of ids 000 to 007 are drawn, while their condition holds, for the poses that have the same
 pixels as `battle-goku-000` to `007`: the Super Saiyan art draws those poses while Super Saiyan Goku is in the party. The
 variants of the other ids apply where the battle draws them under their own names: `battle-goku-ssj-020` is drawn so in the
-`secret-ssj-frieza` replay (frame 8375, with the Kaioken on).
+`secret-ssj-frieza` replay (frame 8375, the power-up). That replay never turns the Kaioken on: to see a Kaioken variant there,
+set it with `--wram` (`$0C36` bit 7, and unit `$3B` in a party record where the frame has none).
+
+The example pack `examples/ssj-goku-hd` gives the same 27 poses an `always` variant: the Super Saiyan Goku redrawn with golden hair
+standing up in tall spikes, which rise past the box of the original sprite (`margin = 76`, the hair of the tallest pose rises 75
+art pixels). Its pictures are made locally from the installed HD art, one picture per pose, each the pose's own picture grown by the
+margin with the body where the installed art draws it, so the pose does not move; the pack's `art/` folder is not tracked.
 
 ## Limits
 
-- The HD art of a pack given as a `.ssdpack` zip is not drawn: unzip the pack into a folder to draw it. The SNES art
-  (faces and everything else) works from the zip.
+- The HD art of a pack given as a `.ssdpack` zip (map tiles, face pictures, pose variants) is unpacked once into
+  `cache\mods\` of the data folder, one folder per pack id, version and zip size, and the Enhanced picture reads it from
+  there. The SNES art (faces and everything else) is read from the zip.
 - A face is derived when the image is built. A picture that is not a PNG, or not 128 x 128 pixels, is refused with the
   pack and file named.
 - Two packs cannot give the same face index (the same rule as every other slot).

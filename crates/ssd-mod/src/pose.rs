@@ -1,5 +1,5 @@
 //! The pose variants of a pack (M10, batch 6b): `[[pose_variant]]`, a picture drawn in place of the art of a battle pose while a
-//! condition of the game holds.
+//! condition of the game holds, or in every frame (`always`).
 //!
 //! ```toml
 //! [[pose_variant]]                  # one per variant: the object's art it replaces, and when
@@ -11,6 +11,9 @@
 //!
 //! A variant is HD only: the Enhanced picture draws it (`ssd-hd`), over the box of the object's picture grown by the margin.
 //! The pack holds no code. Its file is not needed by the checks: a variant whose file is missing is not drawn.
+//!
+//! An object may have one variant for each condition. When more than one holds, a specific condition (`kaioken`) is drawn
+//! before `always` (see [`drawn`]).
 
 use crate::manifest::PoseVariantEntry;
 
@@ -20,10 +23,14 @@ pub enum Condition {
     /// The Kaioken of the Super Saiyan Goku is on: `$0C36` bit 7 is set, and a party record (`$0B00 + 0x20 * k`, for the
     /// nine records) has unit `$3B` at `+01` (`docs/re/data/kaioken-bp.md`, section 4).
     Kaioken,
+    /// Every frame: the variant is drawn whenever the renderer draws its object, unless a variant of the same object for a
+    /// specific condition holds.
+    Always,
 }
 
 /// The names of the conditions, each with its condition.
-const NAMES: &[(&str, Condition)] = &[("kaioken", Condition::Kaioken)];
+const NAMES: &[(&str, Condition)] =
+    &[("kaioken", Condition::Kaioken), ("always", Condition::Always)];
 
 impl Condition {
     /// The condition a manifest names by `name`, or `None` for a name the game does not have.
@@ -31,6 +38,26 @@ impl Condition {
     pub fn from_name(name: &str) -> Option<Self> {
         NAMES.iter().find(|(known, _)| *known == name).map(|&(_, condition)| condition)
     }
+
+    /// Whether the condition is a state of the game, not [`Condition::Always`].
+    #[must_use]
+    pub fn is_specific(self) -> bool {
+        self != Self::Always
+    }
+}
+
+/// Of the conditions of one object's variants that hold, in the order of the variants, the position of the one drawn: the
+/// first with a specific condition, else the first `always`. `None` when none holds.
+#[must_use]
+pub fn drawn(holding: impl IntoIterator<Item = Condition>) -> Option<usize> {
+    let mut fallback = None;
+    for (at, condition) in holding.into_iter().enumerate() {
+        if condition.is_specific() {
+            return Some(at);
+        }
+        fallback = fallback.or(Some(at));
+    }
+    fallback
 }
 
 /// The largest margin, in art pixels on each side of the object's picture (24 game pixels).
@@ -79,7 +106,33 @@ mod tests {
         assert_eq!(Condition::from_name("Kaioken"), None, "the names are lower case");
         assert_eq!(refusal(&entry("kaioken", 24)), None);
         let refused = refusal(&entry("bloom", 24)).unwrap();
-        assert!(refused.contains("`bloom`") && refused.contains("kaioken"), "{refused}");
+        assert!(
+            refused.contains("`bloom`")
+                && refused.contains("kaioken")
+                && refused.contains("always"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn always_is_a_condition_with_the_rules_of_the_others() {
+        assert_eq!(Condition::from_name("always"), Some(Condition::Always));
+        assert_eq!(Condition::from_name("Always"), None, "the names are lower case");
+        assert!(!Condition::Always.is_specific() && Condition::Kaioken.is_specific());
+        assert_eq!(refusal(&entry("always", 24)), None);
+        assert!(refusal(&entry("always", 23)).is_some(), "the margin's rule");
+        assert!(refusal(&entry("always", MAX_MARGIN + 4)).is_some());
+    }
+
+    #[test]
+    fn a_specific_condition_is_drawn_before_always_and_always_otherwise() {
+        use Condition::{Always, Kaioken};
+        assert_eq!(drawn([]), None, "nothing holds");
+        assert_eq!(drawn([Always]), Some(0), "always alone");
+        assert_eq!(drawn([Kaioken]), Some(0));
+        assert_eq!(drawn([Always, Kaioken]), Some(1), "the Kaioken wins while it holds");
+        assert_eq!(drawn([Kaioken, Always]), Some(0), "whatever the order of the variants");
+        assert_eq!(drawn([Always, Always]), Some(0), "the first of two of the same kind");
     }
 
     #[test]

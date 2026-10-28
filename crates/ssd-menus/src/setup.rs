@@ -5,7 +5,7 @@
 //! the buttons (with their rectangles, for touch) out. The app drives it and does the work (picker, copy, install).
 use crate::draw::{Align, Color, DrawList, Op, Rect};
 use crate::language::{Language, Locale};
-use crate::layout::{ADVANCE, palette};
+use crate::layout::{ADVANCE, fit, palette};
 use crate::nav::Key;
 use crate::screens::wrap;
 
@@ -322,9 +322,17 @@ impl Setup {
             .map(|b| b.command)
     }
 
-    /// The draw list of the screen, in [`WIDTH`] x [`HEIGHT`].
+    /// The draw list of the screen, in [`WIDTH`] x [`HEIGHT`], its labels measured in Share Tech Mono ([`fit`]).
     #[must_use]
     pub fn scene(&self) -> DrawList {
+        self.scene_with(&fit)
+    }
+
+    /// The draw list of the screen, in [`WIDTH`] x [`HEIGHT`], with each button's label cut to the room its button
+    /// leaves it: `cut(text, size, room)` gives the text as it is drawn ([`fit`] measures it in Share Tech Mono, the
+    /// backend measures it in the font it draws with).
+    #[must_use]
+    pub fn scene_with(&self, cut: &dyn Fn(&str, f32, f32) -> String) -> DrawList {
         let mut list = DrawList::new();
         ground(&mut list);
         window(&mut list);
@@ -347,7 +355,7 @@ impl Setup {
             Page::Language => language_page(&mut list, &self.languages),
         }
         for (index, button) in self.buttons().iter().enumerate() {
-            draw_button(&mut list, button, index == self.focus);
+            draw_button(&mut list, button, index == self.focus, cut);
         }
         list
     }
@@ -606,7 +614,13 @@ fn bar(list: &mut DrawList, percent: Option<u8>) {
     }
 }
 
-fn draw_button(list: &mut DrawList, button: &Button, focused: bool) {
+/// Draws `button`; its label is cut by `cut` to the room the button leaves for it (see [`Setup::scene_with`]).
+fn draw_button(
+    list: &mut DrawList,
+    button: &Button,
+    focused: bool,
+    cut: &dyn Fn(&str, f32, f32) -> String,
+) {
     let (fill, line, ink) = if button.enabled {
         match button.look {
             Look::Primary | Look::Plain => (palette::ORANGE, palette::DARK_RED, BUTTON_INK),
@@ -622,19 +636,24 @@ fn draw_button(list: &mut DrawList, button: &Button, focused: bool) {
     list.fill(rect, line);
     list.fill(rect.grow(-2.0), fill);
     let size = if button.look == Look::Primary { 19.0 } else { 17.0 };
+    // A label is cut to the room from where its text starts to 12 px short of the button's right edge. A primary
+    // button's text starts 40 px in (the cursor is in front of it), the others' 12 px in.
     match button.look {
         Look::Primary => {
             if button.enabled {
                 list.push(Op::Cursor { x: rect.x + 12.0, y: rect.middle_y() - 9.0 });
             }
-            list.text(rect.x + 40.0, rect.middle_y(), &button.label, size, ink, Align::Left);
+            let label = cut(&button.label, size, rect.w - 52.0);
+            list.text(rect.x + 40.0, rect.middle_y(), &label, size, ink, Align::Left);
         }
         Look::Quiet => {
-            list.text(rect.x + 12.0, rect.middle_y(), &button.label, size, ink, Align::Left);
+            let label = cut(&button.label, size, rect.w - 24.0);
+            list.text(rect.x + 12.0, rect.middle_y(), &label, size, ink, Align::Left);
         }
         Look::Plain => {
+            let label = cut(&button.label, size, rect.w - 24.0);
             let x = rect.x + rect.w / 2.0;
-            list.text(x, rect.middle_y(), &button.label, size, ink, Align::Centre);
+            list.text(x, rect.middle_y(), &label, size, ink, Align::Centre);
         }
     }
 }
@@ -777,6 +796,33 @@ mod tests {
                 assert_eq!(button.command, Command::Language(languages[n].language));
             }
         }
+    }
+
+    #[test]
+    fn a_language_name_too_long_for_its_button_is_cut_with_an_ellipsis_to_the_room_it_has() {
+        let made_up = |code: &str, name: &str| Locale {
+            language: Language::from_code(code).unwrap(),
+            name: name.to_owned(),
+        };
+        // Four languages: the two-column layout, whose buttons are 314 px wide.
+        let long = "Made-up language whose name does not stop at the edge of its button";
+        assert!(long.chars().count() >= 49);
+        let languages = vec![
+            Locale::english(),
+            made_up("xx", long),
+            made_up("yy", "Short"),
+            made_up("zz", "Also short"),
+        ];
+        let setup = Setup::with_languages(Page::Language, languages);
+        let room = setup.buttons()[1].rect.w - 52.0;
+        let shown = texts(&setup.scene());
+        let cut = shown.iter().find(|t| t.starts_with("Made-up")).expect("the name is drawn");
+        assert!(cut.ends_with('\u{2026}'), "{cut}");
+        assert!(crate::layout::text_width(cut, 19.0) <= room, "{cut} fits its room");
+        assert!(long.starts_with(cut.trim_end_matches('\u{2026}')), "{cut}: the start is kept");
+        assert!(cut.chars().count() > 20, "as much of the name as fits is kept: {cut}");
+        assert!(shown.iter().any(|t| t == "Short"), "a short name is unchanged");
+        assert!(shown.iter().any(|t| t == "English"));
     }
 
     #[test]

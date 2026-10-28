@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.8 (2026-10-28)
+
+### Features
+
+- Super Saiyan Goku HD, a new mod (`ssj-goku-hd.ssdpack`): the Super Saiyan Goku's 27 battle poses redrawn with his hair
+  standing up, past the box of the original sprite, which kept it flat and cut it at the top. Super Saiyan Kaioken 1.1.0
+  redraws its 27 Kaioken poses on that art (switch both on).
+- Language packs (#12, contributed by @lming888 in #13): any `<code>.tsv` in the data folder is a language, with an
+  optional `ui-<code>.tsv` for the HD menus and a `#name` / `#font` header; the first-launch picker and Options >
+  Accessibility > Language list English and every language found. The choice is kept as its code (the old Hong Kong
+  setting is carried over once). Enhanced only.
+- Pose variants in every frame: a data pack's `[[pose_variant]]` takes `when = "always"`, drawn whenever the battle draws
+  that pose, so a pack can replace any battle pose with bigger art. A `kaioken` variant of the same art wins while the
+  Kaioken is on. Enhanced only.
+
+### Fixes
+
+- A long language name no longer runs past its button: the first-launch picker cuts it with an ellipsis to the room its
+  button has, measured in the font it is drawn with (a Chinese name by its own glyphs), and the Options' Language row cuts
+  the name shown by its cycler when the names do not fit side by side. A translation under a file name that is not a
+  language code (`zh_TW.tsv`) is said in the log with the name it should have (`zh-tw.tsv`). Enhanced only.
+
 ## 0.3.7 (2026-10-27)
 
 ### Features

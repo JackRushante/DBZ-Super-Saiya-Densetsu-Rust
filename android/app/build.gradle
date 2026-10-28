@@ -10,8 +10,8 @@ android {
         applicationId 'io.github.dbz_ssd_recompiled'
         minSdk 26
         targetSdk 34
-        versionCode 10
-        versionName '0.3.7'
+        versionCode 11
+        versionName '0.3.8'
     }
 
     // A release build is signed when SSD_KEYSTORE_PROPERTIES names a properties file (storeFile, storePassword,

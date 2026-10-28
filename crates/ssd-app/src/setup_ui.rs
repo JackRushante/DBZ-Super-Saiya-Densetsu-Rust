@@ -2,6 +2,7 @@
 //! buttons. The screens are drawn in their own logical space and fitted to the window, centred.
 
 use crate::hd::{Art, Fit, paint_fit};
+use crate::theme;
 use ssd_menus::setup::{self, Command, Setup};
 
 /// Paints `setup` over the whole of `ui`, and returns the command of the button that was tapped or clicked.
@@ -9,7 +10,13 @@ pub fn show(ui: &mut egui::Ui, setup: &Setup, art: &mut Art) -> Option<Command> 
     let area = ui.available_rect_before_wrap();
     let fit = Fit::sized(area, setup::WIDTH, setup::HEIGHT);
     ui.painter().rect_filled(area, 0.0, egui::Color32::from_rgb(0x0B, 0x07, 0x06));
-    paint_fit(ui, area, &fit, &setup.scene(), art);
+    // A label is cut in the font it is drawn with (the game's, with the player's Chinese font after its own), so a
+    // Chinese name is measured by its real glyphs, not by the Latin face's.
+    let painter = ui.painter();
+    let scene = setup.scene_with(&|text, size, room| {
+        theme::fit_text(painter, text, &theme::game(size * fit.scale), room * fit.scale)
+    });
+    paint_fit(ui, area, &fit, &scene, art);
     let mut chosen = None;
     for (index, button) in setup.buttons().iter().enumerate() {
         if !button.enabled {

@@ -1067,6 +1067,26 @@ factor = 4
     }
 
     #[test]
+    fn an_always_variant_is_listed_beside_the_kaioken_one_of_its_object() {
+        let rom = rom();
+        let mut pack = pack("example.room", "1.0.0", &[]);
+        for when in ["always", "kaioken"] {
+            pack.manifest.pose_variant.push(crate::PoseVariantEntry {
+                art: "battle-goku-ssj-000".into(),
+                when: when.into(),
+                file: format!("art/hd/variants/{when}.png"),
+                margin: 8,
+            });
+        }
+        let packs = [pack];
+        let options = crate::CheckOptions { allow_rom_bytes: true };
+        assert!(crate::check_set(&rom, &packs, options).is_ok());
+        let image = build(&rom, &packs).unwrap();
+        let conditions: Vec<_> = image.pose_variants.iter().map(|variant| variant.when).collect();
+        assert_eq!(conditions, [crate::pose::Condition::Always, crate::pose::Condition::Kaioken]);
+    }
+
+    #[test]
     fn a_map_that_is_not_valid_stops_the_build_with_its_part() {
         let rom = rom();
         let refused = build(&rom, &[map_pack("example.room", "1.0.0", 63, &tiny_map())]);

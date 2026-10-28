@@ -424,6 +424,7 @@ impl Conditions {
     fn holds(self, condition: ssd_mod::pose::Condition) -> bool {
         match condition {
             ssd_mod::pose::Condition::Kaioken => self.kaioken,
+            ssd_mod::pose::Condition::Always => true,
         }
     }
 }
@@ -1555,15 +1556,20 @@ impl ArtState {
     }
 
     /// The picture of the pose variant the pack gives the object `at` while the conditions of the frame hold, and its margin
-    /// in game pixels. `None` when no variant holds for the object, or its picture is not drawn (see
+    /// in game pixels: of the object's variants that hold, one for a specific condition before an `always` one
+    /// ([`ssd_mod::pose::drawn`]). `None` when no variant holds for the object, or its picture is not drawn (see
     /// [`ArtState::load_variant`]): the object is then drawn as it is.
     fn pose_variant(&mut self, at: u32) -> Option<(Arc<Image>, i32)> {
         let pack = Arc::clone(&self.pack);
         let object = &pack.art.objects()[real(at)];
-        let index = pack
-            .variants
-            .iter()
-            .position(|variant| variant.art == object.id && self.conditions.holds(variant.when))?;
+        let holding: Vec<usize> = (0..pack.variants.len())
+            .filter(|&index| {
+                let variant = &pack.variants[index];
+                variant.art == object.id && self.conditions.holds(variant.when)
+            })
+            .collect();
+        let index =
+            holding[ssd_mod::pose::drawn(holding.iter().map(|&index| pack.variants[index].when))?];
         let variant = &pack.variants[index];
         let mirrored = at & MIRROR != 0;
         let margin = variant.margin as i32;

@@ -60,7 +60,7 @@ pub struct Manifest {
 pub struct PoseVariantEntry {
     /// The name of the object's art the variant replaces: its file's stem in the HD art (`battle-goku-ssj-000`).
     pub art: String,
-    /// The condition the game has, by name (`kaioken`).
+    /// The condition the game has, by name (`kaioken`, or `always`).
     pub when: String,
     /// The picture, relative to the pack: the object's picture grown by `margin` on each side.
     pub file: String,
@@ -381,6 +381,9 @@ file = "data/script-082.bin"
                 margin: 24,
             }]
         );
+        let always: Manifest =
+            toml::from_str(&text.replace("when = \"kaioken\"", "when = \"always\"")).unwrap();
+        assert_eq!(always.pose_variant[0].when, "always");
         let misspelt = text.replace("margin =", "margn =");
         assert!(
             toml::from_str::<Manifest>(&misspelt).is_err(),

@@ -1162,6 +1162,16 @@ fn cycler(list: &mut DrawList, value: &str, right: f32, middle: f32, least: f32)
     list.push(Op::Arrow { x: arrow + inset, y, left: false });
 }
 
+/// `text`, cut with an ellipsis to the characters a cycler's value `room` pixels wide holds: a cycler gives its value
+/// [`ROW_TEXT`] px per character ([`cycler`]), as wide as a Chinese character is.
+fn cycler_value(text: &str, room: f32) -> String {
+    let chars = (room / ROW_TEXT).floor().max(0.0) as usize;
+    if text.chars().count() <= chars {
+        return text.to_owned();
+    }
+    text.chars().take(chars.saturating_sub(1)).chain(std::iter::once('\u{2026}')).collect()
+}
+
 /// The bar of a slider row (the approved design): an arrow, the bar (a 200 x 16 px well with a white edge and a
 /// dark red line around it, filled orange in proportion), the value in percent and an arrow, ending at `right`.
 fn slider(list: &mut DrawList, chosen: usize, steps: u8, right: f32, middle: f32) {
@@ -1672,8 +1682,10 @@ pub(crate) fn option_row_list(
                 if choices_width(&names) <= room {
                     choices(list, &names, chosen, right, middle, palette::BLACK);
                 } else {
+                    // The value is cut to the room the arrows leave beside the label.
                     let name = names.get(chosen).map_or("", String::as_str);
-                    cycler(list, name, right, middle, OPT_CYCLER_VALUE);
+                    let value = cycler_value(name, room - 2.0 * ARROW_BOX - 2.0 * CYCLER_GAP);
+                    cycler(list, &value, right, middle, OPT_CYCLER_VALUE);
                 }
             }
 
@@ -2203,6 +2215,55 @@ mod tests {
                     assert!((0.0..=WIDTH).contains(&x) && (0.0..=HEIGHT).contains(&y), "{text}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_language_name_too_long_for_the_row_is_cut_inside_the_cycler_beside_its_label() {
+        let _guard = crate::options::LANGUAGES_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let made_up = |code: &str, name: &str| crate::language::Locale {
+            language: crate::language::Language::from_code(code).unwrap(),
+            name: name.to_owned(),
+        };
+        let long = "Made-up language whose name does not stop at the edge of its row at all";
+        crate::options::offer_languages(vec![made_up("xx", long), made_up("yy", "Short")]);
+        let row = Category::Accessibility
+            .rows()
+            .iter()
+            .position(|row| row.key == crate::language::Language::KEY)
+            .expect("the Language row");
+        // English, then the translations by code: the long name is the first of them.
+        let label = Category::Accessibility.rows()[row].label;
+        let mut view = options_view(Category::Accessibility, row, None);
+        view.values[row] = 1;
+        let list = options_screen(&view);
+        let value = list
+            .texts()
+            .map(|(_, _, text)| text)
+            .find(|text| text.starts_with("Made-up"))
+            .expect("the name is drawn")
+            .to_owned();
+        crate::options::offer_languages(Vec::new());
+        assert!(value.ends_with('\u{2026}'), "{value}");
+        // The cycler's two arrows lie beside the label and inside the row, as its value is cut to fit.
+        let left = OPT_ROWS_X + FRAME + OPT_SIDE;
+        let right = OPT_ROWS_X + OPT_ROWS_WIDTH - FRAME - OPT_SIDE;
+        let label_end = left + 26.0 + text_width(label, OPT_LABEL_TEXT) + 16.0;
+        let inset = (ARROW_BOX - CURSOR_WIDTH) / 2.0;
+        let arrows: Vec<f32> = list
+            .ops()
+            .iter()
+            .filter_map(|op| match op {
+                Op::Arrow { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(arrows.len(), 2, "the cycler's arrows");
+        for x in arrows {
+            assert!(x - inset >= label_end, "{x}: beside the label");
+            assert!(x - inset + ARROW_BOX <= right + 0.01, "{x}: inside the row");
         }
     }
 

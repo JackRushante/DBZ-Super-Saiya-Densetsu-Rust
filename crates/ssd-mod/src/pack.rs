@@ -327,7 +327,8 @@ impl Pack {
     }
 
     /// Checks the pose variants of the pack, so that one that is refused is refused at load (see [`crate::pose`]): each
-    /// names a condition the game has and a margin of whole game pixels, and an object's variant for a condition is given once.
+    /// names a condition the game has and a margin of whole game pixels, and an object's variant for a condition is given once
+    /// (an object may have one `always` variant and one for each specific condition).
     fn check_pose_variants(&self) -> Result<(), PackError> {
         let refused = |file: &str, detail: String| PackError::Art {
             pack: self.manifest.pack.id.clone(),
@@ -475,9 +476,47 @@ mod tests {
         original.write_zip(&zip_path).unwrap();
         assert_eq!(Pack::open(&zip_path).unwrap(), original);
         // Two variants of one object for one condition
-        original.manifest.pose_variant = vec![entry.clone(), entry];
+        original.manifest.pose_variant = vec![entry.clone(), entry.clone()];
         original.write_zip(&zip_path).unwrap();
         assert!(Pack::open(&zip_path).is_err(), "a second variant for the same condition");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_object_may_have_one_always_variant_and_one_kaioken_variant() {
+        let dir = scratch("pose-variant-always");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut original = pack("example.room", "1.0.0", &[]);
+        let variant = |when: &str, file: &str| crate::PoseVariantEntry {
+            art: "battle-goku-ssj-000".into(),
+            when: when.into(),
+            file: file.into(),
+            margin: 24,
+        };
+        let always = variant("always", "art/hd/variants/always.png");
+        let kaioken = variant("kaioken", "art/hd/variants/kaioken.png");
+        original.manifest.pose_variant = vec![always.clone(), kaioken];
+        let zip_path = dir.join("example.ssdpack");
+        original.write_zip(&zip_path).unwrap();
+        assert_eq!(Pack::open(&zip_path).unwrap(), original, "one for each condition");
+        // A second `always` variant of the object, with another picture
+        original.manifest.pose_variant.push(variant("always", "art/hd/variants/other.png"));
+        original.write_zip(&zip_path).unwrap();
+        let refused = Pack::open(&zip_path).unwrap_err();
+        assert!(
+            matches!(&refused, PackError::Art { detail, .. } if detail.contains("for `always` already")),
+            "{refused:?}"
+        );
+        // Another object's `always` variant is its own
+        original.manifest.pose_variant = vec![
+            always,
+            crate::PoseVariantEntry {
+                art: "battle-goku-ssj-001".into(),
+                ..variant("always", "b.png")
+            },
+        ];
+        original.write_zip(&zip_path).unwrap();
+        assert!(Pack::open(&zip_path).is_ok(), "two objects, one `always` each");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
