@@ -283,7 +283,8 @@ Four mods come with this release:
   follows your party's level: random battles are made for 3 levels below it and story and boss battles for 3 levels above
   it (the `random_offset` and `boss_offset` lines of the `pack.toml` inside the `.ssdpack`, which is a zip, from -10 to 10;
   a pack with a `difficulty` of `easy`, `normal` or `hard` instead still works). The balance of the scaled bosses has not been
-  played end to end yet: save often.
+  played end to end yet: save often. Its 0.4.0 also raises the level cap to 999 (the party's EXP, BP, HP and KI go on past the game's
+  table on the same curves, and the Super Saiyan Goku follows his level).
 - **Party-wide boosts** (not canon): in a battle, the Guru object (BP +50 percent), Porunga's second wish (+1 level) and
   the Launch object (when it works: it makes the fighter's attacks favourites) work on the whole party instead of the one
   fighter chosen. The object is used up once, and each fighter gets what the game gives a single use (its level cap, its

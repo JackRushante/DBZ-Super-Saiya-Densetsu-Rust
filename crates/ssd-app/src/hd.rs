@@ -129,6 +129,8 @@ pub struct Hd {
     editor_wanted: bool,
     /// Whether the editor may open: not while a replay plays or records (the cartridge save is the replay's).
     editor_allowed: bool,
+    /// The level cap of the enabled packs (see [`Hd::set_level_cap`]).
+    level_cap: Option<u16>,
 }
 
 /// The game mode the boot code sets before it calls the title routine, which runs inside the boot code until the player starts
@@ -225,6 +227,7 @@ impl Hd {
             editor: None,
             editor_wanted: false,
             editor_allowed: true,
+            level_cap: None,
         };
         hd.set_language(language);
         Ok(hd)
@@ -358,7 +361,10 @@ impl Hd {
                 self.driver.sidecar(),
                 self.driver.marked_slots(sram),
             ) {
-                Ok(editor) => self.editor = Some(editor),
+                Ok(mut editor) => {
+                    editor.set_progression(self.level_cap, self.driver.mods_sidecar());
+                    self.editor = Some(editor);
+                }
                 Err(error) => log::warn!("the save editor does not open: {error}"),
             }
         }
@@ -389,6 +395,13 @@ impl Hd {
     /// Whether the save editor may open now: not while a replay plays or records.
     pub fn allow_editor(&mut self, allowed: bool) {
         self.editor_allowed = allowed;
+    }
+
+    /// Tells the HD screens which level cap the enabled packs give (`ssd_game::mods::level_cap_in` on the machine's image): the
+    /// Status screen reaches the levels past the game's own with it, and the save editor, when it opens, sets them.
+    pub fn set_level_cap(&mut self, cap: Option<u16>) {
+        self.level_cap = cap;
+        self.driver.set_level_cap(cap);
     }
 
     /// The write the editor made, once: the host stores `commit.sram` in the machine's cartridge save (the editor's copy is

@@ -7,18 +7,16 @@
 //! card's symbol).
 
 use super::presses::{Button, Step, Until};
-use super::{
-    MenuProbe, RECORD_CHARACTER, RECORD_FLAGS, RECORD_IN_USE, RECORD_LENGTH, RECORD_LEVEL, RECORDS,
-};
+use super::{MenuProbe, RECORD_CHARACTER, RECORD_FLAGS, RECORD_IN_USE, RECORD_LENGTH, RECORDS};
 use crate::data as d;
 use ssd_menus::screens::{StatusMember, StatusView, Technique};
 
+/// The characters the level cap extends: those with a level table of the game's (Goku to Vegeta).
+const EXTENDED_IDS: u8 = 8;
 /// The record's unit id: the key of the unit tables.
 const RECORD_UNIT: u32 = 0x01;
 /// The record's "PLA." figure.
 const RECORD_PLA: u32 = 0x0E;
-/// The record's EXP, 24 bits.
-const RECORD_EXP: u32 = 0x0F;
 /// The record's class.
 const RECORD_CLASS: u32 = 0x1B;
 
@@ -32,6 +30,16 @@ impl MenuProbe<'_> {
             self.status_records().filter_map(|at| self.status_member(at)).collect();
         let cursor = cursor.min(members.len().saturating_sub(1));
         StatusView { members, cursor }
+    }
+
+    /// The EXP the level after `level` begins at, past the game's own rows: only for a character the pack's level cap extends
+    /// (`StatusLabels::level_cap`) that has not reached it.
+    fn extended_start(&self, character: u8, level: u16) -> Option<u64> {
+        let cap = self.labels.status.level_cap?;
+        if character >= EXTENDED_IDS || level >= cap {
+            return None;
+        }
+        self.labels.growth.get(usize::from(character))?.stats_at(level + 1, true).map(|row| row.exp)
     }
 
     /// The members Status lists.
@@ -51,17 +59,18 @@ impl MenuProbe<'_> {
     fn status_member(&self, record: u32) -> Option<StatusMember> {
         let character = self.byte(record + RECORD_CHARACTER)?;
         let member = self.member(character)?;
-        let exp = u32::from(self.word(record + RECORD_EXP)?)
-            | u32::from(self.byte(record + RECORD_EXP + 2)?) << 16;
-        let level = self.byte(record + RECORD_LEVEL)?;
+        let exp = self.exp_of(character, record)?;
+        let level = member.level;
         let tables = &self.labels.status;
         // The EXP at which the next level begins (the row of the level after this one), as the original's "EX LV UP." counts
-        // it; a character with no level table, or at the top of it, has none to reach.
+        // it; a character with no level table, or at the top of it, has none to reach. Past the game's own rows, with the
+        // pack's level cap, the extension's row of the next level.
         let next = tables
             .levels
             .get(usize::from(character))
             .and_then(|rows| rows.get(usize::from(level)))
-            .copied();
+            .map(|&start| u64::from(start))
+            .or_else(|| self.extended_start(character, level));
         let unit = self.byte(record + RECORD_UNIT)?;
         let techniques = tables
             .techniques
@@ -167,7 +176,7 @@ mod tests {
         ];
         Labels {
             characters,
-            status: StatusLabels { commands, techniques, levels },
+            status: StatusLabels { commands, techniques, levels, level_cap: None },
             ..Labels::default()
         }
     }
@@ -235,5 +244,65 @@ mod tests {
         let ram = self::ram(&[record(1, 0x09, 40, 2)], &[1]);
         let view = MenuProbe::new(&ram, &gap).status_view(0);
         assert_eq!(view.members[0].techniques.len(), 1, "command $F0 is not in the table");
+    }
+
+    /// Goku with a 47-row table (BP `100 n`, HP `10 n`, KI `2 n`, EXP `10 n^2`), the extension's anchor, and the pack's cap.
+    fn wide_labels(cap: Option<u16>) -> Labels {
+        let mut labels = labels();
+        labels.status.level_cap = cap;
+        let rows = 1..=47_u32;
+        labels.growth = vec![ssd_menus::Growth {
+            bp: rows.clone().map(|n| n * 100).collect(),
+            max_hp: rows.clone().map(|n| (n * 10) as u16).collect(),
+            max_ki: rows.clone().map(|n| (n * 2) as u16).collect(),
+            exp: rows.clone().map(|n| n * n * 10).collect(),
+            byte_0e: rows.map(|_| 1).collect(),
+            cap: 47,
+            min: 1,
+        }];
+        labels
+    }
+
+    /// The mod state of a run with Goku (the first record) at wide level `level`, EXP high byte `exp_high` and BP high part
+    /// `bp_high`.
+    fn with_wide_state(ram: &mut [u8], level: u16, exp_high: u8, bp_high: u16) {
+        use crate::mods::state::{
+            BLOCK, LEVELS_MARK, LEVELS_MARKER_AT, MARKER, MARKER_AT, exp_high_at, wide_level_at,
+        };
+        let at = |address: u32| (address - 0x7E_0000) as usize;
+        ram[at(LEVELS_MARKER_AT)..at(LEVELS_MARKER_AT) + 4].copy_from_slice(&LEVELS_MARK);
+        ram[at(wide_level_at(0))..at(wide_level_at(0)) + 2].copy_from_slice(&level.to_le_bytes());
+        ram[at(exp_high_at(0))] = exp_high;
+        ram[at(MARKER_AT)..at(MARKER_AT) + 4].copy_from_slice(&MARKER);
+        ram[at(BLOCK)..at(BLOCK) + 2].copy_from_slice(&bp_high.to_le_bytes());
+    }
+
+    #[test]
+    fn a_wide_level_the_exp_high_byte_and_the_wide_bp_are_read_from_the_mod_state() {
+        let labels = wide_labels(Some(999));
+        let mut ram = ram(&[record(0, 0x00, 99, 1)], &[0]);
+        with_wide_state(&mut ram, 150, 0, 2);
+        let goku = &MenuProbe::new(&ram, &labels).status_view(0).members[0];
+        assert_eq!(goku.level, 150, "the wide level, the record's byte being 99");
+        assert_eq!(goku.bp, (2 << 24) + 42673, "the wide BP's high part");
+        assert_eq!(goku.exp, 65400);
+        // The level after 150 begins at 22090 * (156 / 52)^2 = 198 810 EXP: the extension's row.
+        assert_eq!(goku.to_next, 198_810 - 65_400);
+        with_wide_state(&mut ram, 999, 1, 0x1D);
+        let top = &MenuProbe::new(&ram, &labels).status_view(0).members[0];
+        assert_eq!((top.level, top.exp, top.bp >> 24), (999, (1 << 24) + 65400, 0x1D));
+        assert_eq!(top.to_next, 0, "the cap is the last level");
+        // A record whose byte is not the wide level's saturation is read as the byte says, and without the pack the Status
+        // screen has no level to reach past the game's table.
+        let mut low = ram.clone();
+        low[0x0B02] = 60;
+        assert_eq!(MenuProbe::new(&low, &labels).status_view(0).members[0].level, 60);
+        let plain = wide_labels(None);
+        with_wide_state(&mut ram, 150, 0, 0);
+        assert_eq!(MenuProbe::new(&ram, &plain).status_view(0).members[0].to_next, 0);
+        // No mod state: the record's byte and its 24 bits.
+        let bare = self::ram(&[record(0, 0x00, 99, 1)], &[0]);
+        let goku = &MenuProbe::new(&bare, &labels).status_view(0).members[0];
+        assert_eq!((goku.level, goku.bp, goku.exp), (99, 42673, 65400));
     }
 }

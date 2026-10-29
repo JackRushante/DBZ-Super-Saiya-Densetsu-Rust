@@ -566,7 +566,7 @@ pub fn chapter_save(args: &[&str], rom: &[u8]) -> anyhow::Result<String> {
         sidecar.store(
             0,
             checksum,
-            ssd_menus::mods_state::ModState { flags: Some(flagx), high: None },
+            ssd_menus::mods_state::ModState { flags: Some(flagx), ..Default::default() },
         );
         let path = out.join("ssd.mods");
         anyhow::ensure!(

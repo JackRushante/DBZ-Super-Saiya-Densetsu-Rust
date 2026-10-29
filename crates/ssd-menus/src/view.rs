@@ -3,6 +3,7 @@
 //! [`crate::screens`] draw it; nothing here reads the game or the ROM.
 
 use crate::cheats::{Cheats, Row};
+use crate::levels::Anchor;
 use crate::nav::ModsAsk;
 use crate::options::Category;
 
@@ -49,7 +50,61 @@ pub struct AtLevel {
     pub byte_0e: u8,
 }
 
+/// The values of a record at a level that may be past the game's own table ([`Growth::stats_at`]): the totals are wider than
+/// a record's fields (the BP is 40 bits and the EXP 32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    pub bp: u64,
+    pub max_hp: u16,
+    pub max_ki: u16,
+    pub exp: u64,
+    pub byte_0e: u8,
+}
+
 impl Growth {
+    /// The curve past the character's cap (see [`crate::levels`]), from the values of its last row; `None` for a character with
+    /// no level table.
+    #[must_use]
+    pub fn anchor(&self) -> Option<Anchor> {
+        let last = usize::from(self.cap).min(self.bp.len()).checked_sub(1)?;
+        Some(Anchor {
+            level: u16::from(self.cap),
+            bp: u64::from(*self.bp.get(last)?),
+            ki: u64::from(*self.max_ki.get(last)?),
+            max_hp: u64::from(*self.max_hp.get(last)?),
+            exp: u64::from(*self.exp.get(last)?),
+            byte_0e: u64::from(*self.byte_0e.get(last)?),
+        })
+    }
+
+    /// The values at `level`: the game's own row up to the character's cap, and with `extended` the extension of
+    /// [`crate::levels`] beyond it. `None` for a level the table has no row for (and not extended).
+    #[must_use]
+    pub fn stats_at(&self, level: u16, extended: bool) -> Option<Stats> {
+        if let Some(row) =
+            u8::try_from(level).ok().filter(|&l| l <= self.cap).and_then(|l| self.at(l))
+        {
+            return Some(Stats {
+                bp: u64::from(row.bp),
+                max_hp: row.max_hp,
+                max_ki: row.max_ki,
+                exp: u64::from(row.exp),
+                byte_0e: row.byte_0e,
+            });
+        }
+        if !extended || level <= u16::from(self.cap) {
+            return None;
+        }
+        let point = self.anchor()?.at(level);
+        Some(Stats {
+            bp: point.bp,
+            max_hp: point.max_hp,
+            max_ki: u16::try_from(point.ki).unwrap_or(u16::MAX),
+            exp: point.exp,
+            byte_0e: point.byte_0e,
+        })
+    }
+
     /// Whether the character has a level table.
     #[must_use]
     pub fn has_levels(&self) -> bool {
@@ -81,6 +136,9 @@ pub struct StatusLabels {
     pub techniques: Vec<Vec<u8>>,
     /// One entry per character id: the EXP at which each level begins, from level 1.
     pub levels: Vec<Vec<u32>>,
+    /// The pack's `level_cap` (above the game's 48) when a pack with it is enabled: the levels past the game's own table, which
+    /// [`Growth::stats_at`] extends, are reached up to it. Set by the application from the image the game runs.
+    pub level_cap: Option<u16>,
 }
 
 /// A command (a technique) of the unit tables: its name and its KI cost.
@@ -428,13 +486,14 @@ pub struct MenuView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     pub name: String,
-    pub level: u8,
+    /// The real level: the wide level of the mod state above 99 (`ssd_game::mods::state`), else the record's byte.
+    pub level: u16,
     pub hp: u16,
     pub max_hp: u16,
     pub ki: u16,
     pub max_ki: u16,
-    /// The battle power (24 bits in the record).
-    pub bp: u32,
+    /// The battle power: 24 bits in the record and the wide BP's high part of the mod state (40 bits).
+    pub bp: u64,
     /// The object whose picture is the member's face.
     pub face: Option<u8>,
 }

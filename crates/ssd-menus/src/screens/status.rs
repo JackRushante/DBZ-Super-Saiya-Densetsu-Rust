@@ -33,18 +33,18 @@ pub struct Technique {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusMember {
     pub name: String,
-    pub level: u8,
+    pub level: u16,
     pub hp: u16,
     pub max_hp: u16,
     pub ki: u16,
     pub max_ki: u16,
     /// The battle power.
-    pub bp: u32,
+    pub bp: u64,
     /// The figure the original labels "PLA." (the record's byte `+0E`): what it counts is not decoded yet.
     pub pla: u8,
-    pub exp: u32,
+    pub exp: u64,
     /// The EXP still needed for the next level (the original's "EX LV UP.").
-    pub to_next: u32,
+    pub to_next: u64,
     /// The class: the symbol number of the kanji under the portrait (see [`CLASSES`]).
     pub class: u8,
     /// The face index of the portrait.

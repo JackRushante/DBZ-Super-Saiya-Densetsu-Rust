@@ -4,13 +4,15 @@
 [pack]
 id = "free.progression"
 name = "Free Progression"
-version = "0.3.0"
+version = "0.4.0"
 game = "A8CF4F2A"
-description = "The story moves on events only: the forced fight with Raditz comes after the cave, random battles never stop on a level, the recruits wait for the Saiyans, Goku turns Super Saiyan in the last fight whatever his level, and he lands at the Ginyu squad's last fight. Every enemy follows the party's level: random battles 3 levels below it, story and boss battles 3 levels above it."
+description = "The story moves on events only: the forced fight with Raditz comes after the cave, random battles never stop on a level, the recruits wait for the Saiyans, Goku turns Super Saiyan in the last fight whatever his level, and he lands at the Ginyu squad's last fight. Every enemy follows the party's level: random battles 3 levels below it, story and boss battles 3 levels above it. The level cap is 999: the party's growth goes on past the game's table on its own curves, and Goku's Super Saiyan form follows his level."
 
 [[feature]]
 name = "free_progression"
 ginyu_arrival = 3
+# The level cap: every character grows to level 999 on the game's own curves (docs/mods/free-progression.md, "The level cap").
+level_cap = 999
 
 # The enemies: random battles are made for the party's level - 3 and every other battle (the story, the bosses) for its level + 3.
 # examples/enemy-scaling is the same feature alone, with a difficulty (enable one of the two packs, not both).

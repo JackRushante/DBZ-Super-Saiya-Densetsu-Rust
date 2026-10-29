@@ -35,11 +35,17 @@
 //!   already); else it sets bit 4 of his flags and bit 3 of his byte `+18`, and shows the mark. The hook is at `01:E0A0`, the
 //!   `RTL` after the success. The extra members get the same test, then the same step. There is nothing to animate.
 //!
+//! **The pick.** The question "on whom" of the original is pointless once the effect reaches the party, so two more hooks, at the use
+//! step of the Item screen (`01:8C63`, for Guru and Launch) and at the effect's run of every frame (`01:DBDC`), publish for the HD
+//! driver (`ssd_game::menu`, `pick_steps`) the row of the first member the original accepts the object for, by the same refusals
+//! (`state::PICK`). They read the level cap table instead of running its check, since they run every frame of the effect. The
+//! driver presses the original's keys for that row; with no row published the choice stays the player's.
+//!
 //! Every hook declines at once (`resume_at` its own key) without the feature in the image, with its switch at 0, and for the
 //! wrong object.
 
 use super::redirect::overlay;
-use super::state::{PARTY_SLOTS, party_record};
+use super::state::{PARTY_SLOTS, PICK_AT, PICK_ITEM_AT, PICK_MARKER, PICK_ROW_AT, party_record};
 use ssd_mod::Family;
 use ssd_mod::feature::PARTY_BOOSTS;
 use ssd_oracle::{Ctx, HookAction, HookEntry, HookMode, ReturnKind, RoutineFn};
@@ -58,6 +64,16 @@ pub(super) const LUNCH_KEY: u32 = 0x01_E0A0;
 const LUNCH_STEP: u32 = 0x01_E074;
 /// `03:84EE`: the level cap check (`Y` the record offset; carry set below the cap).
 const CAP_CHECK: u32 = 0x03_84EE;
+
+/// `03:850E`: the level caps by character (0: none may rise), and the level in a record.
+const CAP_TABLE: u32 = 0x03_850E;
+const LEVEL: u32 = 0x02;
+
+/// The cap check `03:84EE`: a member below his cap (not zero) may rise.
+#[must_use]
+fn cap_allows(cap: u8, level: u8) -> bool {
+    cap != 0 && level < cap
+}
 
 /// The object ids of Guru and of Launch.
 const GURU: u8 = 6;
@@ -313,6 +329,79 @@ fn porunga_wrapper(ctx: &mut Ctx<'_>) {
     ctx.set_cost(0);
 }
 
+/// The object of Porunga.
+const PORUNGA: u8 = 15;
+/// `01:8C63`: the use step of the Item screen for an object with the member bit (Guru, Launch), before its message. `01:DBDC`:
+/// the effect's run of every frame, which asks the member helper for the fighter under the list's cursor.
+pub(super) const USE_KEY: u32 = 0x01_8C63;
+pub(super) const EFFECT_KEY: u32 = 0x01_DBDC;
+
+/// The boost an object belongs to.
+fn boost_of(item: u8) -> Option<Boost> {
+    match item {
+        GURU => Some(Boost::Guru),
+        PORUNGA => Some(Boost::Porunga),
+        LUNCH => Some(Boost::Lunch),
+        _ => None,
+    }
+}
+
+/// The row of the party list of the first fighter, in the party's order, the original accepts `boost` for (the chosen member's
+/// pick is a fighter the original accepts, so the use is never refused at the choice), or `0xFF` when it accepts none.
+fn first_row(ctx: &Ctx<'_>, boost: Boost) -> u8 {
+    let size = ctx.peek8(PARTY_SIZE).min(PARTY_SLOTS as u8);
+    let kaioken_on = ctx.peek8(KAIOKEN) & 0x80 != 0;
+    let mut row = 0xFF;
+    for slot in 0..size {
+        let record = party_record(0) + u32::from(slot) * 0x20;
+        let flags = ctx.peek8(record + FLAGS);
+        if flags & IN_PARTY == 0 {
+            continue;
+        }
+        let fits = match boost {
+            Boost::Guru => guru_fits(flags),
+            Boost::Lunch => lunch_fits(flags),
+            Boost::Porunga => {
+                let character = ctx.peek8(record + CHARACTER);
+                // The same test as the cap check `03:84EE`, read here without running it (a pick runs every frame of the effect).
+                wish_fits(flags, character, kaioken_on)
+                    && cap_allows(
+                        ctx.peek8(CAP_TABLE + u32::from(character)),
+                        ctx.peek8(record + LEVEL),
+                    )
+            }
+        };
+        if fits {
+            row = slot;
+            break;
+        }
+    }
+    row
+}
+
+/// The pick of the object in use, published for the HD driver when the pack has its switch on; the original goes on at `key`.
+fn publish(ctx: &mut Ctx<'_>, key: u32) {
+    ctx.mark_gated();
+    let item = ctx.peek8(ITEM_ID);
+    if let Some(boost) = boost_of(item).filter(|&boost| on(ctx, boost)) {
+        let row = first_row(ctx, boost);
+        for (at, byte) in (PICK_AT..).zip(PICK_MARKER) {
+            ctx.write8(at, byte);
+        }
+        ctx.write8(PICK_ITEM_AT, item);
+        ctx.write8(PICK_ROW_AT, row);
+    }
+    ctx.resume_at(key);
+}
+
+fn use_wrapper(ctx: &mut Ctx<'_>) {
+    publish(ctx, USE_KEY);
+}
+
+fn effect_wrapper(ctx: &mut Ctx<'_>) {
+    publish(ctx, EFFECT_KEY);
+}
+
 /// A `Patch` hook that costs nothing, as every hook of the packs.
 fn patch(name: &str, key: u32, func: RoutineFn) -> HookEntry {
     HookEntry {
@@ -336,6 +425,8 @@ pub(super) fn hooks() -> Vec<HookEntry> {
         patch("mod_party_guru", GURU_KEY, guru_wrapper),
         patch("mod_party_porunga_level", PORUNGA_KEY, porunga_wrapper),
         patch("mod_party_lunch", LUNCH_KEY, lunch_wrapper),
+        patch("mod_party_pick_use", USE_KEY, use_wrapper),
+        patch("mod_party_pick_effect", EFFECT_KEY, effect_wrapper),
     ]
 }
 
@@ -371,6 +462,12 @@ mod tests {
     }
 
     #[test]
+    fn the_cap_check_lets_a_member_below_his_cap_rise() {
+        assert!(cap_allows(47, 46) && !cap_allows(47, 47) && !cap_allows(47, 48));
+        assert!(!cap_allows(0, 1), "a character with no cap entry does not rise");
+    }
+
+    #[test]
     fn a_member_the_originals_test_refuses_is_skipped() {
         let flags: &'static [u8] = &[0xC0, 0xE0, 0xC0, 0xE0];
         let guru = others(4, 0x00, flags_of(flags), |_, f| guru_fits(f));
@@ -400,7 +497,17 @@ mod tests {
         assert_eq!((GURU_KEY, PORUNGA_KEY, LUNCH_KEY), (0x01_DF8A, 0x01_E4C1, 0x01_E0A0));
         let entries = hooks();
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, ["mod_party_guru", "mod_party_porunga_level", "mod_party_lunch"]);
+        assert_eq!(
+            names,
+            [
+                "mod_party_guru",
+                "mod_party_porunga_level",
+                "mod_party_lunch",
+                "mod_party_pick_use",
+                "mod_party_pick_effect",
+            ]
+        );
+        assert_eq!((USE_KEY, EFFECT_KEY), (0x01_8C63, 0x01_DBDC));
         for entry in &entries {
             assert_eq!(entry.mode, HookMode::Patch, "{}", entry.name);
             assert_eq!(entry.cycles, Some(0), "{}", entry.name);

@@ -154,6 +154,9 @@ struct State {
     /// The Item list of a battle is open and the HD's Items screen is over it: Back goes to the battle's command
     /// window, and the rows are the stacks a battle can use ([`usable_in_battle`]).
     battle_items: bool,
+    /// How far the answers to the original's fighter choice have gone in the use that runs (see [`pick_steps`]): 0 none, 1 the
+    /// message answered, 2 the fighter chosen. Back to 0 once the original is on its item list again.
+    pick_stage: u8,
     /// The options of the run: the values saved with the game (the bound save's) and the ones of this PC.
     options: Options,
     /// The options of the save slots (`saves/ssd.options`).
@@ -233,6 +236,7 @@ impl Driver {
                 save_marks: [false; 3],
                 battle_cheats: false,
                 battle_items: false,
+                pick_stage: 0,
                 options: Options::default(),
                 option_slots: SlotOptions::empty(),
                 settings_changed: false,
@@ -279,7 +283,15 @@ impl Driver {
     /// The names and texts the menus show from now on (those of another language): only the words may differ, the
     /// ids and flags of `labels` are those of the labels the driver was made with.
     pub fn set_labels(&mut self, labels: Labels) {
+        let cap = self.labels.status.level_cap;
         self.labels = labels;
+        self.labels.status.level_cap = cap;
+    }
+
+    /// The pack's `level_cap` (`ssd_game::mods::level_cap_in`) the Status screen reaches the levels past the game's own with:
+    /// `None` without such a pack.
+    pub fn set_level_cap(&mut self, cap: Option<u16>) {
+        self.labels.status.level_cap = cap;
     }
 
     /// The options of the run.
@@ -449,6 +461,7 @@ impl Driver {
             save_marks: [false; 3],
             battle_cheats: false,
             battle_items: false,
+            pick_stage: 0,
             options: Options { game: Values::new(), pc },
             option_slots: self.state.option_slots.clone(),
             settings_changed: reverted,
@@ -1133,7 +1146,7 @@ impl State {
     /// The HD Save screen's slots, as the cartridge `sram` has them now (a Save that just wrote one shows at once), and
     /// which of them hold a game, for the keys.
     fn refresh_save_slots(&mut self, labels: &Labels, sram: Option<&[u8]>) {
-        self.save_slots = save::slots(sram, labels, &self.sidecar);
+        self.save_slots = save::slots(sram, labels, &self.sidecar, &self.mods_sidecar);
         self.save_marks = sram.map_or([false; 3], |sram| self.marked_slots(sram));
         self.nav.set_save_used(std::array::from_fn(|slot| self.save_slots[slot].used()));
     }
@@ -1208,6 +1221,11 @@ impl State {
     ) -> Joypad {
         if self.running.is_none() {
             self.observe(probe);
+        }
+        if self.running.is_none()
+            && let Some(steps) = self.pick_steps(probe)
+        {
+            self.start(steps, Arrival::Lifted);
         }
         if let Some(running) = self.running.as_mut() {
             let arrival = running.arrival;
@@ -1639,6 +1657,37 @@ impl State {
         }
     }
 
+    /// The answers to the original's own fighter choice when the pack `party_boosts` has the object in use act on the whole
+    /// party (its hooks publish the row of the first fighter the original accepts it for, [`MenuProbe::party_pick`]): the
+    /// fighter is not the player's to choose, so the HD presses the original's keys for it, as the use plan does, and the
+    /// effect starts. Guru and Launch show their message (A), then the party window (Down to the row, A); Porunga's level
+    /// wish shows the party window at its step 7. Without a published row (no pack, the switch at 0, the original accepts
+    /// no fighter, Launch's other effect) nothing is pressed and the choice is the player's, as before.
+    fn pick_steps(&mut self, probe: &MenuProbe<'_>) -> Option<Vec<Step>> {
+        if !probe.in_battle() || probe.screen() != Some(2) || probe.step() == Some(1) {
+            self.pick_stage = 0;
+            return None;
+        }
+        let (item, row) = probe.party_pick()?;
+        let (step, effect) = (probe.step()?, probe.effect_step()?);
+        let window = match item {
+            PORUNGA_LEVEL_ITEM => effect == WISH_MEMBER_STEP && step == 2,
+            _ => step == 4 && effect == 0,
+        };
+        if item != PORUNGA_LEVEL_ITEM && step == 3 && self.pick_stage == 0 {
+            self.pick_stage = 1;
+            return Some(vec![Step::Press { button: Button::A, until: Until::ItemStep(4) }]);
+        }
+        if window && self.pick_stage < 2 && probe.ready() {
+            self.pick_stage = 2;
+            return Some(vec![
+                Step::Seek { row, rows: PARTY_ROWS },
+                Step::Press { button: Button::A, until: Until::EffectMoved(effect) },
+            ]);
+        }
+        None
+    }
+
     fn start(&mut self, steps: Vec<Step>, arrival: Arrival) {
         self.running = Some(Running { player: Player::new(steps), arrival });
     }
@@ -1855,6 +1904,12 @@ const SETTLE_WINDOW: u32 = 120;
 /// Frames the original's Use or Drop window of the Item screen runs once it is drawn and idle, before it takes the press
 /// that chooses Use or Drop.
 const SETTLE_CHOICE: u32 = 8;
+
+/// Porunga's level wish: the object, and the step of its effect that shows the party window for the fighter.
+const PORUNGA_LEVEL_ITEM: u8 = 15;
+const WISH_MEMBER_STEP: u8 = 7;
+/// The records of the party (the rows a party window's cursor can be on).
+const PARTY_ROWS: u8 = 9;
 
 /// The steps of using one unit of the stack `stack`, from the Item list the HD shows: the unit is staged first on the
 /// original's list and the original's own Use is pressed. From there the original is the player's: the curtain lifts on
@@ -2748,7 +2803,11 @@ mod tests {
 
     /// A mod state for the tests: the extended flags all `flag`, the high parts all `high`.
     fn mod_state(flag: u8, high: u8) -> ModState {
-        ModState { flags: Some(vec![flag; FLAG_BYTES]), high: Some(vec![high; HIGH_BYTES]) }
+        ModState {
+            flags: Some(vec![flag; FLAG_BYTES]),
+            high: Some(vec![high; HIGH_BYTES]),
+            ..ModState::default()
+        }
     }
 
     /// Writes the writes of `events` into `wram` (a work RAM slice, index `address - $7E:0000`).
@@ -2846,7 +2905,11 @@ mod tests {
         assert!(markers.contains(&HostEvent::Wram { address: FLAGS_MARKER_AT, bytes: vec![0; 4] }));
         // A save with its flags and no high parts: the block's marker is cleared, so the run's high parts read neutral.
         let mut sidecar = ModsSidecar::empty();
-        sidecar.store(0, checksum, ModState { flags: Some(vec![1; FLAG_BYTES]), high: None });
+        sidecar.store(
+            0,
+            checksum,
+            ModState { flags: Some(vec![1; FLAG_BYTES]), ..ModState::default() },
+        );
         let partial = bind(&with_mod_state(&menu, &mod_state(0, 0x3C)), sidecar);
         assert!(partial.contains(&HostEvent::Wram { address: MARKER_AT, bytes: vec![0; 4] }));
         assert!(

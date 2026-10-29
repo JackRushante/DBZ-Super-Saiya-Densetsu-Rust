@@ -28,7 +28,7 @@ pub struct Summary {
     /// The place, when the project has a name for the map (see [`place_name`]).
     pub place: Option<&'static str>,
     /// The leader's level.
-    pub level: u8,
+    pub level: u16,
     /// The money, in zeni.
     pub zeni: u16,
     /// The items the party carries.

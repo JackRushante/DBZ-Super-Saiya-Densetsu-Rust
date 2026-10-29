@@ -20,6 +20,9 @@ mod testing;
 mod text;
 
 use crate::data as d;
+use crate::mods::state::{
+    self, PICK_AT, PICK_ITEM_AT, PICK_MARKER, PICK_ROW_AT, exp_high_in, level_in,
+};
 use ssd_menus::{Labels, Member, MenuView, ObjectLabel, Screen, Selected, Slot};
 
 /// The bus address of the first byte of work RAM (`$7E:0000`).
@@ -93,10 +96,16 @@ const RECORD_BP: u32 = 0x07;
 const RECORD_MAX_HP: u32 = 0x0A;
 const RECORD_MAX_KI: u32 = 0x0C;
 const RECORD_CHARACTER: u32 = 0x1C;
+/// The record's EXP, 24 bits.
+const RECORD_EXP: u32 = 0x0F;
+/// The bytes of work RAM the mod state's readers index (the whole 128 KiB).
+const MOD_RAM: usize = 0x2_0000;
 /// A record is in use when bit 7 of its flags is set.
 const RECORD_IN_USE: u8 = 0x80;
 /// The end of the party order.
 const PARTY_END: u8 = 0xFF;
+/// The step of the item effect (`$073C`).
+const EFFECT_STEP: u32 = 0x7E_073C;
 /// Bytes of the party order.
 const PARTY_ORDER_LENGTH: u32 = 16;
 /// Records of the party.
@@ -309,6 +318,21 @@ impl<'a> MenuProbe<'a> {
         }
     }
 
+    /// The step of the item effect that runs (`effect_step`, `$073C`).
+    #[must_use]
+    pub fn effect_step(&self) -> Option<u8> {
+        self.byte(EFFECT_STEP)
+    }
+
+    /// The row of the party list that the pack `party_boosts` published for the object in use: the first fighter the original
+    /// accepts it for. `None` without the pack, with its switch off for the object, or when the original accepts no fighter.
+    #[must_use]
+    pub fn party_pick(&self) -> Option<(u8, u8)> {
+        let marker = (0..4_u32).all(|k| self.byte(PICK_AT + k) == Some(PICK_MARKER[k as usize]));
+        let (item, row) = (self.byte(PICK_ITEM_AT)?, self.byte(PICK_ROW_AT)?);
+        (marker && row != 0xFF && self.byte(d::MENU_ITEM_ID) == Some(item)).then_some((item, row))
+    }
+
     /// Whether a message of the Item screen waits for A (`menu_busy` is 1 while its text waits).
     #[must_use]
     pub fn message_waits(&self) -> bool {
@@ -425,15 +449,44 @@ impl<'a> MenuProbe<'a> {
         let label = self.labels.characters.get(usize::from(character));
         Some(Member {
             name: label.map_or_else(unknown, |label| label.name.clone()),
-            level: self.byte(record + RECORD_LEVEL)?,
+            level: self.level_of(character, record)?,
             hp: self.word(record + RECORD_HP)?,
             max_hp: self.word(record + RECORD_MAX_HP)?,
             ki: self.word(record + RECORD_KI)?,
             max_ki: self.word(record + RECORD_MAX_KI)?,
-            bp: u32::from(self.word(record + RECORD_BP)?)
-                | u32::from(self.byte(record + RECORD_BP + 2)?) << 16,
+            bp: self.bp_of(record)?,
             face: label.and_then(|label| label.face),
         })
+    }
+
+    /// The work RAM as the mod state's readers take it (the whole 128 KiB), when the snapshot is that long.
+    fn mod_ram(&self) -> Option<&'a [u8]> {
+        (self.wram.len() >= MOD_RAM).then_some(self.wram)
+    }
+
+    /// The real level of a record: the wide level of the mod state (`mods::state::level_in`, the reader the game's own hooks
+    /// share the rule of) while the record's byte, which saturates at 99, agrees with it.
+    pub(crate) fn level_of(&self, character: u8, record: u32) -> Option<u16> {
+        let byte = self.byte(record + RECORD_LEVEL)?;
+        Some(self.mod_ram().map_or(u16::from(byte), |ram| level_in(ram, character, byte)))
+    }
+
+    /// The EXP of a record with its bits 24 to 31 from the mod state.
+    pub(crate) fn exp_of(&self, character: u8, record: u32) -> Option<u64> {
+        let low = u64::from(self.word(record + RECORD_EXP)?)
+            | u64::from(self.byte(record + RECORD_EXP + 2)?) << 16;
+        Some(low | u64::from(self.mod_ram().map_or(0, |ram| exp_high_in(ram, character))) << 24)
+    }
+
+    /// The wide BP of a record: its 24 bits and the high part of the mod state's block (`mods::state::high_in`).
+    fn bp_of(&self, record: u32) -> Option<u64> {
+        let low = u32::from(self.word(record + RECORD_BP)?)
+            | u32::from(self.byte(record + RECORD_BP + 2)?) << 16;
+        let high = self
+            .mod_ram()
+            .zip(state::record_high(record))
+            .map_or(0, |(ram, offset)| state::high_in(ram, offset));
+        Some(state::wide(low, high))
     }
 
     /// The bus address of the party record of a character, if one is in use.
@@ -599,7 +652,7 @@ mod tests {
         let ram = item_screen();
         let labels = labels();
         let view = MenuProbe::new(&ram, &labels).view().unwrap();
-        let members: Vec<(&str, u8, u16, u16, Option<u8>)> =
+        let members: Vec<(&str, u16, u16, u16, Option<u8>)> =
             view.party.iter().map(|m| (m.name.as_str(), m.level, m.hp, m.max_hp, m.face)).collect();
         assert_eq!(members, [("Piccolo", 2, 84, 84, Some(29)), ("Goku", 10, 190, 200, Some(28))]);
     }

@@ -172,6 +172,14 @@ of the EXP award (`1D:8C66`). What the code around them showed, read in the list
 - **The second form's fight** (group `$54`) is judged at its end by an absolute HP (`05:9802`): below 21 the story goes on
   (game mode 0), otherwise the generic checks follow.
 - **The Ginyu duel** (group `$51`) keeps its enemy at 1 HP when a hit would kill him, until `$15F1` is 2 (`05:A48C`).
+- **How the hit step reaches them** (`05:A435`, read for the mod): after `05:BDDC` the carry is clear when the HP went below zero
+  (`05:A46E`); a hit that leaves the HP at 0 goes the same way, to `05:A484` (the Ginyu guard, then the knock-out `05:A9AA`). Only a
+  hit that leaves the enemy alive reaches `05:A4F5`. So the floors are not clamps: a hit from above a floor to 0 or below kills the
+  enemy outright, in the original too (its HP is small against a hit). The Ginyu duel is the only clamp, and it is in the knock-out
+  path. The swap is Ginyu's own command (`$B7` = `$4D`, `05:A2BE`; the body swap itself `05:D274`, which sets `$15F1` to 2): the
+  routines that read the enemy's HP in bank `$1D` are the displays, not the choice of command. The second form's fight (group
+  `$54`) is judged at its end by the HP the withdrawal left in the first enemy slot (`05:9802`, `LDY $0E03`; `05:9805`
+  `CPY #$15`, `05:9808` `BCC`: below 21 the story goes on with mode 0).
 - **The special attack's chance** (`05:BA8B`) is `10 + the attacker's level + its +0E byte - the card (a Z is 10) - the defender's
   level`, capped at 24, against the random byte masked with `$1F` (`$0F` for two animations), so the levels of the two records
   matter and a record's level is a number the battle reads. The same `+02` is read for the choice of an attack animation

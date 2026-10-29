@@ -392,6 +392,7 @@ fn hd_frame(
     // The save editor: it opens only when no replay plays or records, and a write it made goes to the machine's cartridge save
     // (flushed to `ssd.sav` at once) before its sidecar files, which `take_editor_commit` re-keyed, are written.
     hd.allow_editor(!playing && state.panel.replays.recording.is_none());
+    hd.set_level_cap(ssd_game::mods::level_cap_in(|address| machine.peek(address).unwrap_or(0)));
     if let Some(commit) = hd.take_editor_commit() {
         match machine.write_sram(0, &commit.sram) {
             Ok(()) => save_sram(machine),

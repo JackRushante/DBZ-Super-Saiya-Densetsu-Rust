@@ -1,5 +1,6 @@
 //! The save editor against the real game: a slot edited by `ssd_menus::saveedit` is loaded by the game's own Continue, the game's
-//! own level-up routine runs on the edited member, and the bag comes back with its counts.
+//! own level-up routine runs on the edited member, and the bag comes back with its counts. With the example pack `free-progression`
+//! (a level cap of 999) a member edited to level 150 loads with its wide level, EXP and BP.
 //!
 //! Needs the game's ROM and a save to edit (a copy: the test never writes it):
 //! `SSD_ROM_PATH=... SSD_SAVE_PATH=... cargo test -p ssd-catalogue --release --test save_editor_real_rom -- --ignored --nocapture`.
@@ -13,7 +14,8 @@ use ssd_menus::mods_state::ModsSidecar;
 use ssd_menus::options::SlotOptions;
 use ssd_menus::saveedit::{Editor, Key, Page, Sidecars, story};
 use ssd_oracle::{
-    HostEvent, Joypad, Machine, MemorySaveStore, NullAudio, StatusRegister, Stopped, Stops,
+    DEFAULT_WRAM_SEED, HookTable, HostEvent, Joypad, Machine, MemorySaveStore, NullAudio,
+    StatusRegister, Stopped, Stops,
 };
 use ssd_save::{Item, SaveFile, Slot};
 
@@ -264,4 +266,168 @@ fn an_edited_slot_loads_keeps_its_bag_and_its_bp_delta_on_every_level_up_of_the_
     raise(&mut machine, GOHAN, 4);
     let at = record_of(&machine, GOHAN).unwrap();
     assert_eq!((byte(&machine, at + 2), bp_of(&machine, at)), (24, table(24) - 1000));
+}
+
+/// The machine of the example pack `examples/free-progression` (its `level_cap` is 999), with the game's hooks.
+fn pack_machine(rom: &[u8], sram: Option<&[u8]>) -> Machine {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/free-progression");
+    let packs = [ssd_mod::Pack::open(&dir).unwrap()];
+    ssd_mod::check_set(rom, &packs, ssd_mod::CheckOptions { allow_rom_bytes: false }).unwrap();
+    let image = ssd_mod::build(rom, &packs).unwrap().bytes;
+    let mut saves = MemorySaveStore::default();
+    if let Some(sram) = sram {
+        saves.0.insert("sav".to_owned(), sram.to_vec());
+    }
+    let mut machine =
+        Machine::with_image(image, ssd_rom::crc32(rom), Box::new(saves), DEFAULT_WRAM_SEED)
+            .unwrap();
+    let mut table = HookTable::new();
+    ssd_game::mods::install(&mut table);
+    machine.set_hook_table(Some(table));
+    machine
+}
+
+#[test]
+#[ignore = "needs the ROM (SSD_ROM_PATH) and a save (SSD_SAVE_PATH)"]
+fn with_the_pack_a_slot_edited_to_level_150_loads_with_its_wide_level_exp_and_bp() {
+    let rom = rom();
+    let catalogue = Catalogue::from_rom(&rom).unwrap();
+    let labels = ssd_catalogue::menu_labels(&catalogue);
+    let gohan = &catalogue.characters[usize::from(GOHAN)];
+
+    // The slot: a copy of the save's slot 1 with Gohan in the party at level 20 with the game's own BP.
+    let path = std::env::var("SSD_SAVE_PATH").expect("SSD_SAVE_PATH");
+    let mut file = SaveFile::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+    let mut slot = file.slot(0).unwrap();
+    let mut record = game::new_record(gohan, 20, 3).unwrap();
+    record.set_flags(0xC0);
+    slot.set_record(GOHAN, &record).unwrap();
+    let mut party = slot.party();
+    if !party.contains(&GOHAN) {
+        party.push(GOHAN);
+    }
+    slot.set_party(&party).unwrap();
+    file.set_slot(0, &slot).unwrap();
+    let before = file.as_bytes().to_vec();
+
+    // The editor's BP limit holds the curve of every character at the top level.
+    for (id, growth) in labels.growth.iter().enumerate().take(8) {
+        let top = growth.anchor().unwrap().at(999).bp;
+        println!("character {id}: BP at level 999 {top}");
+        assert!(top <= ssd_menus::saveedit::BP_MAX_WIDE, "character {id}");
+    }
+
+    // The level cap is the one the game reads from the pack's image.
+    let probe = pack_machine(&rom, None);
+    let cap = ssd_game::mods::level_cap_in(|address| probe.peek(address).unwrap_or(0));
+    assert_eq!(cap, Some(999));
+    let plain = Machine::new(rom.clone(), Box::new(MemorySaveStore::default())).unwrap();
+    assert_eq!(ssd_game::mods::level_cap_in(|address| plain.peek(address).unwrap_or(0)), None);
+
+    // The editor: Gohan to level 150 (one press a level), then a big BP delta with a held key.
+    let mut editor = Editor::open(&before, &labels, &Sidecar::empty(), [false; 3]).unwrap();
+    editor.set_progression(cap, &ModsSidecar::empty());
+    editor.key(Key::A);
+    while editor.session().unwrap().members[editor.session().unwrap().member].id != GOHAN {
+        editor.key(Key::R);
+    }
+    let level = |editor: &Editor| {
+        editor.session().unwrap().members[editor.session().unwrap().member].level()
+    };
+    while level(&editor) < 150 {
+        editor.key(Key::Right);
+    }
+    let table = labels.growth[usize::from(GOHAN)].anchor().unwrap().at(150);
+    let member = editor.session().unwrap().members[editor.session().unwrap().member].clone();
+    assert_eq!((member.level(), member.record.level(), member.bp()), (150, 99, table.bp));
+    editor.key(Key::Down);
+    let bp =
+        |editor: &Editor| editor.session().unwrap().members[editor.session().unwrap().member].bp();
+    for _ in 0..200_000 {
+        if bp(&editor) > table.bp + 20_000_000 {
+            break;
+        }
+        editor.held(1);
+    }
+    let edited = editor.session().unwrap().members[editor.session().unwrap().member].clone();
+    assert!(edited.bp() > table.bp + 20_000_000 && edited.bp() > 1 << 24, "{}", edited.bp());
+    editor.key(Key::Start);
+    editor.key(Key::Up);
+    editor.key(Key::Up);
+    editor.key(Key::A);
+    let commit = editor.take_commit().expect("a write");
+
+    // The record in the save holds the byte and the low 24 bits; the mod state holds the rest.
+    let written =
+        SaveFile::from_bytes(&commit.sram).unwrap().slot(0).unwrap().record(GOHAN).unwrap();
+    assert_eq!((written.level(), u64::from(written.bp())), (99, edited.bp() & 0xFF_FFFF));
+    let (mut bags, mut cheats, mut mods, mut options) =
+        (Sidecar::empty(), CheatSidecar::empty(), ModsSidecar::empty(), SlotOptions::empty());
+    commit.rekey(&mut Sidecars {
+        bags: &mut bags,
+        cheats: &mut cheats,
+        mods: &mut mods,
+        options: &mut options,
+    });
+    assert!(mods.entry_for(0, commit.new_checksum).is_some_and(|state| state.levels.is_some()));
+    // `SSD_DUMP_DIR`: the edited save and its sidecar files go there, for a UI snapshot of the app on them.
+    if let Ok(dir) = std::env::var("SSD_DUMP_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ssd.sav"), &commit.sram).unwrap();
+        std::fs::write(dir.join("ssd.mods"), mods.to_bytes()).unwrap();
+        std::fs::write(dir.join("ssd.bag"), bags.to_bytes()).unwrap();
+        std::fs::write(dir.join("ssd.cheats"), cheats.to_bytes()).unwrap();
+    }
+
+    // The game's own Continue loads it, and the driver puts the mod state in work RAM as the app does.
+    let mut machine = pack_machine(&rom, Some(&commit.sram));
+    for pad in ssd_game::scripts::parse_timeline(CONTINUE).unwrap() {
+        machine.run_frame(pad, &mut NullAudio).unwrap();
+    }
+    let mut driver = Driver::with_bag(labels.clone(), Rules::default(), bags).with_mods(mods);
+    for _ in 0..30 {
+        let frame = driver.frame(machine.wram(), machine.sram(), Joypad::default());
+        for event in &frame.events {
+            if let HostEvent::Wram { address, bytes } = event {
+                machine.write_wram(*address, bytes).unwrap();
+            }
+        }
+        machine.run_frame(frame.pad, &mut NullAudio).unwrap();
+    }
+    let at = record_of(&machine, GOHAN).expect("Gohan is in the loaded party");
+    let slot_index = (at - PARTY) / RECORD as u32;
+    let wide_level = word(&machine, ssd_game::mods::state::wide_level_at(GOHAN));
+    let exp_high = byte(&machine, ssd_game::mods::state::exp_high_at(GOHAN));
+    let bp_high = word(&machine, ssd_game::mods::state::BLOCK + 2 * slot_index);
+    let loaded_bp = u64::from(bp_high) << 24 | u64::from(bp_of(&machine, at));
+    let exp = u64::from(exp_high) << 24
+        | u64::from(word(&machine, at + 0x0F))
+        | u64::from(byte(&machine, at + 0x11)) << 16;
+    println!("loaded: byte {} wide {wide_level} BP {loaded_bp} EXP {exp}", byte(&machine, at + 2));
+    assert_eq!(byte(&machine, at + 2), 99, "the record's byte saturates at 99");
+    assert_eq!(wide_level, 150, "the wide level");
+    assert_eq!(loaded_bp, edited.bp(), "the wide BP");
+    assert_eq!(exp, table.exp, "the EXP the level begins at");
+    assert_eq!(word(&machine, at + 10), table.max_hp);
+
+    // The HD Status screen reads the same.
+    let view = ssd_game::menu::MenuProbe::new(machine.wram(), &labels).status_view(0);
+    let shown = view.members.iter().find(|m| m.name == labels.characters[usize::from(GOHAN)].name);
+    let shown = shown.expect("Gohan on the Status screen");
+    assert_eq!((shown.level, shown.bp, shown.exp), (150, edited.bp(), table.exp));
+
+    // The game's own level-up goes on from the edited member: the next level's row is the curve's, the delta is kept.
+    raise(&mut machine, GOHAN, 1);
+    let at = record_of(&machine, GOHAN).unwrap();
+    let anchor = labels.growth[usize::from(GOHAN)].anchor().unwrap();
+    let bp_high = word(&machine, ssd_game::mods::state::BLOCK + 2 * slot_index);
+    let bp_now = u64::from(bp_high) << 24 | u64::from(bp_of(&machine, at));
+    assert_eq!(word(&machine, ssd_game::mods::state::wide_level_at(GOHAN)), 151);
+    assert_eq!(
+        bp_now,
+        edited.bp() + anchor.bp_gain(151),
+        "BP = curve(level) + delta, after a level-up"
+    );
 }

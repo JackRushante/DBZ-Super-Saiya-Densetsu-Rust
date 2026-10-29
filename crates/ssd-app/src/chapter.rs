@@ -82,7 +82,7 @@ pub fn start(id: &str, packs: &[ssd_mod::Pack], rom: &[u8]) -> Result<Session, S
         let at = SLOT_BASES[0] + CHECKSUM_OFFSET;
         let checksum = u16::from_le_bytes([sram[at], sram[at + 1]]);
         let mut sidecar = ModsSidecar::empty();
-        sidecar.store(0, checksum, ModState { flags: Some(flagx), high: None });
+        sidecar.store(0, checksum, ModState { flags: Some(flagx), ..ModState::default() });
         sidecar.to_bytes()
     });
     log::info!("chapter {id}: a fresh start from its slot, in {}", dir.display());

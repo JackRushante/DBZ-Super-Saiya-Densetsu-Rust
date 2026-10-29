@@ -281,7 +281,7 @@ mod tests {
                     let mut bytes = vec![0; HIGH_BYTES];
                     bytes[SIDE_HIGH..SIDE_HIGH + 2].copy_from_slice(&a_high.to_le_bytes());
                     bytes[SIDE_HIGH + 2..SIDE_HIGH + 4].copy_from_slice(&b_high.to_le_bytes());
-                    let state = ModState { flags: None, high: Some(bytes) };
+                    let state = ModState { high: Some(bytes), ..ModState::default() };
                     for event in apply_events(&state) {
                         if let HostEvent::Wram { address, bytes } = event {
                             machine.write_wram(address, &bytes).unwrap();

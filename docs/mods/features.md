@@ -87,8 +87,9 @@ with `-10` meets enemies made for level 1). A few party levels, at the offsets o
 roll of the map starts in its normal branch, which picks the group from the map's zone (`02:D34A`); every other battle is a "boss"
 battle: every battle a script starts (Raditz, Nappa, Vegeta, Zarbon, Dodoria, the Ginyu squad, Frieza's forms, the duels), the
 battles that the map's roll starts in its story branches (Frieza's first form and the fights of Ginyu's map), and
-a boss's next form. A story fight that waits for an HP threshold, the transformations and the scripted losses keep the exceptions
-they had (see `free-progression.md`).
+a boss's next form. The story fights that wait for an HP floor (Zarbon's first form, Frieza's first three forms, the Ginyu duel)
+have their floors scaled with the enemy's HP, and a hit cannot skip a floor; the transformations and the scripted losses keep the
+exceptions they had (see `free-progression.md`).
 
 The feature is for the Enhanced mode only; the Classic game is not changed. `free-progression.md` is the design with its
 numbers, and the example pack `examples/enemy-scaling` (`pack.toml`, no data files) is the feature alone:
@@ -140,9 +141,10 @@ moves the story. `docs/re/data/free-progression.md` lists every place the story 
 | Parameter | Range | Meaning |
 |---|---|---|
 | `ginyu_arrival` | 0 to 3 | Goku's arrival in the Ginyu squad's chapter: `0` is the original's rule (his level decides), `1` the first fight (Recoome and Guldo), `2` the second (Jeice and Burter), `3` the last (Captain Ginyu, with Goku's landing). |
+| `level_cap` | 48 to 999, optional | The highest level a character with a level table reaches. Absent, the game's own caps stay (47 or 48). The party's EXP, BP, HP and KI go on past the table on its own curves, Goku's Super Saiyan follows his level, and the enemies follow the party's wide level (`free-progression.md`, "The level cap"). Stored as two bytes after a prefix, so a slot of a pack that does not give it is the old one byte. |
 
 The feature is for the Enhanced mode only. The example pack `examples/free-progression` (`pack.toml`) enables it with
-`ginyu_arrival = 3`. It does not change the enemies, their stats or their rewards: a party that reaches a forced fight early meets it
+`ginyu_arrival = 3` and, from the pack 0.4.0, `level_cap = 999`. It does not change the enemies, their stats or their rewards: a party that reaches a forced fight early meets it
 at the strength it has.
 
 ### `party_boosts`
@@ -163,6 +165,14 @@ use) the game runs its own code for the effect, with the same refusals, so the c
   object 27), which is left as the original has it. The normal effect marks the fighter (bit 4 of his flags, and the mark beside his
   name) and is refused for a fighter who is marked already. With `lunch = 1`, when it works, every other fighter who is not marked
   gets the same mark, by the game's own step. Launch is for a battle only, as in the original: on the map it answers "can't use".
+
+**No question on whom.** With the switch of an object on, the game's own question "on whom" is not asked: after Use the Items screen
+answers it itself with the keys of the original (A on the object's message, Down to the row, A on the party window), choosing the first
+fighter, in the party's order, whom the original accepts the object for (Guru: not boosted; Launch: not marked; the level wish: below
+the cap, not refused, and not Goku with the Kaioken on). A fighter the original would refuse is passed over; the effect then reaches
+everyone else as above. The hooks publish the row for the Items screen in six bytes of the mod state block (`+0x58`, marker `SSDq`).
+When the original accepts nobody, or the switch is 0, or the object is not one of the three (or is Launch's alternative effect), nothing
+is answered and the choice is the player's, as in the original.
 
 A fighter who is knocked out is not refused by the original for any of the objects, so he is included. The objects are for a battle
 only, as in the original. The maximum HP and KI of the other fighters, and the BP of Guru, are put where the chosen fighter's

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.12 (2026-10-29)
+
+### Features
+
+- **Free progression 0.4.0: the level cap is 999** (new parameter `level_cap`, 48 to 999, on the feature `free_progression`; absent,
+  the game's 47 or 48 stays). The party's level-up goes on past the table on the curves of the game's own rows (BP `u^3`, HP and KI
+  `u`, the EXP a level needs `u^2`, with `u = level + 5`, from each character's own last values; the party's HP and KI stop at 9 999),
+  the enemies are made for the party's level up to 999, and Goku's Super Saiyan has a BP that follows his level in place of the fixed
+  4 999 999. A level above 99 is a wide level in the mod state (`ssd.mods`, version 2) with the record's byte at 99; the EXP has a
+  high byte there. Remastered only; run `recompile` for a recompiled build.
+- **The save editor and the HD screens know the wide levels.** With a pack whose `level_cap` is set (Free progression 0.4.0) the save editor
+  sets a level up to the cap for Goku to Vegeta on the game's own curves (BP = curve + the member's delta, a held key strides 10 and 100
+  levels, the BP up to 9 999 999 999) and writes the wide level, the EXP's high byte and the BP's high part into the slot's mod state; without
+  such a pack nothing changes. The HD Status screen shows the real level (three digits), the whole BP, the EXP with its high byte and the EXP
+  to the next level past the game's table; the HD Save screen shows the leader's real level.
+
+### Fixes
+
+- Free progression, enemy scaling: the HP-threshold fights (Zarbon's first form, Frieza's first three forms, the Ginyu duel) keep the
+  story's withdrawal and scene at a high party level. The floors the original asks the HP to reach (30, 300, 20 and 50 HP, and the
+  Ginyu duel's 1 HP) are scaled with the enemy's HP, and a hit that would take a scaled enemy from above its floor to 0 leaves it at
+  the floor, so that the fight no longer ends as a victory. Run `recompile` for a recompiled build. Remastered only.
+- Party-wide boosts (`party-boosts.ssdpack`): with the switch of Guru, Launch or Porunga's level wish on, the game no longer asks which fighter to use
+  it on after Use. The Items screen answers the question with the original's own keys, choosing the first fighter the original accepts the
+  object for (one who is boosted or marked already, or at his level cap, is passed over), and the effect reaches the whole party at once.
+  Without the pack, or with the switch at 0, the question is the player's, as before. Remastered only.
+
 ## 0.3.11 (2026-10-29)
 
 ### Features

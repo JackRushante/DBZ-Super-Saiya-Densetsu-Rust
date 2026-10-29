@@ -13,6 +13,7 @@ mod controls_page;
 pub mod draw;
 pub mod language;
 pub mod layout;
+pub mod levels;
 pub mod mods_state;
 pub mod nav;
 pub mod options;

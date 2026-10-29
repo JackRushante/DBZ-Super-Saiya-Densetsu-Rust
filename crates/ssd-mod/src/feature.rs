@@ -39,6 +39,9 @@ pub const FREE_PROGRESSION: u16 = 3;
 /// (`docs/mods/features.md`).
 pub const PARTY_BOOSTS: u16 = 4;
 
+/// The first byte of the slot of `free_progression` when it has a `level_cap`; the values 0 to 3 are the first set's `ginyu_arrival`.
+pub const LEVEL_CAP_SET: u8 = 0x80;
+
 /// The first byte of the slot of `enemy_scaling` when it is set by offsets (`random_offset`, `boss_offset`); the values 0 to 2
 /// are the difficulties of the first set, which has no prefix.
 pub const SCALING_OFFSETS: u8 = 3;
@@ -48,6 +51,8 @@ struct Parameter {
     name: &'static str,
     min: i64,
     max: i64,
+    /// The bytes the value takes in the slot: 1, or 2 for a value that does not fit a byte (little endian).
+    width: usize,
 }
 
 /// One way to set a feature: the bytes its slot begins with, then its parameters in the slot's byte order, all required.
@@ -73,22 +78,35 @@ const KNOWN: &[Known] = &[
             parameters: &[
                 // The largest factor of the Kaioken is `1 + m / 2` with `m` at most 20 (the table `1D:8E7B`), so 11 is the top:
                 // the cap on `m` is `2 * (max_factor - 1)`, and a larger `max_factor` would cap nothing.
-                Parameter { name: "max_factor", min: 1, max: 11 },
-                Parameter { name: "hp_cost_percent", min: 0, max: 100 },
+                Parameter { name: "max_factor", min: 1, max: 11, width: 1 },
+                Parameter { name: "hp_cost_percent", min: 0, max: 100, width: 1 },
             ],
         }],
     },
     Known {
         name: "free_progression",
         id: FREE_PROGRESSION,
-        sets: &[ParameterSet {
-            prefix: &[],
-            parameters: &[
-                // Which of the three arrivals of Goku in the Ginyu squad's chapter the story gives: 0 is the original's rule
-                // (his level decides), 1 to 3 are the arrival during the first fight, the second, or at the last one.
-                Parameter { name: "ginyu_arrival", min: 0, max: 3 },
-            ],
-        }],
+        sets: &[
+            ParameterSet {
+                prefix: &[],
+                parameters: &[
+                    // Which of the three arrivals of Goku in the Ginyu squad's chapter the story gives: 0 is the original's rule
+                    // (his level decides), 1 to 3 are the arrival during the first fight, the second, or at the last one.
+                    Parameter { name: "ginyu_arrival", min: 0, max: 3, width: 1 },
+                ],
+            },
+            // The same with the level cap: the slot is [`LEVEL_CAP_SET`], the arrival, and the cap as two bytes. A pack that does
+            // not give `level_cap` keeps the first set (and the game's own cap, 47 or 48 per character).
+            ParameterSet {
+                prefix: &[LEVEL_CAP_SET],
+                parameters: &[
+                    Parameter { name: "ginyu_arrival", min: 0, max: 3, width: 1 },
+                    // The highest level a character reaches (the party's growth past the game's own table is extrapolated,
+                    // `docs/mods/free-progression.md`).
+                    Parameter { name: "level_cap", min: 48, max: 999, width: 2 },
+                ],
+            },
+        ],
     },
     Known {
         name: "party_boosts",
@@ -97,9 +115,9 @@ const KNOWN: &[Known] = &[
         sets: &[ParameterSet {
             prefix: &[],
             parameters: &[
-                Parameter { name: "guru", min: 0, max: 1 },
-                Parameter { name: "porunga_level", min: 0, max: 1 },
-                Parameter { name: "lunch", min: 0, max: 1 },
+                Parameter { name: "guru", min: 0, max: 1, width: 1 },
+                Parameter { name: "porunga_level", min: 0, max: 1, width: 1 },
+                Parameter { name: "lunch", min: 0, max: 1, width: 1 },
             ],
         }],
     },
@@ -111,15 +129,15 @@ const KNOWN: &[Known] = &[
             // [`NAMED`], easy, normal or hard (the byte is 0, 1 or 2), a factor on the party's level.
             ParameterSet {
                 prefix: &[],
-                parameters: &[Parameter { name: "difficulty", min: 0, max: 2 }],
+                parameters: &[Parameter { name: "difficulty", min: 0, max: 2, width: 1 }],
             },
             // The second: two offsets in levels from the party's, one for the random battles and one for every other battle.
             // The slot is [`SCALING_OFFSETS`] and the two offsets as signed bytes (two's complement).
             ParameterSet {
                 prefix: &[SCALING_OFFSETS],
                 parameters: &[
-                    Parameter { name: "random_offset", min: -10, max: 10 },
-                    Parameter { name: "boss_offset", min: -10, max: 10 },
+                    Parameter { name: "random_offset", min: -10, max: 10, width: 1 },
+                    Parameter { name: "boss_offset", min: -10, max: 10, width: 1 },
                 ],
             },
         ],
@@ -193,8 +211,9 @@ fn describe_sets(known: &Known) -> String {
     known.sets.iter().map(each).collect::<Vec<_>>().join(" or ")
 }
 
-/// The set of parameters an entry gives. A key that is in no set is refused, and so are keys of two sets together; an entry
-/// with no key is taken for the first set (the message then names that set's first parameter as missing).
+/// The set of parameters an entry gives. A key that is in no set is refused, and so are keys that no one set holds together;
+/// the first set that holds every key given is the one (an entry with no key is taken for the first set, and the message then
+/// names that set's first parameter as missing). A key two sets share (`ginyu_arrival`) does not choose between them.
 fn choose_set<'a>(known: &'a Known, entry: &FeatureEntry) -> Result<&'a ParameterSet, String> {
     let in_a_set = |key: &String| {
         known.sets.iter().flat_map(|set| set.parameters).any(|p| p.name == key.as_str())
@@ -205,19 +224,18 @@ fn choose_set<'a>(known: &'a Known, entry: &FeatureEntry) -> Result<&'a Paramete
             describe_sets(known)
         ));
     }
-    let used: Vec<&ParameterSet> = known
+    known
         .sets
         .iter()
-        .filter(|set| set.parameters.iter().any(|p| entry.params.contains_key(p.name)))
-        .collect();
-    match used.as_slice() {
-        [] => Ok(&known.sets[0]),
-        [set] => Ok(set),
-        _ => Err(format!(
-            "its parameters are mixed: give all of one set and none of the other, {}",
-            describe_sets(known)
-        )),
-    }
+        .find(|set| {
+            entry.params.keys().all(|key| set.parameters.iter().any(|p| p.name == key.as_str()))
+        })
+        .ok_or_else(|| {
+            format!(
+                "its parameters are mixed: give all of one set and none of the other, {}",
+                describe_sets(known)
+            )
+        })
 }
 
 /// The slots of the `[[feature]]` entries of a pack: one per entry, its bytes the parameters in the table's order.
@@ -280,8 +298,9 @@ pub fn compile(entries: &[FeatureEntry]) -> Result<Vec<Compiled>, FeatureError> 
                     parameter.name, parameter.min, parameter.max
                 )));
             }
-            // A negative value is kept in its byte as two's complement (the offsets of `enemy_scaling`).
-            bytes.push(value as u8);
+            // A negative value is kept in its byte as two's complement (the offsets of `enemy_scaling`); a value of two
+            // bytes is little endian.
+            bytes.extend_from_slice(&value.to_le_bytes()[..parameter.width]);
         }
         slots.push(Compiled { family: Family::Feature, id: known.id, bytes });
     }
@@ -361,6 +380,34 @@ mod tests {
             compile(&[free_progression(1), free_progression(2)]).unwrap_err(),
             FeatureError::Twice { name: "free_progression".into() }
         );
+    }
+
+    #[test]
+    fn the_level_cap_is_a_second_set_with_a_prefix_and_two_bytes_and_its_absence_is_the_old_slot() {
+        let with = |arrival: i64, cap: i64| {
+            entry("free_progression", &[("ginyu_arrival", arrival), ("level_cap", cap)])
+        };
+        let slots = compile(&[with(3, 999)]).unwrap();
+        assert_eq!(
+            slots[0].bytes,
+            [LEVEL_CAP_SET, 3, 0xE7, 0x03],
+            "the prefix, the arrival, 999 little endian"
+        );
+        assert_eq!(compile(&[with(0, 48)]).unwrap()[0].bytes, [LEVEL_CAP_SET, 0, 48, 0]);
+        assert_eq!(
+            compile(&[free_progression(3)]).unwrap()[0].bytes,
+            [3],
+            "no cap: the slot of the old packs"
+        );
+        for cap in [47, 1000] {
+            let text = compile(&[with(3, cap)]).unwrap_err().to_string();
+            assert!(
+                text.contains(&format!("`level_cap` is {cap}, it must be 48 to 999")),
+                "{text}"
+            );
+        }
+        let alone = compile(&[entry("free_progression", &[("level_cap", 99)])]).unwrap_err();
+        assert!(alone.to_string().contains("its parameter `ginyu_arrival` is missing"), "{alone}");
     }
 
     fn party_boosts(guru: i64, porunga_level: i64, lunch: i64) -> FeatureEntry {

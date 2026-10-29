@@ -16,6 +16,14 @@
 //! ([`ssd_save::SaveFile::set_slot`]: mark, checksum and backup copy) with the edited records and the bag projected into the
 //! item list (the entries, their state words, the count and the row count); the result is a [`Commit`], which the host writes to
 //! the machine's cartridge save and whose sidecar entries it re-keys to the new checksum word ([`Commit::rekey`]).
+//!
+//! # Levels past 99 (the level cap of `free_progression`)
+//!
+//! With a pack whose `level_cap` is set ([`Editor::set_progression`]) the editor sets the levels the game reaches with it, up to
+//! the cap, on the same curves the game uses ([`crate::levels`], through [`Growth::stats_at`]). The record keeps its byte (at
+//! most 99); the real level, the EXP's high byte and the BP's high part go to the slot's entry of `ssd.mods` ([`Wide`],
+//! [`Commit::rekey`]). Without such a pack the editor is what it was: the record's byte, the game's caps and a BP of at most
+//! [`BP_MAX`].
 
 mod draw;
 
@@ -23,7 +31,8 @@ pub use draw::{scene, title_strip};
 
 use crate::bag::{Bag, Class, Rules, Sidecar, Stack, story_object};
 use crate::cheats::{CheatSidecar, Cheats};
-use crate::mods_state::{HIGH_BYTES, ModsSidecar};
+use crate::levels::RECORD_LEVEL_MAX;
+use crate::mods_state::{HIGH_BYTES, LEVEL_BYTES, ModState, ModsSidecar};
 use crate::options::SlotOptions;
 use crate::screens::{Summary, place_name};
 use crate::view::{Growth, Labels, Tab};
@@ -31,6 +40,13 @@ use ssd_save::{CHECKSUM_OFFSET, Item, Record, SLOT_BASES, SLOT_COUNT, SaveFile, 
 
 /// The most BP the editor sets: the seven digits the game's screens show.
 pub const BP_MAX: u32 = 9_999_999;
+/// The most BP the editor sets with the level cap (a wide BP, `docs/mods/state.md`): ten digits, the width of the BP at level
+/// 999 (about 1.9 billion).
+pub const BP_MAX_WIDE: u64 = 9_999_999_999;
+/// The most a held key multiplies a level step by, with the level cap (the levels run to 999).
+const LEVEL_FAST_MAX: i64 = 100;
+/// The characters whose levels the level cap extends: those with a level table of the game's (Goku to Vegeta).
+const EXTENDED_IDS: u8 = 8;
 /// The most units a stack holds.
 pub const STACK_MAX: u16 = 99;
 /// The objects of the game (ids 0 to 39), as the picker shows them.
@@ -113,6 +129,27 @@ pub enum Card {
     },
 }
 
+/// What a member has beyond its record (the mod state, `docs/mods/state.md`): the real level when it is above 99 (0 otherwise),
+/// the EXP's bits 24 to 31, and the BP's bits 24 to 39.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Wide {
+    pub level: u16,
+    pub exp_high: u8,
+    pub bp_high: u16,
+}
+
+/// The level of a record with its wide level: the wide one while the record's byte agrees with it (`min(wide, 99) = byte`),
+/// else the byte, as the game's own reader decides it.
+#[must_use]
+pub fn level_of(record: &Record, wide: &Wide) -> u16 {
+    let cap = u16::from(RECORD_LEVEL_MAX);
+    if wide.level > cap && wide.level.min(cap) == u16::from(record.level()) {
+        wide.level
+    } else {
+        u16::from(record.level())
+    }
+}
+
 /// A member of the party under edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
@@ -122,6 +159,9 @@ pub struct Member {
     /// The record as it is now, and as the slot was opened.
     pub record: Record,
     pub opened: Record,
+    /// What the mod state adds to the record, as it is now and as the slot was opened (all zero without the level cap).
+    pub wide: Wide,
+    pub opened_wide: Wide,
     /// The position in the party (the wide BP's high part is kept by it).
     pub position: usize,
 }
@@ -130,7 +170,46 @@ impl Member {
     /// Whether the level, the BP or the stats changed since the slot was opened.
     #[must_use]
     pub fn changed(&self) -> bool {
-        self.record != self.opened
+        self.record != self.opened || self.wide != self.opened_wide
+    }
+
+    /// The real level, and the one the slot was opened with.
+    #[must_use]
+    pub fn level(&self) -> u16 {
+        level_of(&self.record, &self.wide)
+    }
+
+    #[must_use]
+    pub fn opened_level(&self) -> u16 {
+        level_of(&self.opened, &self.opened_wide)
+    }
+
+    /// The BP with its high part, and the one the slot was opened with.
+    #[must_use]
+    pub fn bp(&self) -> u64 {
+        u64::from(self.wide.bp_high) << 24 | u64::from(self.record.bp())
+    }
+
+    #[must_use]
+    pub fn opened_bp(&self) -> u64 {
+        u64::from(self.opened_wide.bp_high) << 24 | u64::from(self.opened.bp())
+    }
+
+    /// The EXP with its high byte, and the one the slot was opened with.
+    #[must_use]
+    pub fn exp(&self) -> u64 {
+        u64::from(self.wide.exp_high) << 24 | u64::from(self.record.exp())
+    }
+
+    #[must_use]
+    pub fn opened_exp(&self) -> u64 {
+        u64::from(self.opened_wide.exp_high) << 24 | u64::from(self.opened.exp())
+    }
+
+    /// Puts a BP of up to 40 bits in the record (its low 24 bits) and in [`Wide::bp_high`].
+    fn set_bp(&mut self, bp: u64) {
+        self.record.set_bp((bp & 0xFF_FFFF) as u32);
+        self.wide.bp_high = u16::try_from(bp >> 24).unwrap_or(u16::MAX);
     }
 }
 
@@ -190,6 +269,17 @@ pub struct Commit {
     /// The members whose BP or level was edited, as (position in the party, character id): the wide BP's high part of each is
     /// dropped, since the editor sets a BP of at most [`BP_MAX`].
     pub edited: Vec<(usize, u8)>,
+    /// With the level cap, what the mod state keeps for each edited member (see [`Wide`]); empty without it.
+    pub wide: Vec<WideEdit>,
+}
+
+/// The mod state of an edited member, written by [`Commit::rekey`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideEdit {
+    /// The position in the party and the character id.
+    pub position: usize,
+    pub id: u8,
+    pub wide: Wide,
 }
 
 /// The four sidecar files of the save slots, as the host keeps them in memory.
@@ -215,21 +305,47 @@ impl Commit {
         if let Some(values) = sidecars.options.entry_for(slot, old).cloned() {
             sidecars.options.store(slot, new, values);
         }
-        if let Some(mut state) = sidecars.mods.entry_for(slot, old).cloned() {
-            if let Some(high) = state.high.as_mut().filter(|high| high.len() == HIGH_BYTES) {
-                for &(position, id) in &self.edited {
-                    // The party slot's high part at +2i, the snapshot's at +20 + 2 * id.
-                    for at in [2 * position, 0x20 + 2 * usize::from(id)] {
-                        if let Some(part) = high.get_mut(at..at + 2) {
-                            part.fill(0);
-                        }
+        let existing = sidecars.mods.entry_for(slot, old).cloned();
+        let had_entry = existing.is_some();
+        let mut state = existing.unwrap_or_default();
+        self.rekey_mods(&mut state);
+        if had_entry || !state.is_empty() {
+            sidecars.mods.store(slot, new, state);
+        }
+    }
+
+    /// The mod state of the slot after the write: the high parts of the edited members dropped (the snapshot's always, the party
+    /// slot's replaced by the edit's own with the level cap), and with the level cap their wide level and EXP's high byte.
+    fn rekey_mods(&self, state: &mut ModState) {
+        if let Some(high) = state.high.as_mut().filter(|high| high.len() == HIGH_BYTES) {
+            for &(position, id) in &self.edited {
+                // The party slot's high part at +2i, the snapshot's at +20 + 2 * id.
+                for at in [2 * position, 0x20 + 2 * usize::from(id)] {
+                    if let Some(part) = high.get_mut(at..at + 2) {
+                        part.fill(0);
                     }
                 }
-                if high.iter().all(|&byte| byte == 0) {
-                    state.high = None;
-                }
             }
-            sidecars.mods.store(slot, new, state);
+        }
+        for edit in &self.wide {
+            let high = state.high.get_or_insert_with(|| vec![0; HIGH_BYTES]);
+            if let Some(part) = high.get_mut(2 * edit.position..2 * edit.position + 2) {
+                part.copy_from_slice(&edit.wide.bp_high.to_le_bytes());
+            }
+            let levels = state.levels.get_or_insert_with(|| vec![0; LEVEL_BYTES]);
+            let (at, exp_at) = (2 * usize::from(edit.id), 2 * 12 + usize::from(edit.id));
+            if let Some(part) = levels.get_mut(at..at + 2) {
+                part.copy_from_slice(&edit.wide.level.to_le_bytes());
+            }
+            if let Some(byte) = levels.get_mut(exp_at) {
+                *byte = edit.wide.exp_high;
+            }
+        }
+        if state.high.as_ref().is_some_and(|high| high.iter().all(|&byte| byte == 0)) {
+            state.high = None;
+        }
+        if state.levels.as_ref().is_some_and(|levels| levels.iter().all(|&byte| byte == 0)) {
+            state.levels = None;
         }
     }
 }
@@ -254,6 +370,10 @@ pub struct Editor {
     leave: bool,
     /// Frames the current direction was held, and the direction (-1, 0, 1).
     held: (i8, u32),
+    /// The pack's `level_cap` when the enabled packs have one (above the game's 48), and the mod state of the slots, which
+    /// holds the wide levels the editor reads and writes with it.
+    level_cap: Option<u16>,
+    mods: ModsSidecar,
 }
 
 /// The checksum word of a slot of the cartridge save.
@@ -310,9 +430,77 @@ impl Editor {
             commit: None,
             leave: false,
             held: (0, 0),
+            level_cap: None,
+            mods: ModsSidecar::empty(),
         };
         editor.refresh_cards();
         Ok(editor)
+    }
+
+    /// Tells the editor what the enabled packs give: `level_cap`, the cap of the pack with `free_progression`'s `level_cap` (read
+    /// from the image the game runs, as the game reads it; `None` for no such pack: the editor is then the game's own), and
+    /// `mods`, the mod state of the slots (`ssd.mods`), which holds the wide levels.
+    pub fn set_progression(&mut self, level_cap: Option<u16>, mods: &ModsSidecar) {
+        self.level_cap =
+            level_cap.filter(|&cap| cap > 48).map(|cap| cap.min(crate::levels::LEVEL_MAX));
+        self.mods = mods.clone();
+        self.refresh_cards();
+    }
+
+    /// The level cap in force: the pack's.
+    #[must_use]
+    pub fn level_cap(&self) -> Option<u16> {
+        self.level_cap
+    }
+
+    /// The most BP the editor sets: a wide BP with the level cap.
+    #[must_use]
+    pub fn bp_max(&self) -> u64 {
+        if self.level_cap.is_some() { BP_MAX_WIDE } else { u64::from(BP_MAX) }
+    }
+
+    /// Whether the level cap extends the levels of character `id` past its game cap.
+    #[must_use]
+    pub fn extended(&self, id: u8) -> bool {
+        self.level_cap.is_some()
+            && id < EXTENDED_IDS
+            && self.labels.growth.get(usize::from(id)).is_some_and(Growth::has_levels)
+    }
+
+    /// The highest level of character `id`: the game's cap, or the pack's when it extends it.
+    #[must_use]
+    pub fn cap_of(&self, id: u8) -> u16 {
+        let game =
+            self.labels.growth.get(usize::from(id)).map_or(0, |growth| u16::from(growth.cap));
+        match self.level_cap {
+            Some(cap) if self.extended(id) => cap.max(game),
+            _ => game,
+        }
+    }
+
+    /// What the mod state of `slot` adds to the record of character `id` at party position `position`, as the slot was written;
+    /// all zero without the level cap.
+    fn wide_of(&self, slot: usize, checksum: u16, position: usize, id: u8) -> Wide {
+        if self.level_cap.is_none() {
+            return Wide::default();
+        }
+        let Some(state) =
+            u8::try_from(slot).ok().and_then(|slot| self.mods.entry_for(slot, checksum))
+        else {
+            return Wide::default();
+        };
+        let pair = |bytes: &[u8], at: usize| {
+            bytes.get(at..at + 2).map_or(0, |part| u16::from_le_bytes([part[0], part[1]]))
+        };
+        let (level, exp_high) = match state.levels.as_deref() {
+            Some(levels) if id < 12 => (
+                pair(levels, 2 * usize::from(id)),
+                levels.get(24 + usize::from(id)).copied().unwrap_or(0),
+            ),
+            _ => (0, 0),
+        };
+        let bp_high = state.high.as_deref().map_or(0, |high| pair(high, 2 * position));
+        Wide { level, exp_high, bp_high }
     }
 
     /// The picker's three slots as the editor's copy of the save has them.
@@ -340,8 +528,11 @@ impl Editor {
             .collect();
         let level = party
             .first()
-            .and_then(|&leader| slot.record(leader).ok())
-            .map_or(0, |record| record.level());
+            .and_then(|&leader| slot.record(leader).ok().map(|record| (leader, record)))
+            .map_or(0, |(leader, record)| {
+                let checksum = checksum_word(self.file.as_bytes(), index);
+                level_of(&record, &self.wide_of(index, checksum, 0, leader))
+            });
         let units = self
             .bags
             .bag_for(index as u8, checksum_word(self.file.as_bytes(), index))
@@ -517,12 +708,15 @@ impl Editor {
             .filter_map(|(position, id)| {
                 let record = data.record(id).ok()?;
                 let label = self.labels.characters.get(usize::from(id));
+                let wide = self.wide_of(index, checksum, position, id);
                 Some(Member {
                     id,
                     name: label.map_or_else(|| format!("#{id}"), |label| label.name.clone()),
                     face: label.and_then(|label| label.face),
                     record,
                     opened: record,
+                    wide,
+                    opened_wide: wide,
                     position,
                 })
             })
@@ -691,7 +885,11 @@ impl Editor {
         }
         let Some(session) = self.session.as_ref() else { return };
         match (session.page, session.row) {
-            (Page::Party, Row::Level) => self.change_level(direction as i32),
+            // With the level cap a held key also strides the levels (the levels run to 999).
+            (Page::Party, Row::Level) => {
+                let stride = if self.level_cap.is_some() { scale.min(LEVEL_FAST_MAX) } else { 1 };
+                self.change_level((direction * stride) as i32);
+            }
             (Page::Party, Row::Bp) => self.change_bp(direction * scale),
             _ => self.step_count(direction),
         }
@@ -703,6 +901,7 @@ impl Editor {
 
     /// Sets the level of the member under the cursor by `by` levels (clamped to the member's rows, with a refusal), setting
     /// the max HP and KI and the EXP from the level's row, filling HP and KI, and the BP to the table's value plus the delta.
+    /// With the level cap the rows past the game's own are the extension's ([`Growth::stats_at`]).
     fn change_level(&mut self, by: i32) {
         let Some(session) = self.session.as_ref() else { return };
         let Some(member) = session.members.get(session.member) else { return };
@@ -712,41 +911,55 @@ impl Editor {
             self.say(format!("{name} has no level table."));
             return;
         }
-        let level = i32::from(member.record.level());
+        let extended = self.extended(member.id);
+        let (cap, min) = (i32::from(self.cap_of(member.id)), i32::from(growth.min));
+        let level = i32::from(member.level());
         let target = level + by;
-        if target > i32::from(growth.cap) {
-            self.say(format!("{name} stops at LV {}.", growth.cap));
-            return;
-        }
-        if target < i32::from(growth.min) {
-            self.say(if growth.min > 1 {
-                format!("{name} starts at LV {}.", growth.min)
+        if target > cap || target < min {
+            let (limit, text) = if target > cap {
+                (cap, format!("{name} stops at LV {cap}."))
+            } else if min > 1 {
+                (min, format!("{name} starts at LV {min}."))
             } else {
-                format!("{name} starts at LV 1.")
-            });
+                (min, format!("{name} starts at LV 1."))
+            };
+            self.say(text);
+            if level != limit {
+                self.set_member_level(&growth, extended, limit);
+            }
             return;
         }
-        let Some(session) = self.session.as_mut() else { return };
-        let member = &mut session.members[session.member];
-        let delta = delta_of(&growth, &member.record);
-        set_level(&mut member.record, &growth, target as u8, delta);
+        self.set_member_level(&growth, extended, target);
     }
 
-    /// Moves the BP by `by` (never past 0 and [`BP_MAX`]).
+    /// Puts the member under the cursor at `level`, keeping its delta over the table.
+    fn set_member_level(&mut self, growth: &Growth, extended: bool, level: i32) {
+        let wide_mode = self.level_cap.is_some();
+        let bp_max = self.bp_max();
+        let Some(session) = self.session.as_mut() else { return };
+        let member = &mut session.members[session.member];
+        let delta = delta_wide(growth, extended, member.level(), member.bp());
+        if let Ok(level) = u16::try_from(level) {
+            set_level(member, growth, extended, wide_mode, level, delta, bp_max);
+        }
+    }
+
+    /// Moves the BP by `by` (never past 0 and [`Editor::bp_max`]).
     fn change_bp(&mut self, by: i64) {
+        let max = self.bp_max();
         let Some(session) = self.session.as_mut() else { return };
         let Some(member) = session.members.get_mut(session.member) else { return };
-        let now = i64::from(member.record.bp());
-        let wanted = now + by;
-        let new = wanted.clamp(0, i64::from(BP_MAX));
-        let text = if wanted > i64::from(BP_MAX) {
-            Some(format!("BP stops at {BP_MAX}."))
+        let now = i64::try_from(member.bp()).unwrap_or(i64::MAX);
+        let wanted = now.saturating_add(by);
+        let new = u64::try_from(wanted).unwrap_or(0).min(max);
+        let text = if u64::try_from(wanted).is_ok_and(|wanted| wanted > max) {
+            Some(format!("BP stops at {max}."))
         } else if wanted < 0 {
             Some("BP stops at 0.".to_owned())
         } else {
             None
         };
-        member.record.set_bp(new as u32);
+        member.set_bp(new);
         if let Some(text) = text {
             self.say(text);
         }
@@ -797,13 +1010,14 @@ impl Editor {
         if session.page == Page::Party {
             let Some(member) = session.members.get(session.member) else { return };
             let growth = self.growth(member.id);
-            let Some(table) = growth.at(member.record.level()) else {
+            let Some(table) = growth.stats_at(member.level(), self.extended(member.id)) else {
                 self.say("No table value for this level.");
                 return;
             };
+            let max = self.bp_max();
             if let Some(session) = self.session.as_mut() {
                 let at = session.member;
-                session.members[at].record.set_bp(table.bp.min(BP_MAX));
+                session.members[at].set_bp(table.bp.min(max));
             }
         } else {
             let stacks = self.stacks(session.page);
@@ -963,11 +1177,15 @@ impl Editor {
         let index = session.slot;
         let mut slot = session.data.clone();
         let mut edited = Vec::new();
+        let mut wide = Vec::new();
         for member in session.members.iter().filter(|m| m.changed()) {
             if slot.set_record(member.id, &member.record).is_err() {
                 continue;
             }
             edited.push((member.position, member.id));
+            if self.level_cap.is_some() {
+                wide.push(WideEdit { position: member.position, id: member.id, wide: member.wide });
+            }
         }
         let order = session.bag.project(None);
         let list: Vec<(Item, u16)> = order
@@ -992,6 +1210,7 @@ impl Editor {
             new_checksum,
             bag: session.bag.clone(),
             edited,
+            wide,
         });
         self.bags.store(index as u8, new_checksum, &session.bag);
         self.cheated[index] = true;
@@ -1004,23 +1223,46 @@ impl Editor {
 /// The BP a member has over the table's value for its level (0 when the table has no row for the level).
 #[must_use]
 pub fn delta_of(growth: &Growth, record: &Record) -> i64 {
-    growth.at(record.level()).map_or(0, |table| i64::from(record.bp()) - i64::from(table.bp))
+    delta_wide(growth, false, u16::from(record.level()), u64::from(record.bp()))
 }
 
-/// Puts the stats of `level` in `record` as the game builds a record: the level, the max HP and KI from the row, HP and KI
-/// full, the EXP at the start of the level and byte `$0E` of the row; the BP is the table's value plus `delta`, capped to
-/// [`BP_MAX`] and 0. A level the table has no row for leaves the record as it is.
-pub fn set_level(record: &mut Record, growth: &Growth, level: u8, delta: i64) {
-    let Some(row) = growth.at(level) else { return };
-    record.set_level(level);
+/// The same for a level and a BP that may be past the record's fields: `extended` takes the rows past the game's cap from the
+/// extension ([`Growth::stats_at`]).
+#[must_use]
+pub fn delta_wide(growth: &Growth, extended: bool, level: u16, bp: u64) -> i64 {
+    growth.stats_at(level, extended).map_or(0, |table| {
+        i64::try_from(bp).unwrap_or(i64::MAX).saturating_sub(i64::try_from(table.bp).unwrap_or(0))
+    })
+}
+
+/// Puts the stats of `level` in the member as the game builds a record: the level (the record's byte saturates at 99 and, with
+/// the level cap, the real level is in [`Wide::level`]), the max HP and KI from the row, HP and KI full, the EXP at the start
+/// of the level (its bits 24 to 31 in [`Wide::exp_high`]) and byte `$0E` of the row; the BP is the table's value plus `delta`,
+/// between 0 and `bp_max`. A level the table has no row for leaves the member as it is.
+pub fn set_level(
+    member: &mut Member,
+    growth: &Growth,
+    extended: bool,
+    wide_mode: bool,
+    level: u16,
+    delta: i64,
+    bp_max: u64,
+) {
+    let Some(row) = growth.stats_at(level, extended) else { return };
+    let record = &mut member.record;
+    record.set_level(u8::try_from(level.min(u16::from(RECORD_LEVEL_MAX))).unwrap_or(u8::MAX));
+    if wide_mode {
+        member.wide.level = if level > u16::from(RECORD_LEVEL_MAX) { level } else { 0 };
+        member.wide.exp_high = u8::try_from(row.exp >> 24).unwrap_or(u8::MAX);
+    }
     record.set_max_hp(row.max_hp);
     record.set_hp(row.max_hp);
     record.set_max_ki(row.max_ki);
     record.set_ki(row.max_ki);
-    record.set_exp(row.exp);
+    record.set_exp((row.exp & 0xFF_FFFF) as u32);
     record.set_byte_0e(row.byte_0e);
-    let bp = (i64::from(row.bp) + delta).clamp(0, i64::from(BP_MAX));
-    record.set_bp(bp as u32);
+    let bp = i64::try_from(row.bp).unwrap_or(i64::MAX).saturating_add(delta);
+    member.set_bp(u64::try_from(bp).unwrap_or(0).min(bp_max));
 }
 
 #[cfg(test)]

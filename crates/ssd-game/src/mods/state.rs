@@ -16,6 +16,9 @@
 //! - `+0x50`: the kind of the battle, for `enemy_scaling` with offsets: the marker `SSDe` (4 bytes), then one byte that is 1
 //!   between a random encounter's group pick and the build of its records, and one that is 1 while the battle whose records
 //!   were built last is a random encounter. Its own marker, so it is valid whether or not this block is live.
+//! - `+0x60`: the wide levels of `free_progression`'s `level_cap`: the marker `SSDl` (4 bytes), then the level of each of the
+//!   12 characters as 16 bits (character `id` at `+0x64 + 2id`), then the EXP's bits 24 to 31 of each (`+0x7C + id`). Its own
+//!   marker, like the kind of the battle, so it is valid whether or not the block is live; the sidecar keeps it (`levels`).
 //! - the rest to `+0xFF`: free, zero.
 //!
 //! **Decision: the extended flags are not copied into the block.** The 256 flag bytes do not fit beside the high parts in
@@ -24,7 +27,7 @@
 //!
 //! The reference replays never write the range (`scene_ext`'s scan, which covers `$7F:FAFC`..`$7F:FBFF` too).
 
-use ssd_menus::mods_state::{FLAG_BYTES, HIGH_BYTES, ModState};
+use ssd_menus::mods_state::{FLAG_BYTES, HIGH_BYTES, LEVEL_BYTES, ModState};
 use ssd_oracle::HostEvent;
 
 /// The application event that carries the mod state of a run in a format 2 replay: its payload is
@@ -82,6 +85,34 @@ pub const SCRATCH_END: usize = SCRATCH_KAIOKEN_HIGH + 2;
 pub const BATTLE_KIND: usize = 0x50;
 /// The marker of the kind-of-battle bytes.
 pub const KIND_MARKER: [u8; 4] = *b"SSDe";
+
+/// The member pick of `party_boosts` (`party_boosts`, the HD driver): six bytes at `+0x58`, none of them saved with the block or
+/// zeroed with the scratch. The marker `SSDq` (the power-on fill of work RAM is random), the object the pick is for and the row of
+/// the party list of the first fighter the original accepts it for (`0xFF`: it accepts none). The hooks write them while an object
+/// of the pack is used with its switch on; the driver answers the original's own fighter choice with them.
+pub const PICK: usize = 0x58;
+/// The marker of the pick.
+pub const PICK_MARKER: [u8; 4] = *b"SSDq";
+/// The bus address of the pick's marker, its object and its row.
+pub const PICK_AT: u32 = BLOCK + PICK as u32;
+pub const PICK_ITEM_AT: u32 = PICK_AT + 4;
+pub const PICK_ROW_AT: u32 = PICK_AT + 5;
+
+/// The wide levels (`levels`): the block offset of their marker, the marker, and the bus address of the 36 bytes behind it
+/// (twelve levels of 16 bits, then twelve EXP high bytes).
+pub const LEVELS_MARKER: usize = 0x60;
+pub const LEVELS_MARK: [u8; 4] = *b"SSDl";
+pub const LEVELS_MARKER_AT: u32 = BLOCK + LEVELS_MARKER as u32;
+pub const LEVELS_AT: u32 = LEVELS_MARKER_AT + 4;
+/// The bus address of the wide level of character `id` (16 bits) and of its EXP's high byte.
+#[must_use]
+pub fn wide_level_at(id: u8) -> u32 {
+    LEVELS_AT + 2 * u32::from(id)
+}
+#[must_use]
+pub fn exp_high_at(id: u8) -> u32 {
+    LEVELS_AT + 2 * u32::from(CHARACTERS) + u32::from(id)
+}
 
 /// The shift a damage pair needs: the smallest `s` such that the larger of the two BPs, plus a quarter of it (the class
 /// bonus of `05:B6F2`, which can add 25 percent before the damage), fits 24 bits. Both BPs are shifted by it.
@@ -169,6 +200,38 @@ pub fn flags_live(wram: &[u8]) -> bool {
     wram[at(FLAGS_MARKER_AT)..at(FLAGS_MARKER_AT) + 4] == FLAGS_MARKER
 }
 
+/// Whether the wide levels' marker is in `wram`.
+#[must_use]
+pub fn levels_live(wram: &[u8]) -> bool {
+    wram[at(LEVELS_MARKER_AT)..at(LEVELS_MARKER_AT) + 4] == LEVELS_MARK
+}
+
+/// The level a record's byte and the wide level of its character make together: the wide level while the byte agrees with it
+/// (`min(wide, 99) = byte`, the byte being the wide level saturated at 99), else the byte.
+#[must_use]
+pub fn level_agreeing(wide: u16, byte: u8) -> u16 {
+    let cap = u16::from(ssd_menus::levels::RECORD_LEVEL_MAX);
+    if wide > cap && wide.min(cap) == u16::from(byte) { wide } else { u16::from(byte) }
+}
+
+/// The level of character `id` whose record's level byte is `byte`, read from the mod state in `wram` (a snapshot of work RAM
+/// from `$7E:0000`, at least 128 KiB): the wide level when the wide levels' marker is there and the byte agrees with it, else the
+/// byte. This is the reader the HD screens use; the game's own is `levels::effective_level`, with the same rule.
+#[must_use]
+pub fn level_in(wram: &[u8], id: u8, byte: u8) -> u16 {
+    if id < CHARACTERS && levels_live(wram) {
+        let at = at(wide_level_at(id));
+        return level_agreeing(u16::from_le_bytes([wram[at], wram[at + 1]]), byte);
+    }
+    u16::from(byte)
+}
+
+/// The EXP's bits 24 to 31 of character `id` in `wram`, or 0 without the wide levels' marker.
+#[must_use]
+pub fn exp_high_in(wram: &[u8], id: u8) -> u8 {
+    if id < CHARACTERS && levels_live(wram) { wram[at(exp_high_at(id))] } else { 0 }
+}
+
 /// The high 16 bits at block offset `offset` of `wram`, or zero when the block is not live (a neutral block).
 #[must_use]
 pub fn high_in(wram: &[u8], offset: usize) -> u16 {
@@ -203,7 +266,11 @@ pub fn capture(wram: &[u8]) -> ModState {
         let at = at(BLOCK);
         wram[at..at + HIGH_BYTES].to_vec()
     });
-    ModState { flags, high }
+    let levels = levels_live(wram).then(|| {
+        let at = at(LEVELS_AT);
+        wram[at..at + LEVEL_BYTES].to_vec()
+    });
+    ModState { flags, high, levels }
 }
 
 /// The host events that put `state` into work RAM: the markers with the bytes of each part that has one. A part without
@@ -220,6 +287,10 @@ pub fn apply_events(state: &ModState) -> Vec<HostEvent> {
         });
         events.push(HostEvent::Wram { address: MARKER_AT, bytes: MARKER.to_vec() });
     }
+    if let Some(levels) = &state.levels {
+        events.push(HostEvent::Wram { address: LEVELS_AT, bytes: levels.clone() });
+        events.push(HostEvent::Wram { address: LEVELS_MARKER_AT, bytes: LEVELS_MARK.to_vec() });
+    }
     if let Some(flags) = &state.flags {
         events.push(HostEvent::Wram { address: FLAGS, bytes: flags.clone() });
         events.push(HostEvent::Wram { address: FLAGS_MARKER_AT, bytes: FLAGS_MARKER.to_vec() });
@@ -234,6 +305,9 @@ pub fn clear_events(wram: &[u8]) -> Vec<HostEvent> {
     let mut events = Vec::new();
     if block_live(wram) {
         events.push(HostEvent::Wram { address: MARKER_AT, bytes: vec![0; 4] });
+    }
+    if levels_live(wram) {
+        events.push(HostEvent::Wram { address: LEVELS_MARKER_AT, bytes: vec![0; 4] });
     }
     if flags_live(wram) {
         events.push(HostEvent::Wram { address: FLAGS_MARKER_AT, bytes: vec![0; 4] });
@@ -337,8 +411,11 @@ mod tests {
 
     #[test]
     fn a_state_is_applied_as_markers_and_bytes_and_cleared_as_markers() {
-        let state =
-            ModState { flags: Some(vec![0x55; FLAG_BYTES]), high: Some(vec![0x01; HIGH_BYTES]) };
+        let state = ModState {
+            flags: Some(vec![0x55; FLAG_BYTES]),
+            high: Some(vec![0x01; HIGH_BYTES]),
+            levels: None,
+        };
         let events = apply_events(&state);
         assert_eq!(events.len(), 5);
         assert!(
@@ -368,6 +445,29 @@ mod tests {
         assert_eq!(cleared.len(), 2, "both markers are cleared");
         assert!(
             matches!(&cleared[0], HostEvent::Wram { address, bytes } if *address == MARKER_AT && bytes == &vec![0; 4])
+        );
+    }
+
+    #[test]
+    fn the_wide_level_counts_only_while_the_records_byte_agrees_with_it() {
+        assert_eq!(level_agreeing(150, 99), 150);
+        assert_eq!(level_agreeing(150, 60), 60, "a routine wrote the byte by itself");
+        assert_eq!(level_agreeing(99, 99), 99, "a wide level of 99 or less is no wide level");
+        assert_eq!(level_agreeing(0, 47), 47);
+        let mut wram = vec![0_u8; 0x2_0000];
+        assert_eq!((level_in(&wram, 1, 99), exp_high_in(&wram, 1)), (99, 0), "no marker");
+        let put = |wram: &mut Vec<u8>, address: u32, bytes: &[u8]| {
+            wram[at(address)..at(address) + bytes.len()].copy_from_slice(bytes);
+        };
+        put(&mut wram, LEVELS_MARKER_AT, &LEVELS_MARK);
+        put(&mut wram, wide_level_at(1), &321_u16.to_le_bytes());
+        put(&mut wram, exp_high_at(1), &[7]);
+        assert_eq!((level_in(&wram, 1, 99), exp_high_in(&wram, 1)), (321, 7));
+        assert_eq!(level_in(&wram, 1, 98), 98);
+        assert_eq!(
+            (level_in(&wram, 12, 99), exp_high_in(&wram, 12)),
+            (99, 0),
+            "past the characters"
         );
     }
 }

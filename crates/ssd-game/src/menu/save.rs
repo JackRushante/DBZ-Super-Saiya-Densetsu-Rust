@@ -9,8 +9,10 @@
 
 use super::presses::{Button, Step, Until};
 use super::{MenuProbe, keeper};
+use crate::mods::state::level_agreeing;
 use ssd_menus::Labels;
 use ssd_menus::bag::Sidecar;
+use ssd_menus::mods_state::ModsSidecar;
 use ssd_menus::nav::ORIGINAL_MENU_ROWS;
 use ssd_menus::screens::{SAVE_SLOTS as SLOTS, SlotState, Summary, place_name};
 use ssd_save::{SaveFile, Slot, SlotStatus};
@@ -57,7 +59,12 @@ pub(super) fn leave_steps() -> Vec<Step> {
 /// The three slots as the cartridge's save `sram` has them (`None`: the host gave no save, so every slot counts as
 /// holding a game and a save asks first). The bag of a slot is the sidecar's for the slot's checksum, when it has one, so
 /// the items are counted as the bag counts them.
-pub(super) fn slots(sram: Option<&[u8]>, labels: &Labels, sidecar: &Sidecar) -> [SlotState; SLOTS] {
+pub(super) fn slots(
+    sram: Option<&[u8]>,
+    labels: &Labels,
+    sidecar: &Sidecar,
+    mods: &ModsSidecar,
+) -> [SlotState; SLOTS] {
     let Some(file) = sram.and_then(|sram| SaveFile::from_bytes(sram).ok()) else {
         return std::array::from_fn(|_| SlotState::Used(None));
     };
@@ -65,11 +72,18 @@ pub(super) fn slots(sram: Option<&[u8]>, labels: &Labels, sidecar: &Sidecar) -> 
         Ok(SlotStatus::Empty) => SlotState::Empty,
         Ok(SlotStatus::Good | SlotStatus::FromBackup) => match file.slot(index) {
             Ok(slot) => {
-                let units = u8::try_from(index).ok().and_then(|number| {
-                    let checksum = keeper::good_checksum(sram?, number)?;
+                let number = u8::try_from(index).ok();
+                let checksum =
+                    number.zip(sram).and_then(|(n, sram)| keeper::good_checksum(sram, n));
+                let units = number.zip(checksum).and_then(|(number, checksum)| {
                     sidecar.bag_for(number, checksum).map(ssd_menus::bag::Bag::units)
                 });
-                SlotState::Used(Some(summary_of(&slot, labels, units)))
+                // The leader's wide level, kept in the slot's mod state when it is above 99.
+                let wide = number
+                    .zip(checksum)
+                    .and_then(|(number, checksum)| mods.entry_for(number, checksum))
+                    .and_then(|state| state.levels.as_deref());
+                SlotState::Used(Some(summary_of(&slot, labels, units, wide)))
             }
             Err(_) => SlotState::Used(None),
         },
@@ -77,8 +91,9 @@ pub(super) fn slots(sram: Option<&[u8]>, labels: &Labels, sidecar: &Sidecar) -> 
     })
 }
 
-/// What a slot of the cartridge holds. `units` are the units of the slot's bag when the sidecar has it.
-fn summary_of(slot: &Slot, labels: &Labels, units: Option<u32>) -> Summary {
+/// What a slot of the cartridge holds. `units` are the units of the slot's bag when the sidecar has it, and `wide` the 36 bytes
+/// of the slot's wide levels (the mod state's `levels`).
+fn summary_of(slot: &Slot, labels: &Labels, units: Option<u32>, wide: Option<&[u8]>) -> Summary {
     let party = slot.party();
     let faces = party
         .iter()
@@ -86,8 +101,13 @@ fn summary_of(slot: &Slot, labels: &Labels, units: Option<u32>) -> Summary {
         .collect();
     let level = party
         .first()
-        .and_then(|&leader| slot.record(leader).ok())
-        .map_or(0, |record| record.level());
+        .and_then(|&leader| slot.record(leader).ok().map(|r| (leader, r)))
+        .map_or(0, |(leader, record)| {
+            let wide_level = wide
+                .and_then(|levels| levels.get(2 * usize::from(leader)..2 * usize::from(leader) + 2))
+                .map_or(0, |part| u16::from_le_bytes([part[0], part[1]]));
+            level_agreeing(wide_level, record.level())
+        });
     let items = units.map_or_else(|| slot.items().len(), |units| units as usize);
     Summary {
         faces,
@@ -180,7 +200,7 @@ mod tests {
     #[test]
     fn a_slot_shows_what_the_save_holds_the_faces_the_place_the_level_the_money_and_the_items() {
         let sram = cartridge(&[0, 1]);
-        let states = slots(Some(&sram), &labels(), &Sidecar::empty());
+        let states = slots(Some(&sram), &labels(), &Sidecar::empty(), &ModsSidecar::empty());
         let SlotState::Used(Some(first)) = &states[0] else { panic!("{:?}", states[0]) };
         assert_eq!(
             first.faces,
@@ -193,7 +213,7 @@ mod tests {
         assert_eq!((second.level, second.zeni, second.place), (11, 21, Some("King Kai's planet")));
         assert_eq!(states[2], SlotState::Empty, "a slot with no mark is empty");
         // No save to look at: every slot counts as a game, so a save asks first.
-        let blind = slots(None, &labels(), &Sidecar::empty());
+        let blind = slots(None, &labels(), &Sidecar::empty(), &ModsSidecar::empty());
         assert!(blind.iter().all(|state| *state == SlotState::Used(None)));
     }
 
@@ -204,7 +224,10 @@ mod tests {
         sram[at] ^= 0xFF;
         let at = ssd_save::SLOT_BASES[0] + ssd_save::BACKUP_OFFSET + 5;
         sram[at] ^= 0xFF;
-        assert_eq!(slots(Some(&sram), &labels(), &Sidecar::empty())[0], SlotState::Used(None));
+        assert_eq!(
+            slots(Some(&sram), &labels(), &Sidecar::empty(), &ModsSidecar::empty())[0],
+            SlotState::Used(None)
+        );
     }
 
     /// One frame: the driver gives the joypad, the fake menu runs it.
@@ -407,5 +430,38 @@ mod tests {
         assert_eq!((menu.field, driver.curtain()), (0, Curtain::Down), "the menu is closed");
         assert_eq!(menu.saved, Vec::<u8>::new());
         assert!(pads.iter().all(|pad| !pad.a), "only B");
+    }
+
+    #[test]
+    fn the_leaders_wide_level_of_the_slots_mod_state_is_the_level_the_slot_shows() {
+        use ssd_menus::mods_state::{LEVEL_BYTES, ModState};
+        let mut file = SaveFile::blank();
+        let mut slot = Slot::empty();
+        let mut record = Record::blank();
+        record.set_flags(0xC0);
+        record.set_level(99);
+        record.set_character_id(0);
+        slot.set_record(0, &record).unwrap();
+        slot.set_party(&[0]).unwrap();
+        file.set_slot(0, &slot).unwrap();
+        let sram = file.as_bytes().to_vec();
+        let checksum = keeper::good_checksum(&sram, 0).unwrap();
+        let level_of =
+            |mods: &ModsSidecar| match &slots(Some(&sram), &labels(), &Sidecar::empty(), mods)[0] {
+                SlotState::Used(Some(summary)) => summary.level,
+                other => panic!("{other:?}"),
+            };
+        assert_eq!(level_of(&ModsSidecar::empty()), 99, "the record's byte");
+        let mut levels = vec![0_u8; LEVEL_BYTES];
+        levels[..2].copy_from_slice(&300_u16.to_le_bytes());
+        let mut mods = ModsSidecar::empty();
+        mods.store(0, checksum, ModState { levels: Some(levels.clone()), ..ModState::default() });
+        assert_eq!(level_of(&mods), 300, "Goku's wide level");
+        mods.store(
+            0,
+            checksum.wrapping_add(1),
+            ModState { levels: Some(levels), ..ModState::default() },
+        );
+        assert_eq!(level_of(&mods), 99, "the state of another save is not this one's");
     }
 }

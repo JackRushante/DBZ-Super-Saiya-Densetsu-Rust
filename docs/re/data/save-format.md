@@ -188,5 +188,6 @@ first, by an ignored test that compares the game's memory with the edited slot
   object and attribute (`item_attributes` without bit 0), the state words (image `$3A0`, one word an entry), the count at `$01B2`, and
   `$01B3`, which `01:B782` derives from the count for the page shown (the count, at most 8, for the first page).
 - **Sidecars** of the slot (`ssd.bag`, `ssd.cheats`, `ssd.options`, `ssd.mods`) are keyed by the slot's checksum word, which a write
-  changes; the editor stores each entry again under the new word. The wide BP's high part of an edited member is dropped.
+  changes; the editor stores each entry again under the new word. The wide BP's high part of an edited member is dropped, or, with a pack
+  whose `level_cap` is set, replaced by the edit's own together with the member's wide level and EXP high byte (`docs/mods/state.md`).
 

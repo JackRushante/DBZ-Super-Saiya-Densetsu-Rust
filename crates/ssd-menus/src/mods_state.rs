@@ -10,27 +10,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::cheats::config;
 
-/// The layout version of [`ModsSidecar`].
-pub const SIDECAR_VERSION: u32 = 1;
+/// The layout version of [`ModsSidecar`] (2: the wide levels; version 1 files are still read).
+pub const SIDECAR_VERSION: u32 = 2;
+/// The version before the wide levels.
+const LEGACY_VERSION: u32 = 1;
 /// The bytes of the extended flags (2048 bits, `$7F:FD00`).
 pub const FLAG_BYTES: usize = 256;
 /// The bytes of the block the sidecar keeps: the wide BP's high parts (`$7F:FB00` to `$7F:FB37`).
 pub const HIGH_BYTES: usize = 0x38;
 
-/// The mod state of one save: the flags and the high parts, each with its marker when there was one.
+/// The bytes of the wide levels (`levels`): twelve levels of two bytes (little endian, character `id` at `2 * id`), then the
+/// EXP's bits 24 to 31 of the twelve characters, one byte each.
+pub const LEVEL_BYTES: usize = 36;
+
+/// The mod state of one save: the flags, the high parts and the wide levels, each with its marker when there was one.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ModState {
     /// The 256 bytes of the extended flags, when their marker was there.
     pub flags: Option<Vec<u8>>,
     /// The 56 bytes of the wide BP's high parts, when the block's marker was there.
     pub high: Option<Vec<u8>>,
+    /// The 36 bytes of the wide levels and EXP's high bytes, when their marker was there (`free_progression`'s `level_cap`).
+    pub levels: Option<Vec<u8>>,
+}
+
+/// The state as it was written before the wide levels (the replays and the sidecars of the version 1).
+#[derive(Deserialize)]
+struct LegacyState {
+    flags: Option<Vec<u8>>,
+    high: Option<Vec<u8>>,
+}
+
+impl From<LegacyState> for ModState {
+    fn from(old: LegacyState) -> Self {
+        Self { flags: old.flags, high: old.high, levels: None }
+    }
 }
 
 impl ModState {
-    /// Whether neither marker was there: the save keeps nothing.
+    /// Whether no marker was there: the save keeps nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.flags.is_none() && self.high.is_none()
+        self.flags.is_none() && self.high.is_none() && self.levels.is_none()
     }
 
     /// Checks the lengths of the two parts.
@@ -44,6 +65,9 @@ impl ModState {
         }
         if self.high.as_ref().is_some_and(|high| high.len() != HIGH_BYTES) {
             return Err(format!("the high parts are {HIGH_BYTES} bytes"));
+        }
+        if self.levels.as_ref().is_some_and(|levels| levels.len() != LEVEL_BYTES) {
+            return Err(format!("the wide levels are {LEVEL_BYTES} bytes"));
         }
         Ok(())
     }
@@ -60,8 +84,16 @@ impl ModState {
     ///
     /// The bytes are not a mod state, or a part has the wrong length.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let (state, _): (Self, usize) = bincode::serde::decode_from_slice(bytes, config())
-            .map_err(|error| format!("not a mod state: {error}"))?;
+        let state = match bincode::serde::decode_from_slice::<Self, _>(bytes, config()) {
+            Ok((state, used)) if used == bytes.len() => state,
+            // A replay made before the wide levels: two parts.
+            _ => {
+                let (old, _): (LegacyState, usize) =
+                    bincode::serde::decode_from_slice(bytes, config())
+                        .map_err(|error| format!("not a mod state: {error}"))?;
+                old.into()
+            }
+        };
         state.check()?;
         Ok(state)
     }
@@ -75,6 +107,37 @@ pub struct SavedMods {
     /// The checksum word of the slot when the state was saved.
     pub checksum: u16,
     pub state: ModState,
+}
+
+/// The entries of a version 1 file.
+#[derive(Deserialize)]
+struct LegacySaved {
+    slot: u8,
+    checksum: u16,
+    state: LegacyState,
+}
+
+/// A version 1 file.
+#[derive(Deserialize)]
+struct LegacySidecar {
+    #[allow(dead_code)]
+    version: u32,
+    saves: Vec<LegacySaved>,
+}
+
+impl From<LegacySidecar> for ModsSidecar {
+    fn from(old: LegacySidecar) -> Self {
+        let saves = old
+            .saves
+            .into_iter()
+            .map(|saved| SavedMods {
+                slot: saved.slot,
+                checksum: saved.checksum,
+                state: saved.state.into(),
+            })
+            .collect();
+        Self { version: SIDECAR_VERSION, saves }
+    }
 }
 
 /// The sidecar file (`saves/ssd.mods`): the mod state of the save slots, versioned.
@@ -106,11 +169,25 @@ impl ModsSidecar {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let (version, _): (u32, usize) = bincode::serde::decode_from_slice(bytes, config())
             .map_err(|error| format!("not a mod state file: {error}"))?;
-        if version != SIDECAR_VERSION {
-            return Err(format!("mod state file version {version}, expected {SIDECAR_VERSION}"));
-        }
-        let (sidecar, _): (Self, usize) = bincode::serde::decode_from_slice(bytes, config())
-            .map_err(|error| format!("not a mod state file: {error}"))?;
+        let sidecar = match version {
+            SIDECAR_VERSION => {
+                let (sidecar, _): (Self, usize) =
+                    bincode::serde::decode_from_slice(bytes, config())
+                        .map_err(|error| format!("not a mod state file: {error}"))?;
+                sidecar
+            }
+            LEGACY_VERSION => {
+                let (old, _): (LegacySidecar, usize) =
+                    bincode::serde::decode_from_slice(bytes, config())
+                        .map_err(|error| format!("not a mod state file: {error}"))?;
+                old.into()
+            }
+            _ => {
+                return Err(format!(
+                    "mod state file version {version}, expected {SIDECAR_VERSION}"
+                ));
+            }
+        };
         let saves = sidecar.saves.into_iter().filter(|saved| saved.state.check().is_ok()).collect();
         Ok(Self { saves, ..sidecar })
     }
@@ -142,6 +219,7 @@ mod tests {
         ModState {
             flags: Some((0..FLAG_BYTES).map(|k| k as u8).collect()),
             high: Some((0..HIGH_BYTES).map(|k| (k * 3) as u8).collect()),
+            levels: Some((0..LEVEL_BYTES).map(|k| (k * 5) as u8).collect()),
         }
     }
 
@@ -164,7 +242,11 @@ mod tests {
         sidecar.store(0, 7, ModState::default());
         assert!(sidecar.saves.is_empty(), "the slot's entry is removed");
         sidecar.store(2, 9, full());
-        sidecar.store(2, 10, ModState { flags: None, high: Some(vec![1; HIGH_BYTES]) });
+        sidecar.store(
+            2,
+            10,
+            ModState { flags: None, high: Some(vec![1; HIGH_BYTES]), levels: None },
+        );
         assert_eq!(sidecar.saves.len(), 1, "the slot has one entry");
         assert_eq!(sidecar.entry_for(2, 10).and_then(|state| state.flags.as_ref()), None);
     }
@@ -185,12 +267,51 @@ mod tests {
         sidecar.saves.push(SavedMods {
             slot: 0,
             checksum: 1,
-            state: ModState { flags: Some(vec![0; 3]), high: None },
+            state: ModState { flags: Some(vec![0; 3]), high: None, levels: None },
         });
         let back = ModsSidecar::from_bytes(&sidecar.to_bytes()).expect("a mod state file");
         assert!(back.saves.is_empty(), "a short flag bank is not kept");
         let state = full();
         assert_eq!(ModState::from_bytes(&state.to_bytes()), Ok(state));
         assert!(ModState::from_bytes(&[0xAA; 4]).is_err());
+    }
+
+    /// A state and a sidecar as the version 1 wrote them (before the wide levels).
+    #[derive(serde::Serialize)]
+    struct OldState {
+        flags: Option<Vec<u8>>,
+        high: Option<Vec<u8>>,
+    }
+    #[derive(serde::Serialize)]
+    struct OldSaved {
+        slot: u8,
+        checksum: u16,
+        state: OldState,
+    }
+    #[derive(serde::Serialize)]
+    struct OldSidecar {
+        version: u32,
+        saves: Vec<OldSaved>,
+    }
+
+    #[test]
+    fn a_state_and_a_sidecar_written_before_the_wide_levels_are_still_read() {
+        let old = OldState { flags: Some(vec![9; FLAG_BYTES]), high: None };
+        let bytes = bincode::serde::encode_to_vec(&old, config()).unwrap();
+        let state = ModState::from_bytes(&bytes).expect("a version 1 state");
+        assert_eq!(state.flags, old.flags);
+        assert_eq!(state.levels, None);
+        let file = OldSidecar {
+            version: 1,
+            saves: vec![OldSaved {
+                slot: 2,
+                checksum: 0x77,
+                state: OldState { flags: None, high: Some(vec![4; HIGH_BYTES]) },
+            }],
+        };
+        let bytes = bincode::serde::encode_to_vec(&file, config()).unwrap();
+        let back = ModsSidecar::from_bytes(&bytes).expect("a version 1 file");
+        assert_eq!(back.version, SIDECAR_VERSION);
+        assert_eq!(back.entry_for(2, 0x77).and_then(|s| s.high.clone()), Some(vec![4; HIGH_BYTES]));
     }
 }

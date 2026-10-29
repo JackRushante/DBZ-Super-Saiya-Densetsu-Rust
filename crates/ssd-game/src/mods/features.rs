@@ -202,7 +202,11 @@ const REGISTERED: &[u16] = &[SSJ_KAIOKEN, FREE_PROGRESSION, ENEMY_SCALING, PARTY
 fn hooks_of(id: u16) -> Vec<HookEntry> {
     match id {
         SSJ_KAIOKEN => ssj_kaioken_hooks(),
-        FREE_PROGRESSION => super::progression::hook_entries(),
+        FREE_PROGRESSION => {
+            let mut hooks = super::progression::hook_entries();
+            hooks.extend(super::levels::hooks());
+            hooks
+        }
         ENEMY_SCALING => super::scaling::hooks(),
         PARTY_BOOSTS => super::party_boosts::hooks(),
         _ => Vec::new(),
@@ -230,14 +234,31 @@ mod tests {
         assert_eq!(names[9], "mod_ssj_unit_store_8");
         let progression: Vec<String> =
             hooks_of(FREE_PROGRESSION).into_iter().map(|entry| entry.name).collect();
-        assert_eq!(progression.len(), 10, "the ten hooks of free_progression");
+        assert_eq!(
+            progression.len(),
+            14,
+            "the ten hooks of free_progression and the four of the level cap"
+        );
         assert_eq!(progression[0], "mod_fp_raditz_goku");
         assert_eq!(progression[9], "mod_fp_piccolo_bp_high");
+        assert_eq!(progression[10], "mod_fp_level_up");
         let scaling = hooks_of(ENEMY_SCALING).len();
-        assert_eq!(scaling, 3, "the record builder's exit, the EXP award and the random pick");
+        assert_eq!(
+            scaling, 7,
+            "the record builder's exit, the EXP award, the random pick, and the four of the HP floors"
+        );
         let boosts: Vec<String> =
             hooks_of(PARTY_BOOSTS).into_iter().map(|entry| entry.name).collect();
-        assert_eq!(boosts, ["mod_party_guru", "mod_party_porunga_level", "mod_party_lunch"]);
+        assert_eq!(
+            boosts,
+            [
+                "mod_party_guru",
+                "mod_party_porunga_level",
+                "mod_party_lunch",
+                "mod_party_pick_use",
+                "mod_party_pick_effect",
+            ]
+        );
         assert_eq!(
             hook_entries().len(),
             names.len() + progression.len() + scaling + boosts.len(),

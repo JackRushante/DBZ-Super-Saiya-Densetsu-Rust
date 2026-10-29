@@ -526,7 +526,11 @@ fn a_write_rekeys_every_sidecar_to_the_new_checksum_and_drops_the_wide_bp_of_the
     mods.store(
         0,
         old,
-        ModState { flags: Some(vec![1; crate::mods_state::FLAG_BYTES]), high: Some(high) },
+        ModState {
+            flags: Some(vec![1; crate::mods_state::FLAG_BYTES]),
+            high: Some(high),
+            levels: None,
+        },
     );
     let mut options = SlotOptions::empty();
     let mut values = Values::new();
@@ -739,4 +743,166 @@ fn the_write_sheet_and_the_story_question_keep_their_lines_in_their_windows() {
     inside(&list, Rect::new(760.0, 438.0, 480.0, 170.0), "story question");
     assert!(extents(&list).iter().any(|(_, _, _, text)| text == "! STORY ITEM"));
     assert!(list.texts().any(|(_, _, t)| t.contains("Add anyway or Cancel")));
+}
+
+/// An editor on slot 0 with the pack's level cap and the mod state `mods`, on Gohan (the character with the 48-level table).
+fn with_the_pack(cap: u16, mods: &ModsSidecar, sram: &[u8]) -> Editor {
+    let mut e = Editor::open(sram, &labels(), &Sidecar::empty(), [false; 3]).unwrap();
+    e.set_progression(Some(cap), mods);
+    e.key(Key::A);
+    e.key(Key::R);
+    assert_eq!(e.session().unwrap().members[e.session().unwrap().member].id, 1);
+    e
+}
+
+fn rekeyed(commit: &Commit, mods: &mut ModsSidecar) {
+    commit.rekey(&mut Sidecars {
+        bags: &mut Sidecar::empty(),
+        cheats: &mut CheatSidecar::empty(),
+        mods,
+        options: &mut SlotOptions::empty(),
+    });
+}
+
+#[test]
+fn without_the_pack_a_level_past_the_games_cap_is_refused_and_the_state_is_untouched() {
+    let mut e = on_gohan();
+    e.change_level(100);
+    assert_eq!(e.session().unwrap().members[1].level(), 48, "the game's cap");
+    e.change_level(1);
+    assert_eq!(e.notice(), Some("Gohan stops at LV 48."));
+    assert_eq!(e.bp_max(), u64::from(BP_MAX));
+    // A level cap of the game's own (48) is no pack with the parameter, and a held key does not stride the levels.
+    let mut also = Editor::open(&cartridge(), &labels(), &Sidecar::empty(), [false; 3]).unwrap();
+    also.set_progression(Some(48), &ModsSidecar::empty());
+    assert_eq!(also.level_cap(), None);
+    also.key(Key::A);
+    also.key(Key::R);
+    also.step(1, 100);
+    assert_eq!(
+        also.session().unwrap().members[1].level(),
+        21,
+        "one level a press, whatever the scale"
+    );
+    // A write leaves the mod state alone.
+    e.stage = Stage::Write(0);
+    e.key(Key::A);
+    let commit = e.take_commit().unwrap();
+    assert_eq!(commit.wide.len(), 0);
+    let mut mods = ModsSidecar::empty();
+    rekeyed(&commit, &mut mods);
+    assert!(mods.entry_for(0, commit.new_checksum).is_none());
+}
+
+#[test]
+fn with_the_pack_a_level_up_to_its_cap_is_set_on_the_games_curves_and_written_to_the_mod_state() {
+    let sram = cartridge();
+    let mut e = with_the_pack(999, &ModsSidecar::empty(), &sram);
+    assert_eq!(e.bp_max(), BP_MAX_WIDE);
+    // The owner's delta: +3000 at level 20 (the game's own BP, 8050).
+    e.key(Key::Down);
+    for _ in 0..3000 {
+        e.key(Key::Right);
+    }
+    e.key(Key::Up);
+    e.change_level(979);
+    let growth = e.labels().growth[1].clone();
+    let point = growth.anchor().unwrap().at(999);
+    let member = e.session().unwrap().members[1].clone();
+    assert_eq!((member.level(), member.record.level(), member.wide.level), (999, 99, 999));
+    assert_eq!(member.bp(), point.bp + 3000, "BP = curve(level) + delta");
+    assert!(member.bp() > 1 << 24, "a wide BP: its high part is in the mod state");
+    assert_eq!(member.wide.bp_high, (member.bp() >> 24) as u16);
+    assert_eq!(member.exp(), point.exp, "the EXP the level begins at, with its high byte");
+    assert_eq!(member.wide.exp_high, (point.exp >> 24) as u8);
+    assert_eq!(
+        (member.record.max_hp(), member.record.max_ki(), member.record.hp()),
+        (point.max_hp, point.ki as u16, point.max_hp)
+    );
+    // Down a level and up again: the delta is kept.
+    e.change_level(-1);
+    assert_eq!(e.session().unwrap().members[1].bp(), growth.anchor().unwrap().at(998).bp + 3000);
+    e.change_level(1);
+    // The cap holds, and says so.
+    e.change_level(1);
+    assert_eq!(e.notice(), Some("Gohan stops at LV 999."));
+    // Write: the record, then the state re-keyed to the new checksum word.
+    e.stage = Stage::Write(0);
+    e.key(Key::A);
+    let commit = e.take_commit().unwrap();
+    let written = SaveFile::from_bytes(&commit.sram).unwrap().slot(0).unwrap().record(1).unwrap();
+    assert_eq!((written.level(), u64::from(written.bp())), (99, member.bp() & 0xFF_FFFF));
+    assert_eq!(u64::from(written.exp()), member.exp() & 0xFF_FFFF);
+    let mut mods = ModsSidecar::empty();
+    rekeyed(&commit, &mut mods);
+    assert!(mods.entry_for(0, commit.old_checksum).is_none());
+    let state = mods.entry_for(0, commit.new_checksum).expect("the state follows the slot");
+    let levels = state.levels.as_ref().unwrap();
+    assert_eq!(u16::from_le_bytes([levels[2], levels[3]]), 999, "Gohan's wide level");
+    assert_eq!(levels[24 + 1], member.wide.exp_high);
+    let high = state.high.as_ref().unwrap();
+    assert_eq!(u16::from_le_bytes([high[2], high[3]]), member.wide.bp_high, "party position 1");
+    // Opened again, the slot reads back as it was written, in the picker too.
+    let mut again = Editor::open(&commit.sram, &labels(), &Sidecar::empty(), [false; 3]).unwrap();
+    again.set_progression(Some(999), &mods);
+    again.key(Key::A);
+    again.key(Key::R);
+    let back = again.session().unwrap().members[1].clone();
+    assert_eq!((back.level(), back.bp(), back.exp()), (999, member.bp(), member.exp()));
+    assert!(!back.changed());
+    // And a second member edited later keeps Gohan's part of the state.
+    again.key(Key::L);
+    again.change_level(190);
+    again.stage = Stage::Write(0);
+    again.key(Key::A);
+    let second = again.take_commit().unwrap();
+    rekeyed(&second, &mut mods);
+    let state = mods.entry_for(0, second.new_checksum).unwrap();
+    let levels = state.levels.as_ref().unwrap();
+    assert_eq!(u16::from_le_bytes([levels[0], levels[1]]), 200, "Goku's");
+    assert_eq!(u16::from_le_bytes([levels[2], levels[3]]), 999, "Gohan's is kept");
+}
+
+#[test]
+fn a_level_inside_the_games_table_clears_the_wide_level_and_a_pack_cap_below_999_is_the_limit() {
+    let mut e = with_the_pack(150, &ModsSidecar::empty(), &cartridge());
+    e.change_level(500);
+    assert_eq!(e.session().unwrap().members[1].level(), 150, "clamped to the pack's cap");
+    assert_eq!(e.notice(), Some("Gohan stops at LV 150."));
+    e.change_level(-110);
+    let member = e.session().unwrap().members[1].clone();
+    assert_eq!((member.level(), member.record.level(), member.wide.level), (40, 40, 0));
+    assert_eq!((member.wide.exp_high, member.wide.bp_high), (0, 0));
+    // A held key strides the levels with the pack: 100 at the longest.
+    e.step(1, 1000);
+    assert_eq!(e.session().unwrap().members[1].level(), 140);
+    // The wide level counts only while the record's byte agrees with it.
+    let mut record = record(1, 99, 5);
+    assert_eq!(level_of(&record, &Wide { level: 150, ..Wide::default() }), 150);
+    record.set_level(60);
+    assert_eq!(level_of(&record, &Wide { level: 150, ..Wide::default() }), 60);
+}
+
+#[test]
+fn the_levels_of_a_character_the_pack_does_not_extend_stay_at_the_games_cap() {
+    let e = with_the_pack(999, &ModsSidecar::empty(), &cartridge());
+    assert!(e.extended(1) && !e.extended(8) && !e.extended(11), "Nail and Dende are not extended");
+    assert_eq!(e.cap_of(11), 3);
+    assert_eq!(e.cap_of(1), 999);
+}
+
+#[test]
+fn the_editor_draws_three_digit_levels_and_a_ten_digit_bp_inside_its_windows() {
+    let mut e = with_the_pack(999, &ModsSidecar::empty(), &cartridge());
+    e.change_level(979);
+    e.change_bp(1_700_000_000);
+    let bp = e.session().unwrap().members[1].bp();
+    assert!(bp > 1_000_000_000, "{bp}");
+    let list = scene(&e);
+    assert!(list.texts().any(|(_, _, t)| t == "LV 999"), "the list row");
+    assert!(list.texts().any(|(_, _, t)| t == format!("BP {bp}")));
+    for (left, right, _, text) in extents(&list) {
+        assert!(left >= 0.0 && right <= WIDTH, "{text:?} {left} {right}");
+    }
+    assert_no_collision(&list);
 }

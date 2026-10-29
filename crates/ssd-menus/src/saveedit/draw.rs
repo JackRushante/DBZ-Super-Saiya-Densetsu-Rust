@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 
 use super::{
-    Ask, Card, Editor, GRID_COLUMNS, Member, OBJECTS, Page, Row, Session, Stage, delta_of,
+    Ask, Card, Editor, GRID_COLUMNS, Member, OBJECTS, Page, Row, Session, Stage, delta_wide,
 };
 use crate::draw::{Align, Color, DrawList, Op, Rect};
 use crate::layout::{
@@ -222,7 +222,7 @@ fn party(list: &mut DrawList, editor: &Editor, session: &Session) {
         list.text(
             left + 64.0,
             mid + 14.0,
-            &format!("LV {}", member.record.level()),
+            &format!("LV {}", member.level()),
             SMALL_TEXT,
             lv_color,
             Align::Left,
@@ -230,7 +230,7 @@ fn party(list: &mut DrawList, editor: &Editor, session: &Session) {
         list.text(
             LEFT_WINDOW.right() - 30.0,
             mid,
-            &format!("BP {}", member.record.bp()),
+            &format!("BP {}", member.bp()),
             18.0,
             if changed { CHANGED } else { palette::DARK_RED },
             Align::Right,
@@ -272,19 +272,19 @@ fn member_panel(list: &mut DrawList, editor: &Editor, session: &Session, member:
         }
     }
     list.text(x + 20.0, 258.0, "LV", LARGE_TEXT, palette::BLACK, Align::Left);
-    let level_changed = record.level() != opened.level();
+    let level_changed = member.level() != member.opened_level();
     if growth.has_levels() {
         stepper(
             list,
             980.0,
             258.0,
-            &record.level().to_string(),
+            &member.level().to_string(),
             LARGE_TEXT,
             changed_color(level_changed),
         );
-        let stops = format!("stops at {}", growth.cap);
+        let stops = format!("stops at {}", editor.cap_of(member.id));
         let line = if level_changed {
-            format!("was {}  \u{b7}  {stops}", opened.level())
+            format!("was {}  \u{b7}  {stops}", member.opened_level())
         } else if growth.min > 1 {
             format!("starts at {}  \u{b7}  {stops}", growth.min)
         } else {
@@ -295,7 +295,7 @@ fn member_panel(list: &mut DrawList, editor: &Editor, session: &Session, member:
         list.text(
             980.0,
             258.0,
-            &record.level().to_string(),
+            &member.level().to_string(),
             LARGE_TEXT,
             palette::GREY,
             Align::Centre,
@@ -304,14 +304,15 @@ fn member_panel(list: &mut DrawList, editor: &Editor, session: &Session, member:
     }
     // The BP row.
     list.text(x + 20.0, 333.0, "BP", LARGE_TEXT, palette::BLACK, Align::Left);
-    let bp_changed = record.bp() != opened.bp();
-    stepper(list, 975.0, 333.0, &record.bp().to_string(), LARGE_TEXT, changed_color(bp_changed));
+    let bp_changed = member.bp() != member.opened_bp();
+    stepper(list, 975.0, 333.0, &member.bp().to_string(), LARGE_TEXT, changed_color(bp_changed));
     let mut parts = Vec::new();
     if bp_changed {
-        parts.push(format!("was {}", opened.bp()));
+        parts.push(format!("was {}", member.opened_bp()));
     }
-    if growth.at(record.level()).is_some() {
-        let delta = delta_of(&growth, record);
+    let extended = editor.extended(member.id);
+    if growth.stats_at(member.level(), extended).is_some() {
+        let delta = delta_wide(&growth, extended, member.level(), member.bp());
         parts.push(match delta {
             0 => "the game's own  (Y)".to_owned(),
             d if d > 0 => format!("+{d} over the game's  (Y)"),
@@ -339,30 +340,29 @@ fn member_panel(list: &mut DrawList, editor: &Editor, session: &Session, member:
     );
     list.fill(Rect::new(x, 385.0, RIGHT_WINDOW.w - 52.0, LINE), palette::DARK_RED);
     list.text(x, 403.0, "-- Follows the level --", SMALL_TEXT, palette::DARK_RED, Align::Left);
-    let next = |level: u8, exp: u32| -> Option<u32> {
+    let cap = editor.cap_of(member.id);
+    let next = |level: u16, exp: u64| -> Option<u64> {
         growth
-            .at(level.saturating_add(1))
-            .filter(|_| level < growth.cap)
+            .stats_at(level.saturating_add(1), extended)
+            .filter(|_| level < cap)
             .map(|row| row.exp.saturating_sub(exp))
     };
     let rows: [(&str, String, String); 4] = [
         ("Max HP", opened.max_hp().to_string(), record.max_hp().to_string()),
         ("Max KI", opened.max_ki().to_string(), record.max_ki().to_string()),
-        ("EXP", opened.exp().to_string(), record.exp().to_string()),
+        ("EXP", member.opened_exp().to_string(), member.exp().to_string()),
         (
             "To next LV",
-            next(opened.level(), opened.exp()).map_or("-".to_owned(), |n| n.to_string()),
-            next(record.level(), record.exp()).map_or("-".to_owned(), |n| n.to_string()),
+            next(member.opened_level(), member.opened_exp())
+                .map_or("-".to_owned(), |n| n.to_string()),
+            next(member.level(), member.exp()).map_or("-".to_owned(), |n| n.to_string()),
         ),
     ];
     for (n, (label, old, new)) in rows.iter().enumerate() {
         let y = 439.0 + 39.7 * n as f32;
         list.text(x + 20.0, y, label, 28.0, palette::BLACK, Align::Left);
-        if old != new {
-            list.text(OLD_RIGHT, y, old, SMALL_TEXT, palette::GREY, Align::Right);
-            list.text(ARROW_LEFT, y, ">", SMALL_TEXT, palette::GREY, Align::Left);
-        }
-        list.text(NEW_RIGHT, y, new, 28.0, palette::BLACK, Align::Right);
+        let label_right = x + 20.0 + text_width(label, 28.0);
+        follows_row(list, y, label_right, old, new);
     }
     let note = editor.notice().unwrap_or("HP and KI are filled to the new maximums.");
     let note_color = if editor.notice().is_some() { palette::STORY } else { palette::DARK_RED };
@@ -382,6 +382,28 @@ fn member_panel(list: &mut DrawList, editor: &Editor, session: &Session, member:
         palette::DARK_RED,
         Align::Left,
     );
+}
+
+/// The old value, the `>` and the new value of a "follows the level" row. They keep their columns ([`OLD_RIGHT`], [`ARROW_LEFT`],
+/// [`NEW_RIGHT`]) while they fit between the label and the right edge; a long figure (the EXP of a level past 99 has eight digits)
+/// moves the arrow and the old value left, then shrinks the new value, and when the three cannot fit shows the new value alone.
+fn follows_row(list: &mut DrawList, y: f32, label_right: f32, old: &str, new: &str) {
+    if old == new {
+        list.text(NEW_RIGHT, y, new, 28.0, palette::BLACK, Align::Right);
+        return;
+    }
+    let arrow_width = text_width(">", SMALL_TEXT);
+    for size in [28.0, 24.0, 20.0] {
+        let arrow_left = ARROW_LEFT.min(NEW_RIGHT - text_width(new, size) - 8.0 - arrow_width);
+        let old_right = OLD_RIGHT.min(arrow_left - 14.0);
+        if old_right - text_width(old, SMALL_TEXT) >= label_right + 10.0 {
+            list.text(old_right, y, old, SMALL_TEXT, palette::GREY, Align::Right);
+            list.text(arrow_left, y, ">", SMALL_TEXT, palette::GREY, Align::Left);
+            list.text(NEW_RIGHT, y, new, size, palette::BLACK, Align::Right);
+            return;
+        }
+    }
+    list.text(NEW_RIGHT, y, new, 28.0, palette::BLACK, Align::Right);
 }
 
 /// The columns of the "follows the level" rows: the old value ends at `OLD_RIGHT`, the `>` starts at `ARROW_LEFT` and the new
@@ -778,13 +800,12 @@ fn write_sheet(list: &mut DrawList, editor: &Editor, session: &Session, choice: 
         .iter()
         .filter(|m| m.changed())
         .map(|member| {
-            let (new, old) = (&member.record, &member.opened);
             let mut line = member.name.clone();
-            if new.level() != old.level() {
-                let _ = write!(line, " LV {} > {}", old.level(), new.level());
+            if member.level() != member.opened_level() {
+                let _ = write!(line, " LV {} > {}", member.opened_level(), member.level());
             }
-            if new.bp() != old.bp() {
-                let _ = write!(line, " (BP {} > {})", old.bp(), new.bp());
+            if member.bp() != member.opened_bp() {
+                let _ = write!(line, " (BP {} > {})", member.opened_bp(), member.bp());
             }
             format!("Party: {line}")
         })

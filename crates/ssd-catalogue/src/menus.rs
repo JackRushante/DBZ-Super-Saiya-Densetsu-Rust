@@ -115,7 +115,7 @@ fn status(catalogue: &Catalogue) -> StatusLabels {
             reachable.map(|row| row.exp_start).collect()
         })
         .collect();
-    StatusLabels { commands, techniques, levels }
+    StatusLabels { commands, techniques, levels, level_cap: None }
 }
 
 /// The command ids of a unit's list that the original's Status page draws: the list is its slot count, then one command id

@@ -3069,18 +3069,26 @@ fn party_ready(h: &mut Harness) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Uses `object` from the bag on the party's member at `row` (the original's member window: Down `row` times, then A), and
-/// returns the party after the use has run its course. Porunga's second wish is the one chosen.
+/// Uses `object` from the bag and returns the party after the use has run its course. With `row` (the plain game) the player
+/// answers the original's fighter choice: its party window, Down `row` times, then A. Without it (the pack) the player presses
+/// nothing for the fighter, and the party must already show the effect on the first fighter before the player presses any key
+/// of the use's messages (`first_before` is that fighter's record before the use): the HD answered the choice itself.
+/// Porunga's second wish is the one chosen in both.
 fn party_use(
     h: &mut Harness,
     r: &mut Report,
     object: u8,
-    row: usize,
+    row: Option<usize>,
+    first_before: &Member,
 ) -> anyhow::Result<Vec<Member>> {
     battle_use(h, r, 0)?;
+    let waiting = |h: &Harness| match object {
+        // The party window of Guru and Launch (effect step 0, menu step 4), and of the level wish (effect step 7).
+        15 => h.byte(0x7E_073C) == 7,
+        _ => h.byte(d::MENU_STEP) == 4 && h.byte(0x7E_073C) == 0,
+    };
     if object == 15 {
-        // The wishes window: wait for its step (6), Down to the second wish, A; then the member window (step 7): Down
-        // `row` times, A. The wish window opens a few frames after the use.
+        // The wishes window: wait for its step (6), Down to the second wish, A; then the member window (step 7).
         let wait_step = |h: &mut Harness, step: u8| -> anyhow::Result<()> {
             for _ in 0..200 {
                 if h.byte(0x7E_073C) == step {
@@ -3095,17 +3103,35 @@ fn party_use(
         h.press(Joypad { down: true, ..Joypad::default() })?;
         h.frames(20)?;
         h.press(a())?;
-        wait_step(h, 7)?;
-        h.frames(20)?;
-        for _ in 0..row {
-            h.press(Joypad { down: true, ..Joypad::default() })?;
+        if let Some(row) = row {
+            wait_step(h, 7)?;
             h.frames(20)?;
+            for _ in 0..row {
+                h.press(Joypad { down: true, ..Joypad::default() })?;
+                h.frames(20)?;
+            }
+            h.press(a())?;
+        } else {
+            // The pack: the member window is answered by the HD (no press of the player); the growth animation runs.
+            h.frames(150)?;
+            let first = party_members(h).into_iter().next();
+            r.check(
+                first.as_ref().is_some_and(|first| first != first_before) && !waiting(h),
+                "with the pack there is no fighter pick: the level wish started on the first fighter with no press",
+            );
         }
-        h.press(a())?;
         // The growth animation, then the wishes again with the points left: B leaves them.
         h.frames(400)?;
         h.press(b())?;
         h.frames(60)?;
+    } else if row.is_none() {
+        // The pack: no press of the player, and the effect has started on the first fighter, the original's window answered.
+        h.frames(300)?;
+        let first = party_members(h).into_iter().next();
+        r.check(
+            first.as_ref().is_some_and(|first| first != first_before) && !waiting(h),
+            "with the pack there is no fighter pick: the effect started on the first fighter with no press",
+        );
     }
     h.answer()?;
     h.frames(SETTLE)?;
@@ -3138,7 +3164,7 @@ fn party_scenario(
     for &row in &rows {
         let mut h = party_harness(rom, starts, labels, object, false)?;
         party_ready(&mut h)?;
-        single.push(party_use(&mut h, r, object, row)?);
+        single.push(party_use(&mut h, r, object, Some(row), &before[0])?);
     }
     // Who the use changed without the pack: exactly one member.
     let changed: Vec<Vec<usize>> =
@@ -3152,12 +3178,13 @@ fn party_scenario(
             ),
         );
     }
-    let chosen = if object == 6 { changed[0].first().copied().unwrap_or(0) } else { 1 };
+    // With the pack the HD answers the fighter choice with the first fighter the original accepts: the first of the party.
+    let chosen = 0;
 
     // The pack.
     let mut h = party_harness(rom, starts, labels, object, true)?;
     party_ready(&mut h)?;
-    let on = party_use(&mut h, r, object, chosen)?;
+    let on = party_use(&mut h, r, object, None, &before[0])?;
     r.check(on.len() == size, "the party is the same size");
     let k = if object == 6 { 0 } else { chosen };
     r.check(
@@ -3262,6 +3289,17 @@ fn launch_use(
     let before = party_members(&h);
     battle_use(&mut h, r, 0)?;
     let object = h.byte(d::MENU_ITEM_ID);
+    if pack && object == LAUNCH && marked.is_none() {
+        // The pack: the HD answers the original's fighter choice, so with no press of the player the first fighter is marked.
+        h.frames(300)?;
+        let first_marked = party_members(&h)
+            .first()
+            .is_some_and(|member| member[MEMBER_FLAGS] & LAUNCH_FLAGS != 0);
+        r.check(
+            first_marked && !(h.byte(d::MENU_STEP) == 4 && h.byte(0x7E_073C) == 0),
+            "with the pack there is no fighter pick: Launch marked the first fighter with no press",
+        );
+    }
     h.answer()?;
     h.frames(SETTLE)?;
     Ok((before, party_members(&h), object))

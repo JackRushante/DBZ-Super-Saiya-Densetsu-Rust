@@ -29,7 +29,7 @@
 
 use super::redirect::overlay;
 use ssd_mod::Family;
-use ssd_mod::feature::FREE_PROGRESSION;
+use ssd_mod::feature::{FREE_PROGRESSION, LEVEL_CAP_SET};
 use ssd_oracle::{Ctx, HookAction, HookEntry, HookMode, ReturnKind, RoutineFn};
 
 /// `03:F22C`: the `LDA $0B02,Y` of Goku's level in the map 0 routine (`03:F212`); the `CMP #$05` follows it.
@@ -76,10 +76,29 @@ const RECORD_BP: u32 = 7;
 /// The levels the BP table holds: from 33, eight entries.
 const PICCOLO_TABLE_LEVELS: std::ops::RangeInclusive<u8> = 33..=40;
 
-/// The parameter of the feature in the image (`ginyu_arrival`), or `None` when the pack does not enable it.
+/// The parameter of the feature in the image (`ginyu_arrival`), or `None` when the pack does not enable it. A slot with a
+/// `level_cap` begins with [`LEVEL_CAP_SET`], then the arrival, then the cap as two bytes.
 fn feature(ctx: &Ctx<'_>) -> Option<u8> {
     let at = overlay(ctx, Family::Feature, FREE_PROGRESSION)?;
-    Some(ctx.peek8(at))
+    let first = ctx.peek8(at);
+    Some(if first == LEVEL_CAP_SET { ctx.peek8(at + 1) } else { first })
+}
+
+/// The level cap of the pack (`level_cap`, above the game's 48), or `None` for a pack without it or without the feature.
+pub(super) fn level_cap(ctx: &Ctx<'_>) -> Option<u16> {
+    level_cap_in(|address| ctx.peek8(address))
+}
+
+/// The level cap of the pack in the image `read` reads (a bus reader, as [`ssd_mod::find`] takes it), or `None` for an image
+/// without a pack that sets it. The game's hooks read it from the machine's memory ([`level_cap`]); the application reads the
+/// same bytes for the save editor and the HD Status screen.
+#[must_use]
+pub fn level_cap_in(read: impl Fn(u32) -> u8) -> Option<u16> {
+    let at = ssd_mod::find(&read, Family::Feature, FREE_PROGRESSION)?;
+    (read(at) == LEVEL_CAP_SET)
+        .then(|| u16::from(read(at + 2)) | u16::from(read(at + 3)) << 8)
+        .filter(|&cap| cap > 48)
+        .map(|cap| cap.min(ssd_menus::levels::LEVEL_MAX))
 }
 
 /// Whether the imposter Raditz is beaten (story flag `0x0A`).

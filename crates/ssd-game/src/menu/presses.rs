@@ -83,6 +83,10 @@ pub enum Until {
     OrderStep(u8),
     /// The original's Order screen has filled this many slots (`$0D6B`), or more.
     Picked(u8),
+    /// The Item screen is on this step (screen 2), in a battle or not.
+    ItemStep(u8),
+    /// The item effect is not on this step any more (`effect_step`).
+    EffectMoved(u8),
     /// The cursor of the open list is not on this row any more (`map_entry_value`): a list whose cursor skips rows moved.
     CursorMoved(u8),
 }
@@ -417,7 +421,11 @@ impl Player {
                             Step::Press {
                                 button,
                                 until:
-                                    again @ (Until::ItemChoice | Until::ItemReply | Until::UseTaken),
+                                    again @ (Until::ItemChoice
+                                    | Until::ItemReply
+                                    | Until::UseTaken
+                                    | Until::ItemStep(_)
+                                    | Until::EffectMoved(_)),
                             } if self.retries < PRESS_RETRIES && again == until => {
                                 self.retries += 1;
                                 self.hold(button, until);
@@ -432,6 +440,16 @@ impl Player {
                             Step::Press { until: Until::UseTaken, .. } => {
                                 self.phase = Phase::Finished(Outcome::Stuck {
                                     reason: "the original does not take the use",
+                                });
+                            }
+                            // The answer to the original's fighter choice that did not take: the choice is left to the
+                            // player, on the original's own screen.
+                            Step::Press {
+                                until: Until::ItemStep(_) | Until::EffectMoved(_),
+                                ..
+                            } => {
+                                self.phase = Phase::Finished(Outcome::Stuck {
+                                    reason: "the original does not take the answer",
                                 });
                             }
                             _ => self.abort("a press did not reach the state it should"),
@@ -578,6 +596,10 @@ fn satisfied(probe: &MenuProbe<'_>, until: Until) -> bool {
                 && probe.order_picked() >= count
         }
         Until::CursorMoved(from) => probe.menu_open() && probe.cursor() != Some(from),
+        Until::ItemStep(step) => {
+            probe.menu_open() && probe.screen() == Some(2) && probe.step() == Some(step)
+        }
+        Until::EffectMoved(from) => probe.effect_step() != Some(from),
     }
 }
 

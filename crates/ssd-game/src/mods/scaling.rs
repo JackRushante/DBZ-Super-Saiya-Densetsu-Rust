@@ -20,6 +20,8 @@
 //! - `1D:8C66` ([`EXP_KEY`]), the `RTL` of the EXP award `1D:8C33` (one defeated enemy): the reward the original has added to
 //!   the battle's EXP is replaced by the scaled one. The EXP cheat multiplies the whole award, scaled, when it returns.
 //!
+//! Four more hooks keep the fights that wait for an HP floor ([`FLOORS`]) on the story's path (see "The HP-threshold fights" below).
+//!
 //! A hook declines at once (it only resumes at its own key) without the feature in the image, in a fight of the scripted-loss
 //! list ([`crate::cheats::SCRIPTED_LOSS`]), and without a fighter in the party. A BP above 24 bits is kept as the wide BP of
 //! `super::state` keeps it: the low 24 bits in the record and the high 16 in the enemy's part of the mod state block, which the
@@ -30,6 +32,7 @@ use super::state::{
     BATTLE_KIND, BLOCK, ENEMY_HIGH, ENEMY_SLOTS, KIND_MARKER, MARKER, MARKER_AT, PARTY_SLOTS,
     SCRATCH_END, enemy_record, party_record, split,
 };
+use ssd_menus::levels::RECORD_LEVEL_MAX;
 use ssd_mod::Family;
 use ssd_mod::feature::{ENEMY_SCALING, SCALING_OFFSETS};
 use ssd_oracle::{Ctx, HookAction, HookEntry, HookMode, ReturnKind, RoutineFn};
@@ -43,6 +46,15 @@ pub(super) const EXP_KEY: u32 = 0x1D_8C66;
 /// normal-battle branch of the roll that starts a battle (`02:D241`); a story battle (a script's battle, the roll's own story
 /// branch, a form change) never runs it. It is the game's own line between the two kinds of battle.
 pub(super) const PICK_KEY: u32 = 0x02_D37C;
+
+/// `05:A51D`: the `CPY $1443` of `05:A4F5`, the step of the hit that lets four enemies withdraw at a floor of HP; `Y` holds the floor.
+pub(super) const FLOOR_KEY: u32 = 0x05_A51D;
+/// `05:A46E`: the `BCC` after `05:BDDC` (the hit's HP subtraction) in the hit step `05:A435`; the carry is clear when the HP went below zero.
+pub(super) const LETHAL_KEY: u32 = 0x05_A46E;
+/// `05:A49F`: the store that keeps the Ginyu duel's enemy at 1 HP when a hit would kill him (`A` holds 1).
+pub(super) const GINYU_KEY: u32 = 0x05_A49F;
+/// `05:9808`: the `BCC` after the `CPY #$15` with which the end of the second form's fight (group `$54`) judges the HP (`05:9802`).
+pub(super) const JUDGE_KEY: u32 = 0x05_9808;
 
 /// `$7E:0EA3`: the encounter group of the battle (`01:F692`).
 const GROUP_INDEX: u32 = 0x7E_0EA3;
@@ -70,11 +82,22 @@ const MAX_HP: u32 = 0x0A;
 const MAX_KI: u32 = 0x0C;
 const CHARACTER: u32 = 0x1C;
 
+/// `$7E:1440`: the record of the enemy the hit step works on (side B), laid out as an enemy record; `$7E:1443` is its HP.
+const SIDE_B: u32 = 0x7E_1440;
+/// `$7E:15F1`: the Ginyu duel's body swap state; 2 once the swap is done (`05:D28F`), and the 1-HP guard of the duel ends with it.
+const SWAP_STATE: u32 = 0x7E_15F1;
+/// The group of the Ginyu duel, the second form's fight, and the units whose fights wait for a floor of HP (`05:A4F5`): Zarbon's
+/// first form and Frieza's first three forms, and the floor (in HP) at which the story takes the enemy away.
+const GINYU_GROUP: u8 = 0x51;
+const SECOND_FORM_GROUP: u8 = 0x54;
+const SECOND_FORM_UNIT: u8 = 0x36;
+const FLOORS: [(u8, u16); 4] = [(0x1E, 30), (0x35, 300), (0x36, 20), (0x37, 50)];
+
 /// The shift of the levels in the model: `u = level + 5` (see the module documentation).
 const SHIFT: u128 = 5;
-/// The highest level an enemy's record is given. The special attack's roll adds `10 + level + a byte` in 8 bits, so a level
-/// above this could wrap it.
-const MAX_LEVEL: u8 = 200;
+/// The highest level an enemy is made for: the highest level of the party (`level_cap`, at most 999). The record's own byte
+/// saturates at 99 (`ssd_menus::levels::RECORD_LEVEL_MAX`: the special attack's roll adds `10 + level + a byte` in 8 bits).
+const MAX_LEVEL: u16 = 999;
 /// The largest BP the wide record holds (40 bits), the HP and KI of a record (16 bits) and the EXP award (24 bits).
 const MAX_BP: u64 = (1 << 40) - 1;
 const MAX_WORD: u64 = 0xFFFF;
@@ -150,7 +173,7 @@ pub(super) enum Kind {
 pub(super) struct Fighter {
     pub(super) flags: u8,
     pub(super) unit: u8,
-    pub(super) level: u8,
+    pub(super) level: u16,
     pub(super) character: u8,
 }
 
@@ -164,7 +187,7 @@ pub(super) struct Fighter {
 #[must_use]
 pub(super) fn party_sixths(fighters: &[Fighter]) -> Option<u32> {
     let present = |f: &&Fighter| f.flags & 0xC0 != 0 && f.level != 0;
-    let mut levels: Vec<u8> = fighters
+    let mut levels: Vec<u16> = fighters
         .iter()
         .filter(present)
         .filter(|f| !WITHOUT_LEVELS.contains(&f.character) && f.unit != TEMPORARY_UNIT)
@@ -210,9 +233,9 @@ impl Target {
     /// The record level an enemy gets: the target level rounded to a whole level, at least 1 and at most [`MAX_LEVEL`].
     /// With the normal difficulty it is the party's mean, rounded.
     #[must_use]
-    pub(super) fn level(self) -> u8 {
+    pub(super) fn level(self) -> u16 {
         let rounded = (self.effective + 24) / 48;
-        rounded.saturating_sub(SHIFT).clamp(1, u128::from(MAX_LEVEL)) as u8
+        rounded.saturating_sub(SHIFT).clamp(1, u128::from(MAX_LEVEL)) as u16
     }
 
     /// The ratio `q` of an enemy made for level `enemy_level` against this target (see the module documentation).
@@ -224,7 +247,7 @@ impl Target {
 
 /// The record level of a battle at a difficulty (the tests' shorthand for [`target`]; the kind does not matter to a difficulty).
 #[cfg(test)]
-pub(super) fn scaled_level(party_sixths: u32, difficulty: Difficulty) -> u8 {
+pub(super) fn scaled_level(party_sixths: u32, difficulty: Difficulty) -> u16 {
     target(party_sixths, Scaling::Difficulty(difficulty), Kind::Story).level()
 }
 
@@ -315,7 +338,7 @@ fn fighters(ctx: &Ctx<'_>) -> Vec<Fighter> {
             Fighter {
                 flags: ctx.peek8(base + FLAGS),
                 unit: ctx.peek8(base + UNIT),
-                level: ctx.peek8(base + LEVEL),
+                level: super::levels::effective_level(ctx, base),
                 character: ctx.peek8(base + CHARACTER),
             }
         })
@@ -431,7 +454,7 @@ fn stats_wrapper(ctx: &mut Ctx<'_>) {
             let (low, high) = split(scale_bp(u64::from(peek24(ctx, base + BP)), ratio));
             write24(ctx, base + BP, low);
             highs[slot as usize] = high;
-            ctx.write8(base + LEVEL, aim.level());
+            ctx.write8(base + LEVEL, aim.level().min(u16::from(RECORD_LEVEL_MAX)) as u8);
             shown.push(format!(
                 "unit {:#04x} L{level}->{} HP {}->{} BP {}->{}",
                 ctx.peek8(base + UNIT),
@@ -483,6 +506,82 @@ fn exp_wrapper(ctx: &mut Ctx<'_>) {
     ctx.resume_at(EXP_KEY);
 }
 
+/// The floor of HP of the unit `unit` as the enemy scaling has scaled its HP: the original's `floor` times the same `q` (at least 1),
+/// so that the floor keeps its place in the enemy's HP. `None` where the scaling does not act (the feature is not in the image, the
+/// fight is a scripted loss, no fighter is in the party) or the unit has no row of the original table to take the level from.
+fn scaled_floor(ctx: &Ctx<'_>, unit: u8, floor: u16) -> Option<u16> {
+    let (scaling, party) = active(ctx)?;
+    let row = u32::from(unit) * UNIT_ROW_LEN;
+    if u32::from(unit) >= UNIT_ROWS {
+        return None;
+    }
+    let level = ctx.peek8(UNIT_STATS + row + ROW_LEVEL);
+    if level == 0 {
+        return None;
+    }
+    let ratio = target(party, scaling, stored_kind(ctx)).ratio(level);
+    Some(scale_hp(floor, ratio))
+}
+
+/// `05:A51D`: the floor at which Zarbon's first form and Frieza's first three forms withdraw (`05:A4F5`: when the HP after the
+/// hit is at or below it, the HP becomes the floor and the enemy is gone). `Y` holds the original's floor; it is replaced by the
+/// scaled one, which the compare and the store that follow use.
+fn floor_wrapper(ctx: &mut Ctx<'_>) {
+    let unit = ctx.peek8(SIDE_B + UNIT);
+    if let Some(scaled) = scaled_floor(ctx, unit, ctx.y()) {
+        ctx.set_y(scaled);
+    }
+    ctx.resume_at(FLOOR_KEY);
+}
+
+/// `05:A46E`: the hit has been taken off the HP of the defender (`Y` is its record). The original lets an enemy of [`FLOORS`] die
+/// from a hit that takes it from above its floor to zero or below (the withdrawal is judged only for an enemy that is still
+/// alive). With the scaling an enemy has thousands of HP, and one hit may do that: the HP is then set to the scaled floor and the
+/// carry set, so that the original goes on as for a hit that left the enemy alive, and `05:A4F5` makes it withdraw.
+fn lethal_wrapper(ctx: &mut Ctx<'_>) {
+    if ctx.y() == SIDE_B as u16 {
+        let unit = ctx.peek8(SIDE_B + UNIT);
+        let hp = ctx.peek16(SIDE_B + HP);
+        if (!ctx.c() || hp == 0)
+            && let Some(&(_, floor)) = FLOORS.iter().find(|&&(floored, _)| floored == unit)
+            && let Some(scaled) = scaled_floor(ctx, unit, floor)
+        {
+            ctx.write16(SIDE_B + HP, scaled);
+            ctx.set_c(true);
+        }
+    }
+    ctx.resume_at(LETHAL_KEY);
+}
+
+/// `05:A49F`: the Ginyu duel keeps its enemy at 1 HP when a hit would kill him, until the swap. `A` holds that 1: it becomes the
+/// scaled 1 (the HP the original leaves him at, times `q`).
+fn ginyu_wrapper(ctx: &mut Ctx<'_>) {
+    let unit = ctx.peek8(SIDE_B + UNIT);
+    if ctx.peek8(GROUP_INDEX) == GINYU_GROUP
+        && ctx.peek8(SWAP_STATE) != 2
+        && let Some(scaled) = scaled_floor(ctx, unit, ctx.a())
+    {
+        ctx.set_a(scaled);
+    }
+    ctx.resume_at(GINYU_KEY);
+}
+
+/// `05:9808`: the end of the second form's fight judges the HP of the first enemy: below 21 (the floor of 20 and one) the story
+/// goes on, else the generic checks follow. The carry says "21 or more"; it is set from the scaled floor.
+fn judge_wrapper(ctx: &mut Ctx<'_>) {
+    let slot = enemy_record(0);
+    if ctx.peek8(GROUP_INDEX) == SECOND_FORM_GROUP && ctx.peek8(slot + UNIT) == SECOND_FORM_UNIT {
+        let floor = FLOORS
+            .iter()
+            .find(|&&(unit, _)| unit == SECOND_FORM_UNIT)
+            .map_or(20, |&(_, floor)| floor);
+        if let Some(scaled) = scaled_floor(ctx, SECOND_FORM_UNIT, floor) {
+            ctx.set_c(ctx.y() > scaled);
+        }
+    }
+    ctx.resume_at(JUDGE_KEY);
+}
+
 /// A `Patch` hook that costs nothing, as every hook of the packs.
 fn patch(name: &str, key: u32, func: RoutineFn) -> HookEntry {
     HookEntry {
@@ -500,12 +599,23 @@ fn patch(name: &str, key: u32, func: RoutineFn) -> HookEntry {
     }
 }
 
-/// The hooks of `enemy_scaling`: the records of a battle, the EXP of a defeated enemy, and the mark of a random encounter.
+/// A `Patch` in the middle of the battle's code, which is run only with the widths of the accumulator and index registers the
+/// instruction at `key` is read with (`m8`, and the index always 16 bits there).
+fn patch_at(name: &str, key: u32, m8: bool, func: RoutineFn) -> HookEntry {
+    HookEntry { entry_m8: Some(m8), entry_x8: Some(false), ..patch(name, key, func) }
+}
+
+/// The hooks of `enemy_scaling`: the records of a battle, the EXP of a defeated enemy, the mark of a random encounter, and the four
+/// that keep the fights with a floor of HP on the story's path.
 pub(super) fn hooks() -> Vec<HookEntry> {
     vec![
         patch("mod_enemy_scaling_stats", STATS_KEY, stats_wrapper),
         patch("mod_enemy_scaling_exp", EXP_KEY, exp_wrapper),
         patch("mod_enemy_scaling_pick", PICK_KEY, pick_wrapper),
+        patch_at("mod_enemy_scaling_floor", FLOOR_KEY, true, floor_wrapper),
+        patch_at("mod_enemy_scaling_lethal", LETHAL_KEY, true, lethal_wrapper),
+        patch_at("mod_enemy_scaling_ginyu", GINYU_KEY, false, ginyu_wrapper),
+        patch_at("mod_enemy_scaling_judge", JUDGE_KEY, true, judge_wrapper),
     ]
 }
 
@@ -517,11 +627,11 @@ mod tests {
 
     /// A fighter in the party at `level`, character `character`.
     fn fighter(character: u8, level: u8) -> Fighter {
-        Fighter { flags: 0xC0, unit: character, level, character }
+        Fighter { flags: 0xC0, unit: character, level: level.into(), character }
     }
 
     /// An enemy of the kind the original has: level 20, HP 300, KI 100, BP 20 000, EXP 2 000 (the worked example of the design).
-    fn example(party: u32, difficulty: Difficulty) -> (u8, u16, u16, u64, u32) {
+    fn example(party: u32, difficulty: Difficulty) -> (u16, u16, u16, u64, u32) {
         let ratio = ratio(party, difficulty, 20);
         (
             scaled_level(party, difficulty),
@@ -537,10 +647,22 @@ mod tests {
         assert_eq!(STATS_KEY, 0x01_F7F1);
         assert_eq!(EXP_KEY, 0x1D_8C66);
         assert_eq!(PICK_KEY, 0x02_D37C);
+        assert_eq!(FLOOR_KEY, 0x05_A51D);
+        assert_eq!(LETHAL_KEY, 0x05_A46E);
+        assert_eq!(GINYU_KEY, 0x05_A49F);
+        assert_eq!(JUDGE_KEY, 0x05_9808);
         let names: Vec<String> = hooks().into_iter().map(|entry| entry.name).collect();
         assert_eq!(
             names,
-            ["mod_enemy_scaling_stats", "mod_enemy_scaling_exp", "mod_enemy_scaling_pick"]
+            [
+                "mod_enemy_scaling_stats",
+                "mod_enemy_scaling_exp",
+                "mod_enemy_scaling_pick",
+                "mod_enemy_scaling_floor",
+                "mod_enemy_scaling_lethal",
+                "mod_enemy_scaling_ginyu",
+                "mod_enemy_scaling_judge"
+            ]
         );
         let cheats = crate::cheats::entry_points();
         for entry in hooks() {
@@ -628,7 +750,11 @@ mod tests {
             for exp in [0_u32, 1, 9, 2_000, 50_000, 16_777_215] {
                 assert_eq!(scale_exp(exp, ratio), exp, "EXP {exp} at level {level}");
             }
-            assert_eq!(scaled_level(party, Difficulty::Normal), level, "the record's level");
+            assert_eq!(
+                scaled_level(party, Difficulty::Normal),
+                u16::from(level),
+                "the record's level"
+            );
         }
     }
 
@@ -707,7 +833,7 @@ mod tests {
     fn every_number_grows_with_the_partys_level_and_never_falls_for_any_difficulty() {
         for difficulty in ALL {
             for enemy_level in [1_u8, 2, 5, 20, 48, 100] {
-                let mut last = (0_u16, 0_u16, 0_u64, 0_u32, 0_u8);
+                let mut last = (0_u16, 0_u16, 0_u64, 0_u32, 0_u16);
                 for party in 6..=600_u32 {
                     let ratio = ratio(party, difficulty, enemy_level);
                     let now = (
@@ -771,7 +897,7 @@ mod tests {
             113,
             "the record's level at party level 100, hard"
         );
-        assert_eq!(scaled_level(6 * 255, Difficulty::Hard), MAX_LEVEL, "the level is capped");
+        assert_eq!(scaled_level(6 * 1000, Difficulty::Hard), MAX_LEVEL, "the level is capped");
         assert_eq!(scaled_level(6, Difficulty::Easy), 1, "and never below 1");
     }
 
@@ -815,7 +941,7 @@ mod tests {
     }
 
     /// The levels and BP of the level-20 example enemy at a target.
-    fn example_at(party: u32, scaling: Scaling, kind: Kind) -> (u8, u16, u64) {
+    fn example_at(party: u32, scaling: Scaling, kind: Kind) -> (u16, u16, u64) {
         let aim = target(party, scaling, kind);
         let ratio = aim.ratio(20);
         (aim.level(), scale_hp(300, ratio), scale_bp(20_000, ratio))
@@ -832,7 +958,7 @@ mod tests {
             let party = 6 * level;
             let low = target(party, scaling, Kind::Random).level();
             let high = target(party, scaling, Kind::Story).level();
-            let want = |offset: i64| (i64::from(level) + offset).clamp(1, 200) as u8;
+            let want = |offset: i64| (i64::from(level) + offset).clamp(1, 999) as u16;
             assert_eq!((low, high), (want(-3), want(3)), "party level {level}");
         }
         // The offset of the other kind does not leak in.
@@ -861,7 +987,7 @@ mod tests {
             );
         }
         // Monotonic in the offset.
-        let mut last = (0_u8, 0_u16, 0_u64);
+        let mut last = (0_u16, 0_u16, 0_u64);
         for offset in -10..=10_i8 {
             let now = example_at(party, offsets(offset, offset), Kind::Story);
             assert!(now.0 > last.0 && now.1 >= last.1 && now.2 >= last.2, "offset {offset}");
@@ -870,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn the_offsets_keep_the_clamps_of_one_and_two_hundred() {
+    fn the_offsets_keep_the_clamps_of_one_and_the_level_cap() {
         // A party of level 1 and -10: the target is level 1, not a level at or below 0, and q is the one of level 1.
         let aim = target(6, offsets(-10, -10), Kind::Random);
         assert_eq!(aim.level(), 1);
@@ -881,12 +1007,17 @@ mod tests {
         assert_eq!(target(6 * 7, offsets(-10, -10), Kind::Story).level(), 1, "7 - 10 is below 1");
         assert_eq!(target(6 * 11, offsets(-10, -10), Kind::Story).level(), 1);
         assert_eq!(target(6 * 12, offsets(-10, -10), Kind::Story).level(), 2);
-        // The top: a party of level 195 and +10 would be 205.
-        assert_eq!(target(6 * 195, offsets(10, 10), Kind::Story).level(), MAX_LEVEL);
-        assert_eq!(target(6 * 255, offsets(10, 10), Kind::Story).level(), MAX_LEVEL);
-        let top = target(6 * 255, offsets(10, 10), Kind::Story).ratio(20);
-        let at_200 = target(6 * 200, offsets(0, 0), Kind::Story).ratio(20);
-        assert_eq!(top, at_200, "q follows the clamped level too");
+        // The top: a party of level 995 and +10 would be 1005.
+        assert_eq!(target(6 * 995, offsets(10, 10), Kind::Story).level(), MAX_LEVEL);
+        assert_eq!(target(6 * 1200, offsets(10, 10), Kind::Story).level(), MAX_LEVEL);
+        assert_eq!(
+            target(6 * 100, offsets(10, 10), Kind::Story).level(),
+            110,
+            "no clamp at 200 any more"
+        );
+        let top = target(6 * 1200, offsets(10, 10), Kind::Story).ratio(20);
+        let at_cap = target(6 * 999, offsets(0, 0), Kind::Story).ratio(20);
+        assert_eq!(top, at_cap, "q follows the clamped level too");
         // Never a number of 0 for a nonzero value, whatever the offset.
         let tiny = target(6, offsets(-10, -10), Kind::Random).ratio(100);
         assert_eq!((scale_hp(1, tiny), scale_bp(1, tiny), scale_exp(1, tiny)), (1, 1, 1));

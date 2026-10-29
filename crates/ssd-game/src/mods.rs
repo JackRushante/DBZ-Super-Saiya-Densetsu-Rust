@@ -23,6 +23,7 @@ mod bp_kaioken;
 pub mod chapter;
 mod families;
 mod features;
+mod levels;
 mod maps;
 mod party_boosts;
 mod progression;
@@ -34,6 +35,7 @@ mod tables;
 mod talk;
 mod triggers;
 
+pub use progression::level_cap_in;
 use ssd_oracle::{HookAction, HookEntry, HookMode, HookTable, ReturnKind};
 
 /// The hook entries of the redirectors, in Rust mode (`mod_script`, `mod_face`, `mod_message`, `mod_string`,
@@ -210,12 +212,22 @@ mod tests {
                 "mod_fp_ginyu_arrival",
                 "mod_fp_piccolo_bp_low",
                 "mod_fp_piccolo_bp_high",
+                "mod_fp_level_up",
+                "mod_fp_level_raise",
+                "mod_fp_exp_carry",
+                "mod_fp_super_saiyan_form",
                 "mod_enemy_scaling_stats",
                 "mod_enemy_scaling_exp",
                 "mod_enemy_scaling_pick",
+                "mod_enemy_scaling_floor",
+                "mod_enemy_scaling_lethal",
+                "mod_enemy_scaling_ginyu",
+                "mod_enemy_scaling_judge",
                 "mod_party_guru",
                 "mod_party_porunga_level",
                 "mod_party_lunch",
+                "mod_party_pick_use",
+                "mod_party_pick_effect",
             ]
         );
         for entry in &entries {
@@ -300,12 +312,22 @@ mod tests {
                 progression::GINYU_KEY,
                 progression::PICCOLO_BP_LOW_KEY,
                 progression::PICCOLO_BP_HIGH_KEY,
+                levels::LEVEL_UP_KEY,
+                levels::RAISE_KEY,
+                levels::EXP_CARRY_KEY,
+                levels::SUPER_SAIYAN_KEY,
                 scaling::STATS_KEY,
                 scaling::EXP_KEY,
                 scaling::PICK_KEY,
+                scaling::FLOOR_KEY,
+                scaling::LETHAL_KEY,
+                scaling::GINYU_KEY,
+                scaling::JUDGE_KEY,
                 party_boosts::GURU_KEY,
                 party_boosts::PORUNGA_KEY,
                 party_boosts::LUNCH_KEY,
+                party_boosts::USE_KEY,
+                party_boosts::EFFECT_KEY,
             ]
         );
     }

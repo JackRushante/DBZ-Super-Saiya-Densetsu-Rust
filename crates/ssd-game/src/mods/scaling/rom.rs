@@ -174,7 +174,7 @@ fn battle(machine: &mut Machine, group: u8) -> [Record; 5] {
 
 /// A party record as the level is read from it.
 fn party_fighter((character, level): (u8, u8)) -> Fighter {
-    Fighter { flags: 0xC0, unit: character, level, character }
+    Fighter { flags: 0xC0, unit: character, level: level.into(), character }
 }
 
 /// What the scaling must make of an original record `r` for a party at `sixths` and a difficulty.
@@ -184,7 +184,7 @@ fn expected(r: &Record, sixths: u32, difficulty: Difficulty) -> Record {
     }
     let ratio = ratio(sixths, difficulty, r.level);
     Record {
-        level: scaled_level(sixths, difficulty),
+        level: scaled_level(sixths, difficulty).min(99) as u8,
         hp: scale_hp(r.hp, ratio),
         max_hp: scale_hp(r.max_hp, ratio),
         ki: scale_ki(r.ki, ratio),
@@ -486,7 +486,7 @@ fn expected_at(r: &Record, sixths: u32, scaling: Scaling, kind: Kind) -> Record 
     let aim = target(sixths, scaling, kind);
     let ratio = aim.ratio(r.level);
     Record {
-        level: aim.level(),
+        level: aim.level().min(99) as u8,
         hp: scale_hp(r.hp, ratio),
         max_hp: scale_hp(r.max_hp, ratio),
         ki: scale_ki(r.ki, ratio),

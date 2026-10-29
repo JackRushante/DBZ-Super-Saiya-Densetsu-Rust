@@ -264,7 +264,10 @@ and **Tools**.
   change the member, Y gives the BP back to the game's own value for the level. The level goes from the character's first row to its cap
   (47 for Goku, Piccolo and Vegeta, 48 for Gohan, Krillin, Tien, Yamcha and Chiaotzu, 3 for Dende; Vegeta starts at 17; Nail, Tsumuri
   and Maima have no level table, so only their BP changes). A new level sets the max HP and KI and the EXP from the game's rows and fills
-  HP and KI. The BP stops at 9 999 999.
+  HP and KI. The BP stops at 9 999 999. With a data pack whose `level_cap` is set (Free progression 0.4.0: 999) the levels of Goku, Gohan,
+  Piccolo, Krillin, Tien, Yamcha, Chiaotzu and Vegeta go on up to the cap (a held key strides 10 and 100 levels) on the curves the game
+  itself uses past its table, the BP stops at 9 999 999 999, and the real level, the EXP's high byte and the BP's high part are written
+  to the slot's mod state (`ssd.mods`).
 - **BP as a delta.** The game's level-up adds the table's rows to a member's BP, so what a member has over the table for its level
   ("+3000 over the game's") is kept by every level-up of the game: set Gohan to level 30 (the table's 16409) and add 3000, and the next
   level he gains gives the table's BP for that level plus 3000. The editor keeps the delta when you change the level, and it is in the BP
