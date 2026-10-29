@@ -590,3 +590,84 @@ fn the_hp_floor_fights_keep_the_story_when_a_hit_could_skip_the_floor() {
         "after the swap he can fall ({record:02x?})"
     );
 }
+
+// ---- The trainings: the gravity trials of the spaceship and the trials' EXP ----
+
+/// `$0136`: the ten counters of the trials (one per gravity), and `03:CD2E`, the effect that pays them to the first record.
+const TRIAL_COUNTERS: u32 = 0x7E_0136;
+const TRIAL_EXP_EFFECT: u32 = 0x03_CD2E;
+/// `05:8E3F`: the win of a gravity trial (+2 levels).
+const TRIAL_WIN: u32 = 0x05_8E3F;
+
+/// Goku at level 48 (past his own cap), the EXP and the stats of that level.
+fn goku_at_48(rig: &mut Rig, rom: &[u8]) {
+    let goku = anchor(rom, 0);
+    let rows: Vec<_> = (1..=47).map(|l| game_row(rom, 0, l)).collect();
+    rig.reset();
+    rig.member(0, 0, 47, rows[46].1, goku.bp, rows[46].2 as u16, goku.ki as u16);
+    rig.write(RAISE_CHARACTER, &[0]);
+    rig.write(RAISE_LEVELS, &[0]);
+    rig.call(0x03_C64A, 0);
+}
+
+#[test]
+#[ignore = "needs the game's ROM (SSD_ROM_PATH)"]
+fn a_won_gravity_trial_gives_two_levels_past_the_games_cap_only_with_the_pack() {
+    let rom = rom();
+    let goku = anchor(&rom, 0);
+    let mut plain = Rig::new(&rom, false);
+    let mut pack = Rig::new(&rom, true);
+
+    // The original: Goku at 48 is past his cap, the trial's win leaves him at 48 (and the EXP as the table's following bytes).
+    plain.reset();
+    let rows: Vec<_> = (1..=47).map(|l| game_row(&rom, 0, l)).collect();
+    plain.member(0, 0, 48, rows[46].1, goku.bp, 759, 141);
+    plain.call(TRIAL_WIN, 0);
+    assert_eq!(plain.bytes(PARTY + 2, 1)[0], 48, "without the pack the level stays");
+
+    // With the pack: 48 to 50 on the extended rows (BP, EXP, HP and KI of level 50).
+    goku_at_48(&mut pack, &rom);
+    assert_eq!(pack.bytes(PARTY + 2, 1)[0], 48);
+    pack.call(TRIAL_WIN, 0);
+    let at = goku.at(50);
+    assert_eq!(pack.bytes(PARTY + 2, 1)[0], 50, "the trial gives two levels");
+    assert_eq!(pack.triple(PARTY + 0x0F), at.exp, "the EXP of level 50");
+    assert_eq!(pack.triple(PARTY + 7), at.bp, "the BP of level 50");
+    assert_eq!(u64::from(pack.word(PARTY + 0x0A)), u64::from(at.max_hp));
+
+    // Past 99: from 98 to 100 (the byte saturates at 99, the wide level is 100), and at the cap 998 to 999 only.
+    for (from, to) in [(98_u8, 100_u16), (97, 99)] {
+        goku_at_48(&mut pack, &rom);
+        pack.write(RAISE_CHARACTER, &[0]);
+        pack.write(RAISE_LEVELS, &[from - 49]);
+        pack.call(0x03_C64A, 0);
+        pack.call(TRIAL_WIN, 0);
+        let want = goku.at(to);
+        assert_eq!(pack.bytes(PARTY + 2, 1)[0], to.min(99) as u8);
+        if to > 99 {
+            let (level, exp, bp) = pack.wide(0);
+            assert_eq!(level, to);
+            assert_eq!((exp, bp), (want.exp, want.bp), "level {to}");
+        } else {
+            assert_eq!((pack.triple(PARTY + 0x0F), pack.triple(PARTY + 7)), (want.exp, want.bp));
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs the game's ROM (SSD_ROM_PATH)"]
+fn a_trial_exp_that_carries_past_24_bits_goes_to_the_high_byte() {
+    let rom = rom();
+    let mut pack = Rig::new(&rom, true);
+    goku_at_48(&mut pack, &rom);
+    // The EXP just under 2^24 and a trial that pays 64 000 (40 clears at the last gravity).
+    pack.write(PARTY + 0x0F, &[0x00, 0xFF, 0xFF]);
+    pack.write(TRIAL_COUNTERS, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 40]);
+    pack.call(TRIAL_EXP_EFFECT, 0);
+    let high = pack.bytes(exp_high_at(0), 1)[0];
+    assert_eq!(high, 1, "the carry is in the high byte");
+    assert_eq!(pack.triple(PARTY + 0x0F), 0xFF_FF00 + 64_000 - 0x100_0000);
+    let (level, exp, _) = pack.wide(0);
+    assert_eq!(exp, 0x100_0000 + (0xFF_FF00 + 64_000 - 0x100_0000), "the whole EXP");
+    assert!(level > 48 || pack.bytes(PARTY + 2, 1)[0] > 48, "the level-up check saw the whole EXP");
+}

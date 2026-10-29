@@ -236,8 +236,8 @@ mod tests {
             hooks_of(FREE_PROGRESSION).into_iter().map(|entry| entry.name).collect();
         assert_eq!(
             progression.len(),
-            14,
-            "the ten hooks of free_progression and the four of the level cap"
+            16,
+            "the ten hooks of free_progression and the six of the level cap"
         );
         assert_eq!(progression[0], "mod_fp_raditz_goku");
         assert_eq!(progression[9], "mod_fp_piccolo_bp_high");

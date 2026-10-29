@@ -266,6 +266,8 @@ a level to reach in the original (it is the Super Saiyan's), and the extension b
 | `03:851B` (entry) | the raise by a number of levels (the story's floors and gifts, the Porunga card), with the original's rule: the target plus one, at least one level; the byte saturates, so a floor's target below 99 is one level and a gift of `n` levels is `n + 1` |
 | `05:8FDD` | the carry of a fight's 24-bit EXP add goes to the EXP's high byte |
 | `03:867A` | the end of the Super Saiyan's builder, see "Bosses" below |
+| `05:8E3F` | the win of a gravity trial of the spaceship (a fight that ends with `$01D6` bit 7 set), which gives the first record two levels: the original sets its EXP to the start of the level two above by reading the table row of each level (`05:C93A`, twice) and lowers the level byte by two before the check; past the 48th row that is the bytes that follow the table, so the EXP became a few hundred and Goku stayed at 48. The hook sets the EXP to the start of the level two above on the extended rows (at most the cap), runs the level-up check and goes on after it |
+| `03:CD87` | the EXP the gravity trials' last stage pays (effect `$52`, the first record): the carry of its 24-bit add goes to the EXP's high byte |
 
 They decline without the parameter and for a character without a table. A pack that also redirects the level tables
 (`tables.md`) gives way to the level cap for those eight characters.
@@ -412,10 +414,8 @@ HUD digits, take the low 24 bits (`state.md`).
   the power-up `05:A727`): they wrap it at 24 bits. It takes a party above level 50 (a raised level cap) to reach it: 51 at
   hard and 58 at normal for the largest BP of the original's rows. The level cap's own level-up and Super Saiyan hooks write the wide BP
   whole; the form changes and the power-up of those lines are still the original's.
-- The party's HP and KI are cut at 9 999, a gift of
-  EXP that carries past 24 bits outside a fight's award (a King Kai trial) is not carried to the high byte, and the catch-up after a
-  wipe (`05:8E3F`, which lowers the level byte by two before the check) re-adds the BP of the levels the byte lost: a rare path at a
-  level above 99.
+- The party's HP and KI are cut at 9 999. The Porunga card (`05:C8C5`) keeps its own cap of 47 (48 for Gohan): it gives no level at or above
+  it, with or without the pack.
 - The recompiled build must be regenerated: the keys are stops of the recompiler (`02:D37C` came with the offsets).
 - The party's level is read from the records as the game holds them: a character the game raises on building the record
   (Vegeta is raised to level 17) counts at that level.

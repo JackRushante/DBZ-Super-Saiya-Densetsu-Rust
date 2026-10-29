@@ -14,7 +14,9 @@
 //! - `03:851B`, the raise by a number of levels (floors, gifts, the Porunga card): replaced, with the original's rule
 //!   (`target + 1`, at least one level);
 //! - `05:8FDD`, after the 24-bit EXP add of a fight: the carry goes to the EXP's high byte;
-//! - `03:867A`, the end of the Super Saiyan's builder (`03:85F0`): the BP, HP and KI the form is built with follow the level.
+//! - `03:867A`, the end of the Super Saiyan's builder (`03:85F0`): the BP, HP and KI the form is built with follow the level;
+//! - `05:8E3F`, the bonus of a won gravity trial (+2 levels): the level and EXP of the next two levels on the extended rows;
+//! - `03:CD87`, the EXP the gravity trials' last stage pays: its carry past 24 bits goes to the EXP's high byte.
 
 use super::progression::level_cap;
 use super::state::{
@@ -33,6 +35,15 @@ pub(super) const RAISE_KEY: u32 = 0x03_851B;
 pub(super) const EXP_CARRY_KEY: u32 = 0x05_8FDD;
 /// `03:867A`: the `RTL` of `03:85F0`, the builder of Goku's Super Saiyan form.
 pub(super) const SUPER_SAIYAN_KEY: u32 = 0x03_867A;
+
+/// `05:8E3F`: the win of a gravity trial of the spaceship (a fight that ends with `$01D6` bit 7 set): the original sets the first
+/// record's EXP to the start of the level two above and raises it (`05:C93A` twice, which reads the table row of each level
+/// reached, then a level-up check after lowering the byte by two).
+pub(super) const TRIAL_WIN_KEY: u32 = 0x05_8E3F;
+/// `05:8E55`: where the trial's win goes on after the level-up check (`LDA $0B02`, the level shown in the message).
+const TRIAL_WIN_DONE: u32 = 0x05_8E55;
+/// `03:CD87`: the `LDY #0` after the 24-bit add of a trial's EXP (effect `$52`) to the first record, in front of its level-up check.
+pub(super) const TRIAL_EXP_KEY: u32 = 0x03_CD87;
 
 /// `03:850E`: the game's cap of each character (47 or 48 for the eight that have a table).
 const GAME_CAPS: u32 = 0x03_850E;
@@ -247,22 +258,11 @@ fn apply_row(ctx: &mut Ctx<'_>, record: u32, row: &Row) {
     ctx.write8(record + BYTE_0E, row.byte_0e);
 }
 
-/// `03:841E`: the level-up check of one party member. With the cap, for a character that has a table: the original's rules (a
-/// member in the party, not at its cap) and its loop (the next level's start reached: the level, the row's BP, HP, KI and byte
-/// `$0E`, HP and KI full, bit 7 of `$1F`), with the rows of [`row_at`]. Anything else is the original's.
-fn level_up_check(ctx: &mut Ctx<'_>) {
-    let Some(cap) = level_cap(ctx) else {
-        ctx.resume_at(LEVEL_UP_KEY);
-        return;
-    };
-    let y = ctx.y();
-    let Some((record, id)) = record_of(ctx, y) else {
-        ctx.resume_at(LEVEL_UP_KEY);
-        return;
-    };
+/// The loop of the level-up check on `record` of character `id`: while the EXP reaches the next level's start and the level is
+/// below `cap`, the level goes up with the row's BP, HP, KI and byte `$0E`, HP and KI refilled, bit 7 of `$1F` set.
+fn level_up_record(ctx: &mut Ctx<'_>, record: u32, id: u8, cap: u16) {
     let mut level = effective_level(ctx, record);
     if level >= cap {
-        ctx.set_cost(0);
         return;
     }
     ctx.write_dp8(GAINED, 0);
@@ -278,6 +278,22 @@ fn level_up_check(ctx: &mut Ctx<'_>) {
             ctx.write_dp8(GAINED, 0x80);
         }
     }
+}
+
+/// `03:841E`: the level-up check of one party member. With the cap, for a character that has a table: the original's rules (a
+/// member in the party, not at its cap) and its loop (the next level's start reached: the level, the row's BP, HP, KI and byte
+/// `$0E`, HP and KI full, bit 7 of `$1F`), with the rows of [`row_at`]. Anything else is the original's.
+fn level_up_check(ctx: &mut Ctx<'_>) {
+    let Some(cap) = level_cap(ctx) else {
+        ctx.resume_at(LEVEL_UP_KEY);
+        return;
+    };
+    let y = ctx.y();
+    let Some((record, id)) = record_of(ctx, y) else {
+        ctx.resume_at(LEVEL_UP_KEY);
+        return;
+    };
+    level_up_record(ctx, record, id, cap);
     ctx.set_x(y);
     ctx.set_cost(0);
 }
@@ -329,18 +345,52 @@ fn raise(ctx: &mut Ctx<'_>) {
     ctx.set_cost(0);
 }
 
-/// `05:8FDD`: a member's 24-bit EXP has just been added to; the carry of the add goes to the EXP's high byte. Y is the record's
-/// offset.
-fn exp_carry(ctx: &mut Ctx<'_>) {
+/// The carry of a 24-bit EXP add to the record at `offset` goes to the EXP's high byte (the carry flag is the add's).
+fn carry_to_high_byte(ctx: &mut Ctx<'_>, offset: u16) {
     if level_cap(ctx).is_some()
         && ctx.c()
-        && let Some((_, id)) = record_of(ctx, ctx.y())
+        && let Some((_, id)) = record_of(ctx, offset)
     {
         make_levels_live(ctx);
         let high = ctx.peek8(exp_high_at(id)).saturating_add(1);
         ctx.write8(exp_high_at(id), high);
     }
+}
+
+/// `05:8FDD`: a member's 24-bit EXP has just been added to; the carry of the add goes to the EXP's high byte. Y is the record's
+/// offset.
+fn exp_carry(ctx: &mut Ctx<'_>) {
+    carry_to_high_byte(ctx, ctx.y());
     ctx.resume_at(EXP_CARRY_KEY);
+}
+
+/// `03:CD87`: a trial's EXP (effect `$52`) has been added to the first record's 24 bits; its carry goes to the high byte.
+fn trial_exp_carry(ctx: &mut Ctx<'_>) {
+    carry_to_high_byte(ctx, 0);
+    ctx.resume_at(TRIAL_EXP_KEY);
+}
+
+/// `05:8E3F`: a gravity trial is won. The original gives the first record the EXP that begins the level two above (reading the
+/// table row of each level, which has none past the 48th: the EXP became whatever bytes follow the table and the level never went
+/// on) and raises it by the level-up check. With the cap: the EXP of the level two above on the extended rows (at most the cap),
+/// then the check; the level byte is left alone (the original lowers it by two after raising it by two). A first record that is
+/// not a character with a table, and no cap, are the original's.
+fn trial_win(ctx: &mut Ctx<'_>) {
+    if let Some(cap) = level_cap(ctx)
+        && let Some((record, id)) = record_of(ctx, 0)
+    {
+        let level = effective_level(ctx, record);
+        if level < cap {
+            let target = (level + 2).min(cap);
+            set_exp(ctx, record, id, row_at(ctx, id, target).exp_start);
+        }
+        level_up_record(ctx, record, id, cap);
+        ctx.set_x(0);
+        ctx.set_y(0);
+        ctx.resume_at(TRIAL_WIN_DONE);
+        return;
+    }
+    ctx.resume_at(TRIAL_WIN_KEY);
 }
 
 /// The factor of a level over the form's own level, `((level + 5) / 52)^power`, applied to `value` (rounded, halves up).
@@ -409,6 +459,8 @@ pub(super) fn hooks() -> Vec<HookEntry> {
         patch("mod_fp_level_raise", RAISE_KEY, raise),
         patch("mod_fp_exp_carry", EXP_CARRY_KEY, exp_carry),
         patch("mod_fp_super_saiyan_form", SUPER_SAIYAN_KEY, super_saiyan),
+        patch("mod_fp_trial_win", TRIAL_WIN_KEY, trial_win),
+        patch("mod_fp_trial_exp_carry", TRIAL_EXP_KEY, trial_exp_carry),
     ]
 }
 
@@ -452,7 +504,7 @@ mod tests {
     fn the_hooks_are_at_their_addresses_and_none_is_another_hooks_key() {
         let entries = hooks();
         let keys: Vec<u32> = entries.iter().map(|entry| entry.key).collect();
-        assert_eq!(keys, [0x03_841E, 0x03_851B, 0x05_8FDD, 0x03_867A]);
+        assert_eq!(keys, [0x03_841E, 0x03_851B, 0x05_8FDD, 0x03_867A, 0x05_8E3F, 0x03_CD87]);
         let cheats = crate::cheats::entry_points();
         for entry in &entries {
             assert!(!cheats.contains(&entry.key), "{} is a cheat's key", entry.name);

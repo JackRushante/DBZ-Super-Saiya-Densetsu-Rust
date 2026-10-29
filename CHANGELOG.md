@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.13 (2026-10-29)
+
+### Fixes
+
+- Free progression, level cap: Goku no longer stops at level 48 in the spaceship's gravity trials. A won trial gives two levels by
+  setting the first record's EXP to the start of the level two above, and the game read the table row of each level for it, which has
+  no row past the 48th: the EXP became the bytes that follow the table (a few hundred) and the check found nothing to raise. With the
+  pack the trial now reads the extended rows and goes on to level 999 (at the pack's cap). The EXP the gravity trials' last stage pays (effect `$52`) also
+  carries past 24 bits into the EXP's high byte. Without the pack, or with `level_cap = 48`, nothing changes. Run `recompile` for a
+  recompiled build. Remastered only.
+
 ## 0.3.12 (2026-10-29)
 
 ### Features
