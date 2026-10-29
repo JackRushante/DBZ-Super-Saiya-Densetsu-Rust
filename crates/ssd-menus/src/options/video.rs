@@ -51,6 +51,14 @@ pub const ROWS: &[RowDef] = &[
         source: Source::Stored { default: 0 },
     },
     RowDef {
+        key: "video.latency",
+        label: "Latency",
+        group: "Window",
+        help: "Smooth draws the picture while the next frame runs: faster, one frame later. Low shows each frame at once.",
+        kind: Kind::Choice(&["Low", "Smooth"]),
+        source: Source::Stored { default: 1 },
+    },
+    RowDef {
         key: "video.look",
         label: "Look",
         group: "Picture",
@@ -167,10 +175,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn latency_is_smooth_unless_the_player_chooses_low() {
+        let mut values = Values::new();
+        assert_eq!(index(&values, "video.latency"), 1, "Smooth, the picture drawn meanwhile");
+        values.set("video.latency", 0);
+        assert_eq!(index(&values, "video.latency"), 0, "Low");
+        let row = ROWS.iter().find(|row| row.key == "video.latency").unwrap();
+        assert!(matches!(row.kind, Kind::Choice(["Low", "Smooth"])));
+    }
+
+    #[test]
     fn the_picture_size_follows_the_scale_and_the_aspect() {
         assert_eq!(picture_size(2, 0), (372 * 4, 224 * 4));
         assert_eq!(picture_size(0, 1), (512, 448));
-        assert_eq!(size_text(&[0, 4, 0, 0, 1, 0, 0, 0]), "1536 x 1344", "6x, 4:3");
+        assert_eq!(size_text(&[0, 4, 0, 1, 0, 1, 0, 0, 0]), "1536 x 1344", "6x, 4:3");
     }
 
     #[test]
@@ -205,6 +223,6 @@ mod tests {
     #[test]
     fn the_rows_have_three_groups_and_one_read_only_line() {
         let infos = ROWS.iter().filter(|row| row.kind == Kind::Info).count();
-        assert_eq!((infos, ROWS.len()), (1, 8));
+        assert_eq!((infos, ROWS.len()), (1, 9));
     }
 }

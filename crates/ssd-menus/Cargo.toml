@@ -9,6 +9,8 @@ publish = false
 # The bag and its sidecar file (`saves/ssd.bag`): serde derives, encoded with bincode.
 bincode = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
+# The save editor works on the battery save's slots and records (pure Rust, no game code).
+ssd-save = { workspace = true }
 
 [lints]
 workspace = true

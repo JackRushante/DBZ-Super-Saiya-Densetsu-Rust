@@ -1,13 +1,14 @@
 //! The enemies that follow the party's level (M10, Task 19): the named feature `enemy_scaling`. The design and its numbers are
 //! in `docs/mods/free-progression.md`; the parameter is in `docs/mods/features.md`. In short, every enemy of a battle is set to
 //! the strength it would have if it had been made for the party's level, on the curve the original gives its own enemies and
-//! the party's levels, and the difficulty moves that level up or down.
+//! the party's levels, and the difficulty moves that level up or down. A pack may instead give two offsets in levels from the
+//! party's, one for the random battles and one for every other battle ([`Scaling::Offsets`]).
 //!
 //! **The model** (all integer arithmetic, so that a replay plays the same on every machine). With `u = level + 5`:
 //! - the party's level `P` is the mean of the levels of its three highest fighters ([`party_sixths`]), kept in sixths;
 //! - the difficulty is a factor on the party's `u`: 7/8, 1 or 9/8;
 //! - the enemy's own level `L` is the level of its record (the unit row's, or the pack row's), the level the enemy was made for;
-//! - `q = difficulty * (P + 5) / (L + 5)`; then HP and KI are scaled by `q`, BP by `q^3`, the EXP it pays by `q^2`, and the level
+//! - `q = difficulty * (P + 5) / (L + 5)` (with offsets, `q = (P + offset + 5) / (L + 5)`, the offset of the kind of battle); then HP and KI are scaled by `q`, BP by `q^3`, the EXP it pays by `q^2`, and the level
 //!   of its record becomes the party's level with the difficulty (`difficulty * (P + 5) - 5`). At `P = L` and the normal
 //!   difficulty `q` is exactly 1 and every number is the original's.
 //!
@@ -26,17 +27,22 @@
 
 use super::redirect::overlay;
 use super::state::{
-    BLOCK, ENEMY_HIGH, ENEMY_SLOTS, MARKER, MARKER_AT, PARTY_SLOTS, SCRATCH_END, enemy_record,
-    party_record, split,
+    BATTLE_KIND, BLOCK, ENEMY_HIGH, ENEMY_SLOTS, KIND_MARKER, MARKER, MARKER_AT, PARTY_SLOTS,
+    SCRATCH_END, enemy_record, party_record, split,
 };
 use ssd_mod::Family;
-use ssd_mod::feature::ENEMY_SCALING;
+use ssd_mod::feature::{ENEMY_SCALING, SCALING_OFFSETS};
 use ssd_oracle::{Ctx, HookAction, HookEntry, HookMode, ReturnKind, RoutineFn};
 
 /// `01:F7F1`: the `RTL` of `01:F719`, which the loop over the five enemy slots reaches when it is done.
 pub(super) const STATS_KEY: u32 = 0x01_F7F1;
 /// `1D:8C66`: the `RTL` of `1D:8C33`, after the reward of one defeated enemy is added to the battle's EXP.
 pub(super) const EXP_KEY: u32 = 0x1D_8C66;
+
+/// `02:D37C`: the `RTL` of `02:D34A`, the pick of a random encounter's group. `02:D34A` has one caller, `02:D250`, in the
+/// normal-battle branch of the roll that starts a battle (`02:D241`); a story battle (a script's battle, the roll's own story
+/// branch, a form change) never runs it. It is the game's own line between the two kinds of battle.
+pub(super) const PICK_KEY: u32 = 0x02_D37C;
 
 /// `$7E:0EA3`: the encounter group of the battle (`01:F692`).
 const GROUP_INDEX: u32 = 0x7E_0EA3;
@@ -109,6 +115,36 @@ impl Difficulty {
     }
 }
 
+/// How the enemies' target level is set from the party's: by a factor (the pack's `difficulty`), or by a number of levels for
+/// each kind of battle (the pack's `random_offset` and `boss_offset`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Scaling {
+    /// The target is `difficulty * (P + 5) - 5` for every battle.
+    Difficulty(Difficulty),
+    /// The target is `P + random` for a random battle and `P + story` for any other, in levels (at least 1, at most
+    /// [`MAX_LEVEL`]).
+    Offsets { random: i8, story: i8 },
+}
+
+impl Scaling {
+    /// The scaling a feature slot's bytes stand for: the first byte is a difficulty (0 to 2, the slot of a pack written with
+    /// `difficulty` alone has no other byte), or [`SCALING_OFFSETS`] followed by the two offsets as signed bytes.
+    pub(super) fn from_bytes(mode: u8, random: u8, story: u8) -> Option<Self> {
+        if mode == SCALING_OFFSETS {
+            return Some(Self::Offsets { random: random as i8, story: story as i8 });
+        }
+        Difficulty::from_byte(mode).map(Self::Difficulty)
+    }
+}
+
+/// The two kinds of battle: a random encounter (the pick of `02:D34A` ran for it) or any other, which is every story battle,
+/// boss and scripted fight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Kind {
+    Random,
+    Story,
+}
+
 /// One party record, as the party's level is read from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Fighter {
@@ -143,30 +179,67 @@ pub(super) fn party_sixths(fighters: &[Fighter]) -> Option<u32> {
     Some(levels.iter().map(|&level| u32::from(level)).sum::<u32>() * (6 / count))
 }
 
-/// The party's `u` with the difficulty, in 48ths: `(P + 5) * difficulty` with `P` in sixths (so `(sixths + 30) * eighths`).
-fn effective(party_sixths: u32, difficulty: Difficulty) -> u128 {
-    (u128::from(party_sixths) + 6 * SHIFT) * difficulty.eighths()
+/// The level the enemies of one kind of battle are made for, resolved once from the party and the scaling: the party's `u`
+/// with the difficulty or the offset, in 48ths (`(P + 5) * factor`, or `(P + offset + 5)` times 8), and the level of the record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Target {
+    effective: u128,
 }
 
-/// The record level an enemy gets: the party's level with the difficulty, `difficulty * (P + 5) - 5` rounded to a whole
-/// level, at least 1 and at most [`MAX_LEVEL`]. At the normal difficulty it is the party's mean, rounded.
+/// The target of a battle of `kind`: `party_sixths` is the party's level in sixths.
+///
+/// With a difficulty it is the party's `u` times the factor. With offsets it is the party's level plus the kind's offset, kept
+/// between level 1 and [`MAX_LEVEL`] (a level below 1 does not exist, and the BP of a level 0 or less is no number), in sixths so
+/// that the identity holds: a party whose mean is `L` and an offset of 0 give `q = 1` exactly.
 #[must_use]
-pub(super) fn scaled_level(party_sixths: u32, difficulty: Difficulty) -> u8 {
-    let rounded = (effective(party_sixths, difficulty) + 24) / 48;
-    rounded.saturating_sub(SHIFT).clamp(1, u128::from(MAX_LEVEL)) as u8
+pub(super) fn target(party_sixths: u32, scaling: Scaling, kind: Kind) -> Target {
+    let effective = match scaling {
+        Scaling::Difficulty(difficulty) => {
+            (u128::from(party_sixths) + 6 * SHIFT) * difficulty.eighths()
+        }
+        Scaling::Offsets { random, story } => {
+            let offset = i64::from(if kind == Kind::Random { random } else { story });
+            let sixths = (i64::from(party_sixths) + 6 * offset).clamp(6, 6 * i64::from(MAX_LEVEL));
+            (sixths as u128 + 6 * SHIFT) * 8
+        }
+    };
+    Target { effective }
 }
 
-/// The ratio `q` of one enemy: the party's `u` with the difficulty over the enemy's own `u`, as a fraction of 48ths.
+impl Target {
+    /// The record level an enemy gets: the target level rounded to a whole level, at least 1 and at most [`MAX_LEVEL`].
+    /// With the normal difficulty it is the party's mean, rounded.
+    #[must_use]
+    pub(super) fn level(self) -> u8 {
+        let rounded = (self.effective + 24) / 48;
+        rounded.saturating_sub(SHIFT).clamp(1, u128::from(MAX_LEVEL)) as u8
+    }
+
+    /// The ratio `q` of an enemy made for level `enemy_level` against this target (see the module documentation).
+    #[must_use]
+    pub(super) fn ratio(self, enemy_level: u8) -> Ratio {
+        Ratio { num: self.effective, den: 48 * (u128::from(enemy_level) + SHIFT) }
+    }
+}
+
+/// The record level of a battle at a difficulty (the tests' shorthand for [`target`]; the kind does not matter to a difficulty).
+#[cfg(test)]
+pub(super) fn scaled_level(party_sixths: u32, difficulty: Difficulty) -> u8 {
+    target(party_sixths, Scaling::Difficulty(difficulty), Kind::Story).level()
+}
+
+/// The ratio `q` of one enemy at a difficulty (the tests' shorthand for [`target`]).
+#[cfg(test)]
+#[must_use]
+pub(super) fn ratio(party_sixths: u32, difficulty: Difficulty, enemy_level: u8) -> Ratio {
+    target(party_sixths, Scaling::Difficulty(difficulty), Kind::Story).ratio(enemy_level)
+}
+
+/// The ratio `q` of one enemy: the target's `u` over the enemy's own `u`, as a fraction of 48ths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Ratio {
     num: u128,
     den: u128,
-}
-
-/// The ratio of an enemy made for level `enemy_level` against the party (see the module documentation).
-#[must_use]
-pub(super) fn ratio(party_sixths: u32, difficulty: Difficulty, enemy_level: u8) -> Ratio {
-    Ratio { num: effective(party_sixths, difficulty), den: 48 * (u128::from(enemy_level) + SHIFT) }
 }
 
 impl Ratio {
@@ -249,22 +322,93 @@ fn fighters(ctx: &Ctx<'_>) -> Vec<Fighter> {
         .collect()
 }
 
-/// The difficulty and the party's level (in sixths) of this fight, or `None` when the scaling does not act: the feature is not in
+/// The scaling and the party's level (in sixths) of this fight, or `None` when the scaling does not act: the feature is not in
 /// the image, the fight is a scripted loss, or no fighter is in the party.
-fn active(ctx: &Ctx<'_>) -> Option<(Difficulty, u32)> {
-    let slot = overlay(ctx, Family::Feature, ENEMY_SCALING)?;
-    let difficulty = Difficulty::from_byte(ctx.peek8(slot))?;
+fn active(ctx: &Ctx<'_>) -> Option<(Scaling, u32)> {
+    let scaling = scaling_of(ctx)?;
     if crate::cheats::SCRIPTED_LOSS.contains(&ctx.peek8(GROUP_INDEX)) {
         return None;
     }
-    Some((difficulty, party_sixths(&fighters(ctx))?))
+    Some((scaling, party_sixths(&fighters(ctx))?))
+}
+
+/// The scaling the pack's slot gives, or `None` without the feature in the image. A slot of the difficulty is one byte (the
+/// bytes after it belong to the next slot and are not read); a slot of offsets is three.
+fn scaling_of(ctx: &Ctx<'_>) -> Option<Scaling> {
+    let slot = overlay(ctx, Family::Feature, ENEMY_SCALING)?;
+    let mode = ctx.peek8(slot);
+    if mode == SCALING_OFFSETS {
+        Scaling::from_bytes(mode, ctx.peek8(slot + 1), ctx.peek8(slot + 2))
+    } else {
+        Scaling::from_bytes(mode, 0, 0)
+    }
+}
+
+/// `$7F:FB50`: the marker of the kind-of-battle bytes, four bytes.
+const KIND_MARKER_AT: u32 = BLOCK + BATTLE_KIND as u32;
+/// `$7F:FB54`: 1 between the pick of a random encounter's group and the build of its records, else 0.
+const PENDING_AT: u32 = KIND_MARKER_AT + 4;
+/// `$7F:FB55`: 1 while the battle whose records were last built is a random encounter, else 0.
+const KIND_AT: u32 = KIND_MARKER_AT + 5;
+
+/// Whether the kind-of-battle bytes are in place: without their marker the battle is a story battle.
+fn kind_live(ctx: &Ctx<'_>) -> bool {
+    KIND_MARKER.iter().enumerate().all(|(k, &byte)| ctx.peek8(KIND_MARKER_AT + k as u32) == byte)
+}
+
+/// Puts the kind-of-battle bytes in place (the marker, and both bytes zero) when they are not, because the power-on fill of
+/// work RAM is random.
+fn make_kind_live(ctx: &mut Ctx<'_>) {
+    if !kind_live(ctx) {
+        ctx.write8(PENDING_AT, 0);
+        ctx.write8(KIND_AT, 0);
+        for (k, &byte) in KIND_MARKER.iter().enumerate() {
+            ctx.write8(KIND_MARKER_AT + k as u32, byte);
+        }
+    }
+}
+
+/// Whether the pack gives offsets: only then are the two kinds of battle told apart (the difficulty treats them alike, and
+/// leaves work RAM alone).
+fn with_offsets(ctx: &Ctx<'_>) -> bool {
+    matches!(scaling_of(ctx), Some(Scaling::Offsets { .. }))
+}
+
+/// `02:D37C`: a random encounter's group has been picked, and the battle it starts has not built its records yet.
+fn pick_wrapper(ctx: &mut Ctx<'_>) {
+    if with_offsets(ctx) {
+        make_kind_live(ctx);
+        ctx.write8(PENDING_AT, 1);
+    }
+    ctx.resume_at(PICK_KEY);
+}
+
+/// The kind of the battle whose records are being built: random if the pick left its mark, else a story battle. The mark is
+/// taken (a builder run for a form change, or for the next story battle, finds none), and the kind is kept for the EXP award
+/// of the same battle ([`stored_kind`]).
+fn take_kind(ctx: &mut Ctx<'_>) -> Kind {
+    if !with_offsets(ctx) {
+        return Kind::Story;
+    }
+    make_kind_live(ctx);
+    let random = ctx.peek8(PENDING_AT) == 1;
+    ctx.write8(PENDING_AT, 0);
+    ctx.write8(KIND_AT, u8::from(random));
+    if random { Kind::Random } else { Kind::Story }
+}
+
+/// The kind of the battle whose records were built last.
+fn stored_kind(ctx: &Ctx<'_>) -> Kind {
+    if kind_live(ctx) && ctx.peek8(KIND_AT) == 1 { Kind::Random } else { Kind::Story }
 }
 
 /// `01:F7F1`: the enemy records are complete, and each one `01:F719` filled is scaled: its level, HP and maximum HP, KI and
 /// maximum KI, and BP. The loop's own start is mirrored (slot 0 is not visited for an even count), and a slot whose flags are
 /// zero, or whose level is zero (a unit row of a party member), is left as it is.
 fn stats_wrapper(ctx: &mut Ctx<'_>) {
-    if let Some((difficulty, party)) = active(ctx) {
+    let kind = take_kind(ctx);
+    if let Some((scaling, party)) = active(ctx) {
+        let aim = target(party, scaling, kind);
         let first = u32::from(ctx.peek8(ENEMY_COUNT) & 1 == 0);
         let mut highs = [0_u16; ENEMY_SLOTS as usize];
         let mut shown = Vec::new();
@@ -274,7 +418,7 @@ fn stats_wrapper(ctx: &mut Ctx<'_>) {
             if ctx.peek8(base + FLAGS) == 0 || level == 0 {
                 continue;
             }
-            let ratio = ratio(party, difficulty, level);
+            let ratio = aim.ratio(level);
             let before = (ctx.peek16(base + MAX_HP), peek24(ctx, base + BP));
             for at in [HP, MAX_HP] {
                 let scaled = scale_hp(ctx.peek16(base + at), ratio);
@@ -287,11 +431,11 @@ fn stats_wrapper(ctx: &mut Ctx<'_>) {
             let (low, high) = split(scale_bp(u64::from(peek24(ctx, base + BP)), ratio));
             write24(ctx, base + BP, low);
             highs[slot as usize] = high;
-            ctx.write8(base + LEVEL, scaled_level(party, difficulty));
+            ctx.write8(base + LEVEL, aim.level());
             shown.push(format!(
                 "unit {:#04x} L{level}->{} HP {}->{} BP {}->{}",
                 ctx.peek8(base + UNIT),
-                scaled_level(party, difficulty),
+                aim.level(),
                 before.0,
                 ctx.peek16(base + MAX_HP),
                 before.1,
@@ -299,7 +443,7 @@ fn stats_wrapper(ctx: &mut Ctx<'_>) {
             ));
         }
         log::info!(
-            "enemy scaling ({difficulty:?}, party level {:.1}): {}",
+            "enemy scaling ({scaling:?}, {kind:?} battle, party level {:.1}): {}",
             f64::from(party) / 6.0,
             shown.join("; ")
         );
@@ -321,15 +465,17 @@ fn stats_wrapper(ctx: &mut Ctx<'_>) {
 /// holds 14 times the unit); the scaled reward replaces it. Only a unit of the original table is scaled (a pack's unit has no
 /// row to read), and a unit whose row has no level is left as it is.
 fn exp_wrapper(ctx: &mut Ctx<'_>) {
-    if let Some((difficulty, party)) = active(ctx) {
+    if let Some((scaling, party)) = active(ctx) {
         let row = u32::from(ctx.x());
         if row < UNIT_ROWS * UNIT_ROW_LEN && row % UNIT_ROW_LEN == 0 {
             let at = UNIT_STATS + row;
             let level = ctx.peek8(at + ROW_LEVEL);
             if level != 0 {
                 let reward = peek24(ctx, at + ROW_EXP);
-                let scaled = scale_exp(reward, ratio(party, difficulty, level));
-                let total = peek24(ctx, BATTLE_EXP).wrapping_sub(reward).wrapping_add(scaled);
+                let ratio = target(party, scaling, stored_kind(ctx)).ratio(level);
+                let total = peek24(ctx, BATTLE_EXP)
+                    .wrapping_sub(reward)
+                    .wrapping_add(scale_exp(reward, ratio));
                 write24(ctx, BATTLE_EXP, total & 0xFF_FFFF);
             }
         }
@@ -354,11 +500,12 @@ fn patch(name: &str, key: u32, func: RoutineFn) -> HookEntry {
     }
 }
 
-/// The hooks of `enemy_scaling`: the records of a battle and the EXP of a defeated enemy.
+/// The hooks of `enemy_scaling`: the records of a battle, the EXP of a defeated enemy, and the mark of a random encounter.
 pub(super) fn hooks() -> Vec<HookEntry> {
     vec![
         patch("mod_enemy_scaling_stats", STATS_KEY, stats_wrapper),
         patch("mod_enemy_scaling_exp", EXP_KEY, exp_wrapper),
+        patch("mod_enemy_scaling_pick", PICK_KEY, pick_wrapper),
     ]
 }
 
@@ -386,11 +533,15 @@ mod tests {
     }
 
     #[test]
-    fn the_keys_are_the_returns_of_the_two_routines_named_in_the_documentation() {
+    fn the_keys_are_the_returns_of_the_routines_named_in_the_documentation() {
         assert_eq!(STATS_KEY, 0x01_F7F1);
         assert_eq!(EXP_KEY, 0x1D_8C66);
+        assert_eq!(PICK_KEY, 0x02_D37C);
         let names: Vec<String> = hooks().into_iter().map(|entry| entry.name).collect();
-        assert_eq!(names, ["mod_enemy_scaling_stats", "mod_enemy_scaling_exp"]);
+        assert_eq!(
+            names,
+            ["mod_enemy_scaling_stats", "mod_enemy_scaling_exp", "mod_enemy_scaling_pick"]
+        );
         let cheats = crate::cheats::entry_points();
         for entry in hooks() {
             assert!(!cheats.contains(&entry.key), "{} is a cheat's key", entry.name);
@@ -656,6 +807,120 @@ mod tests {
             unscaled / at_own_level > 8.0,
             "unscaled the same party is eight times stronger relative to the enemy"
         );
+    }
+
+    /// The offsets `(random, story)` as a scaling.
+    fn offsets(random: i8, story: i8) -> Scaling {
+        Scaling::Offsets { random, story }
+    }
+
+    /// The levels and BP of the level-20 example enemy at a target.
+    fn example_at(party: u32, scaling: Scaling, kind: Kind) -> (u8, u16, u64) {
+        let aim = target(party, scaling, kind);
+        let ratio = aim.ratio(20);
+        (aim.level(), scale_hp(300, ratio), scale_bp(20_000, ratio))
+    }
+
+    #[test]
+    fn the_offsets_put_a_random_battle_and_a_story_battle_at_their_own_levels_from_the_partys() {
+        // Random at -3 and story at +3: the levels the owner asked for, at a party of level 46.
+        let scaling = offsets(-3, 3);
+        let party = 6 * 46;
+        assert_eq!(target(party, scaling, Kind::Random).level(), 43);
+        assert_eq!(target(party, scaling, Kind::Story).level(), 49);
+        for level in [1_u32, 5, 12, 20, 46, 100] {
+            let party = 6 * level;
+            let low = target(party, scaling, Kind::Random).level();
+            let high = target(party, scaling, Kind::Story).level();
+            let want = |offset: i64| (i64::from(level) + offset).clamp(1, 200) as u8;
+            assert_eq!((low, high), (want(-3), want(3)), "party level {level}");
+        }
+        // The offset of the other kind does not leak in.
+        assert_eq!(target(party, offsets(-3, 9), Kind::Random).level(), 43);
+        assert_eq!(target(party, offsets(9, 3), Kind::Story).level(), 49);
+        // A fractional party level (the mean of three) is rounded after the offset: 5.33 and +2 is 7.33, level 7.
+        assert_eq!(target(32, offsets(2, 2), Kind::Random).level(), 7);
+        assert_eq!(target(34, offsets(2, 2), Kind::Random).level(), 8, "5.67 + 2 rounds up");
+    }
+
+    #[test]
+    fn with_offsets_the_numbers_are_the_enemys_made_for_the_target_level() {
+        // An enemy of level 20 against a party of level 20: offset 0 is the original, +3 is the numbers of a party of 23, -3 of 17.
+        let party = 6 * 20;
+        let original = example_at(party, Scaling::Difficulty(Difficulty::Normal), Kind::Story);
+        assert_eq!(original, (20, 300, 20_000));
+        assert_eq!(example_at(party, offsets(0, 0), Kind::Random), original);
+        assert_eq!(example_at(party, offsets(0, 0), Kind::Story), original);
+        for (offset, kind) in [(3_i8, Kind::Story), (-3, Kind::Random)] {
+            let level = (20 + i32::from(offset)) as u32;
+            let by_party = example_at(6 * level, Scaling::Difficulty(Difficulty::Normal), kind);
+            assert_eq!(
+                example_at(party, offsets(offset, offset), kind),
+                by_party,
+                "offset {offset} is the numbers of a party of level {level}"
+            );
+        }
+        // Monotonic in the offset.
+        let mut last = (0_u8, 0_u16, 0_u64);
+        for offset in -10..=10_i8 {
+            let now = example_at(party, offsets(offset, offset), Kind::Story);
+            assert!(now.0 > last.0 && now.1 >= last.1 && now.2 >= last.2, "offset {offset}");
+            last = now;
+        }
+    }
+
+    #[test]
+    fn the_offsets_keep_the_clamps_of_one_and_two_hundred() {
+        // A party of level 1 and -10: the target is level 1, not a level at or below 0, and q is the one of level 1.
+        let aim = target(6, offsets(-10, -10), Kind::Random);
+        assert_eq!(aim.level(), 1);
+        assert_eq!(
+            aim.ratio(10),
+            target(6, Scaling::Difficulty(Difficulty::Normal), Kind::Story).ratio(10)
+        );
+        assert_eq!(target(6 * 7, offsets(-10, -10), Kind::Story).level(), 1, "7 - 10 is below 1");
+        assert_eq!(target(6 * 11, offsets(-10, -10), Kind::Story).level(), 1);
+        assert_eq!(target(6 * 12, offsets(-10, -10), Kind::Story).level(), 2);
+        // The top: a party of level 195 and +10 would be 205.
+        assert_eq!(target(6 * 195, offsets(10, 10), Kind::Story).level(), MAX_LEVEL);
+        assert_eq!(target(6 * 255, offsets(10, 10), Kind::Story).level(), MAX_LEVEL);
+        let top = target(6 * 255, offsets(10, 10), Kind::Story).ratio(20);
+        let at_200 = target(6 * 200, offsets(0, 0), Kind::Story).ratio(20);
+        assert_eq!(top, at_200, "q follows the clamped level too");
+        // Never a number of 0 for a nonzero value, whatever the offset.
+        let tiny = target(6, offsets(-10, -10), Kind::Random).ratio(100);
+        assert_eq!((scale_hp(1, tiny), scale_bp(1, tiny), scale_exp(1, tiny)), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_slot_of_the_difficulty_alone_is_the_old_scaling_and_a_slot_of_offsets_the_new_one() {
+        // The slot of the released pack 0.2.0: one byte, the difficulty. Whatever follows it is not read.
+        for (byte, difficulty) in
+            [(0, Difficulty::Easy), (1, Difficulty::Normal), (2, Difficulty::Hard)]
+        {
+            for next in [0_u8, 0xFD, 3, 0xFF] {
+                assert_eq!(
+                    Scaling::from_bytes(byte, next, next),
+                    Some(Scaling::Difficulty(difficulty))
+                );
+            }
+        }
+        assert_eq!(Scaling::from_bytes(SCALING_OFFSETS, 0xFD, 3), Some(offsets(-3, 3)));
+        assert_eq!(Scaling::from_bytes(SCALING_OFFSETS, 10, 0xF6), Some(offsets(10, -10)));
+        assert_eq!(
+            Scaling::from_bytes(4, 0, 0),
+            None,
+            "a byte that is no mode: the feature is off"
+        );
+        // For the old form the kind of battle changes nothing, and it is the difficulty's own law.
+        for party in [6_u32, 100, 282] {
+            for difficulty in ALL {
+                let story = target(party, Scaling::Difficulty(difficulty), Kind::Story);
+                assert_eq!(story, target(party, Scaling::Difficulty(difficulty), Kind::Random));
+                assert_eq!(story.level(), scaled_level(party, difficulty));
+                assert_eq!(story.ratio(20), ratio(party, difficulty, 20));
+            }
+        }
     }
 }
 

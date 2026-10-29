@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.3.11 (2026-10-29)
+
+### Features
+
+- Save editor (Enhanced): on the title screen a small strip says "Select  Edit saves". Select opens the three slots; A opens one on
+  its pages (L and R walk them). Party: each member's level and battle power, with Left and Right (a held key accelerates the BP by
+  x10, x100, x1000); the max HP and KI and the EXP follow the level as the game builds a record, and the level stops at the
+  character's cap. The BP is kept as what it is over the game's own table for the level (shown as "+3000 over the game's"), so
+  changing the level carries it along, and the game's level-up, which adds the table's rows, keeps it on every later level. Y puts the
+  BP back to the table's value. Bag (All, Allies, Tools): the count of each stack (0 removes it, 99 is the top), X adds an object from a
+  picture picker (a story object asks first, with the cursor on Cancel), Y removes a stack. Start (or B after a change) asks
+  "Write / Discard / Keep editing"; a write goes through the game's own slot format (mark, checksum, backup copy), re-keys the slot's bag,
+  cheats, options and mod state, and gives the slot the CHEATS badge. Chapter saves are not edited.
+- **Party-wide boosts** (`party-boosts.ssdpack`, not canon): in a battle the Guru object (BP +50 percent), Porunga's second wish (+1 level)
+  and Launch's normal effect (the favourite attacks; its one-in-four alternative effect is left as it is) work on every fighter of
+  the party, each by the game's own rules (the level cap, the refusals); the object is used up once. The new named feature
+  `party_boosts` (`guru`, `porunga_level`, `lunch`). Remastered only.
+
+- **Free progression 0.3.0**: the enemies are made for a level set by two offsets from the party's, `random_offset` for the random
+  battles and `boss_offset` for every other battle (the story, the bosses, the scripted fights), each -10 to +10 levels; the pack
+  gives -3 and +3, so random enemies are 3 levels under the party and the bosses 3 over it. The game tells them apart by the road the
+  battle took (the random pick of the zone's group, or not). `enemy_scaling` takes either the offsets or the old `difficulty`; a
+  pack written with `difficulty` alone (the 0.2.0 release) plays exactly as before. Remastered only; run `recompile` for a
+  recompiled build.
+
+### Fixes
+
+- The Enhanced picture of the field no longer hitches when a map tile comes into view (issue #15, pull request #16 by lming888). The
+  tiles of the map's art are read ahead on a thread (plain `std`) and kept by last use within one memory budget (`TILE_BUDGET`,
+  256 MB), the tile used longest ago going first, instead of the whole cache being dropped at 48 tiles. A tile that is not ready is
+  still decoded on the spot, so the picture is the same; at `--hd-scale 4` the tile files are no longer resized. Enhanced only.
+
+### Performance
+
+- The window's frame in Enhanced mode costs the longer of the game's work and the HD picture's, not both: at normal speed the picture of a
+  frame is now drawn on its own thread while the next frame runs, and shown one frame later. The new Video row Latency chooses it
+  (Smooth, the default) or the old draw-then-show (Low). On the test PC a frame at normal speed takes a quarter to a third less
+  time. The thread is kept for the whole run instead of started for every frame (and, on
+  Android, named to the system's performance hints with the others).
+- The game's own picture, which Enhanced mode throws away and draws again in HD from the render log, is no longer drawn at any speed (it was
+  only skipped when fast-forwarding), and its copy is skipped too. It is drawn again for a recording, a verification, a screenshot of the
+  original frame, after a state load or a reset, and whenever the HD picture cannot be drawn.
+- The Enhanced picture is drawn faster, with the same pixels (checked picture by picture against the build before, on the battle and
+  wander replays). The 4x picture is made in one pass that doubles twice and writes straight into the finished picture, in loops the
+  compiler turns into vector code on PC and on the phone, so the half-size middle picture is never written out; the picture's buffers
+  are reused from one frame to the next instead of being taken from the system every frame; the art of the backgrounds is copied a row at
+  a time where it is shown in the game's own colours; the colour lookup for recoloured art, the gathering of its colour pairs and the
+  passes over the frame's records are cheaper and use all the workers; and the passes work in bands of rows, about one for each worker,
+  not one job for each row. On the test PC the 4x 16:9 picture without art takes 0.9 ms a frame instead of 1.6, and with the art 6.4 ms
+  instead of 8.1 (mean over the first 3000 frames of the battle and wander replays).
+
 ## 0.3.10 (2026-10-28)
 
 ### Fixes

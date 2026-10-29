@@ -261,6 +261,20 @@ impl Bag {
         removed
     }
 
+    /// Sets the units of stack `id` to `units`, at most the stack limit; 0 removes the stack. Returns the units the stack holds
+    /// now (`None` for a stack that does not exist). The save editor's count.
+    pub fn set_count(&mut self, id: u32, units: u16) -> Option<u16> {
+        let limit = self.rules.stack;
+        let index = self.stacks.iter().position(|stack| stack.id == id)?;
+        let units = units.min(limit);
+        if units == 0 {
+            self.stacks.remove(index);
+        } else {
+            self.stacks[index].count = units;
+        }
+        Some(units)
+    }
+
     /// The entries the original list shows, as stack ids in list order: `front` first when given
     /// (the stack the HD stages for its use), then the key items, then the other stacks, in the
     /// order they were acquired. At most [`PROJECTED`] entries, or [`LIST_FULL`] when the bag is full.
@@ -278,6 +292,18 @@ impl Bag {
         order.truncate(cap);
         order
     }
+}
+
+/// Objects without the story bit that the story hands out or takes back itself, so that one spawned early can upset
+/// it: the "Moon" card (gone after the duel with Vegeta) and the Dragon Radar (given on Namek when it was not picked
+/// up).
+const STORY_HANDS: [u8; 2] = [20, 23];
+
+/// Whether the story checks `object`: a key item of the bag (the story bit, or a Dragon Ball), or one the story hands out
+/// itself. The item spawner and the save editor warn before it.
+#[must_use]
+pub fn story_object(story_bit: bool, object: u8) -> bool {
+    Class::of(object, story_bit).key || STORY_HANDS.contains(&object)
 }
 
 /// The bag of one save slot, as the sidecar file keeps it: the slot's checksum word says which save

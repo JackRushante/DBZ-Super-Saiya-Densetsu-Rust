@@ -250,7 +250,8 @@ The help texts say what each does; the groups:
 | 5, 6 | raise battle power 25 and 50 percent (battle) |
 | 7 | paralyses an enemy for one attack (battle) |
 | 8 | restores HP and KI |
-| 9 to 13 | change a card or the whole hand (10 to 13 ask for a card, bit 4; 9 asks for a member by its attribute although its text speaks of a card: not understood; `$7E:2BA0` keeps a mask of the three choices already used) |
+| 9 | Launch: marks the acting member's attacks as the favourite ones (below, "Launch") |
+| 10 to 13 | change a card or the whole hand (they ask for a card, bit 4; `$7E:2BA0` keeps a mask of the three choices already used) |
 | 14 | restores HP and KI for the whole party |
 | 15 | Porunga's three wishes (see "Porunga" below) |
 | 16, 17 | the Scouter: information on the enemy |
@@ -263,6 +264,29 @@ The help texts say what each does; the groups:
 | 25 | evens out the cards between attack and defence |
 | 27 to 31 | story objects with effects in battle |
 | 33 to 39 | the seven Dragon Balls: no effect |
+
+### Launch (object 9)
+
+Seen in a battle on the `secret-zarbon-vegeta-joins` battle (a party of six records), 24 uses of the object from the HD Items
+screen at different start frames, the records and the effect's variables compared before and after.
+
+- **The roll** (`01:8C63`, reached from the use step for an object with the member bit and without bit 1). For Launch it reads
+  `rng_seed_a` (`$002F`): when its low two bits are zero (one use in four) the object becomes object 27 (`$0D7C` = `$1B`) and its
+  effect starts at once; in the other three cases it takes the common path, which queues window set 6, waits for a press and runs the
+  effect of object 9 on the acting member. Any other object takes the common path. Seen: 18 of the 24 uses were the normal effect and 6 the alternative
+  one. On the map Launch has no use: the stack's attribute in the field's list reads `$89` (INT only, plus the run-time bit 0,
+  see the attribute table), which is the "can't use" answer, and the HD starts the choice on Drop with Use greyed out.
+- **The normal effect** (`01:E066`, a state machine on `$073C`). Step 0 (`01:E074`) takes the acting member's record (`$0748`): if
+  bit 4 of its flags (`+00`) is set it refuses (step 3 and a message window, set `$1C`, through `01:DF90`); else it sets bit 4 of the
+  flags and bit 3 of `+18` and puts the mark tile (`$2916`) beside the member's name (the member lists draw it from bit 3 of
+  `+18`, `01:8D66` and `01:C0B2`). Seen: flags `$C0` to `$D0`, `+18` `$00` to `$08`, nothing else in the records. Steps 1 and 2
+  are shared with other effects (`01:DD54`, `01:DDCF`) and step 3 waits for a press. The mark is on the member, not on the cards of
+  the hand. Read, not played: the card step of a fighter's turn (`01:9EEF`) tests bit 4 of the flags together with a short list of
+  unit ids and, for either, sets bit 3 and bit 7 of `+18` (`01:9F31`, `01:9F26`), which is the reading of "the member's attacks
+  hit everyone", the favourite-card behaviour.
+- **The alternative effect** (object 27, `01:ECAA`). Writes no record: it opens a message window (set `$24`), then calls a routine
+  with `Y` = 7 and sets `$071C` = `$80`; the diff shows `$0733` going from 1 to 7 (not understood) and nothing in the
+  party records. It is the "attack everyone this turn" of the object's help text.
 
 ## The Item screen (`$0D5F` = 2)
 

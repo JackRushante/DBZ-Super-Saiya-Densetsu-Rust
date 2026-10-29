@@ -17,6 +17,7 @@ pub mod mods_state;
 pub mod nav;
 pub mod options;
 pub mod packs;
+pub mod saveedit;
 pub mod screens;
 pub mod setup;
 pub mod style;
@@ -28,6 +29,6 @@ pub use language::Language;
 pub use nav::{Action, Entry, Key, Nav};
 pub use style::Style;
 pub use view::{
-    CharacterLabel, CommandLabel, Labels, Member, MenuView, ObjectLabel, Picture, Screen, Selected,
-    Slot, StatusLabels,
+    CharacterLabel, CommandLabel, Growth, Labels, Member, MenuView, ObjectLabel, Picture, Screen,
+    Selected, Slot, StatusLabels,
 };

@@ -15,6 +15,9 @@ pub struct VideoSettings {
     /// The 4:3 picture (the original window) instead of the 16:9 view.
     pub narrow: bool,
     pub vsync: bool,
+    /// Latency Smooth (the default): the picture is drawn in the background while the next frame runs and shown one frame
+    /// later. Low draws and shows each frame in turn.
+    pub smooth: bool,
     pub filters: Filters,
 }
 
@@ -36,6 +39,7 @@ impl VideoSettings {
             look: if video::index(values, "video.look") == 1 { Look::Smooth } else { Look::Crisp },
             narrow: video::index(values, "video.aspect") == 1,
             vsync: video::index(values, "video.vsync") == 1,
+            smooth: video::index(values, "video.latency") == 1,
             filters: Filters { scanlines: level("video.scanlines"), crt: level("video.crt") },
         }
     }
@@ -69,6 +73,9 @@ impl VideoSettings {
         }
         if old.vsync != new.vsync {
             self.vsync = new.vsync;
+        }
+        if old.smooth != new.smooth {
+            self.smooth = new.smooth;
         }
         if old.filters.scanlines != new.filters.scanlines {
             self.filters.scanlines = new.filters.scanlines;
@@ -107,6 +114,7 @@ mod tests {
         let defaults = VideoSettings::default();
         assert_eq!(defaults.hd(), HdOptions { scale: 4, look: Look::Crisp });
         assert!(!defaults.fullscreen && !defaults.narrow && !defaults.vsync);
+        assert!(defaults.smooth, "the picture is drawn in the background unless Latency is Low");
         assert!(defaults.shape().is_identity(), "no crop and no filter: the picture is untouched");
     }
 
@@ -119,13 +127,14 @@ mod tests {
             ("video.look", 1),
             ("video.aspect", 1),
             ("video.vsync", 1),
+            ("video.latency", 0),
             ("video.scanlines", 2),
             ("video.crt", 99),
         ] {
             values.set(key, value);
         }
         let settings = VideoSettings::from_values(&values);
-        assert!(settings.fullscreen && settings.narrow && settings.vsync);
+        assert!(settings.fullscreen && settings.narrow && settings.vsync && !settings.smooth);
         assert_eq!(settings.hd(), HdOptions { scale: 8, look: Look::Smooth });
         assert_eq!(settings.filters, Filters { scanlines: 2, crt: 2 }, "a wild value clamps");
         assert_eq!(settings.shape(), Shape { crop: true, filters: settings.filters });

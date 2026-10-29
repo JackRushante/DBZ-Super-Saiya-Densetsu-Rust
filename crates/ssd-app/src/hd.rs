@@ -94,6 +94,18 @@ pub fn slot_list(wram: &[u8]) -> Option<SlotList> {
         .then_some(SlotList::Save)
 }
 
+/// Whether a battery save holds at least one game (a good slot, or one the backup restores).
+fn holds_a_game(sram: &[u8]) -> bool {
+    ssd_save::SaveFile::from_bytes(sram).is_ok_and(|file| {
+        (0..ssd_save::SLOT_COUNT).any(|slot| {
+            matches!(
+                file.status(slot),
+                Ok(ssd_save::SlotStatus::Good | ssd_save::SlotStatus::FromBackup)
+            )
+        })
+    })
+}
+
 /// The HD layer of a run: the menu driver, with the names it shows and the textures it paints, and
 /// the 16:9 view of the game's frames the menus are drawn over.
 pub struct Hd {
@@ -111,6 +123,46 @@ pub struct Hd {
     ui_text: Option<std::sync::Arc<ssd_menus::ui_text::UiText>>,
     /// The canonical ROM: the names a translation draws over the tile maps are read from it.
     rom: std::sync::Arc<[u8]>,
+    /// The save editor, while it is open (the title's Select opens it, see [`Hd::key`]).
+    editor: Option<ssd_menus::saveedit::Editor>,
+    /// Select was pressed on the title: the editor opens at the next frame, which has the cartridge save.
+    editor_wanted: bool,
+    /// Whether the editor may open: not while a replay plays or records (the cartridge save is the replay's).
+    editor_allowed: bool,
+}
+
+/// The game mode the boot code sets before it calls the title routine, which runs inside the boot code until the player starts
+/// (`docs/re/data/title-chapters.md`, "Boot"): the mode stays `$87` for the whole title, with no party yet (the first record's flags
+/// and the party size at `$01BB` are zero, as the boot code clears them), and the main loop changes it as soon as the title returns.
+const TITLE_MODE: u8 = 0x87;
+const TITLE_PARTY_FLAGS: usize = 0x0B00;
+const TITLE_PARTY_COUNT: usize = 0x01BB;
+
+/// Whether the title screen is what the game runs: the title's mode and no party.
+#[must_use]
+pub fn on_title(wram: &[u8]) -> bool {
+    let byte = |at: usize| wram.get(at).copied();
+    byte((d::GAME_MODE - 0x7E_0000) as usize) == Some(TITLE_MODE)
+        && byte(TITLE_PARTY_FLAGS) == Some(0)
+        && byte(TITLE_PARTY_COUNT) == Some(0)
+}
+
+/// The editor's key of an HD key (the Start button arrives as [`Hd::close_menu`]).
+fn editor_key(key: Key) -> Option<ssd_menus::saveedit::Key> {
+    use ssd_menus::saveedit::Key as E;
+    Some(match key {
+        Key::Up => E::Up,
+        Key::Down => E::Down,
+        Key::Left => E::Left,
+        Key::Right => E::Right,
+        Key::Confirm => E::A,
+        Key::Cancel => E::B,
+        Key::Tab => E::R,
+        Key::TabBack => E::L,
+        Key::ResetPage => E::Y,
+        Key::Apply => E::X,
+        Key::ResetAll => return None,
+    })
 }
 
 impl Hd {
@@ -170,6 +222,9 @@ impl Hd {
             language_saved,
             ui_text: None,
             rom: std::sync::Arc::from(rom),
+            editor: None,
+            editor_wanted: false,
+            editor_allowed: true,
         };
         hd.set_language(language);
         Ok(hd)
@@ -264,6 +319,13 @@ impl Hd {
         if let Some(count) = self.driver.sell_count(wram) {
             list.append(ssd_menus::screens::sell_count(count));
         }
+        if self.editor.is_none()
+            && self.editor_allowed
+            && on_title(wram)
+            && sram.is_some_and(holds_a_game)
+        {
+            list.append(ssd_menus::saveedit::title_strip());
+        }
         (!list.ops().is_empty()).then(|| {
             crate::options::access::restyle(&self.driver.options().pc, self.translated(list, None))
         })
@@ -287,7 +349,54 @@ impl Hd {
     /// The HD's frame: the joypad and the host events of the frame, given the work RAM and the
     /// battery save (see [`Driver::frame`]).
     pub fn frame(&mut self, wram: &[u8], sram: Option<&[u8]>, live: Joypad) -> HdFrame {
+        if std::mem::take(&mut self.editor_wanted)
+            && let Some(sram) = sram
+        {
+            match ssd_menus::saveedit::Editor::open(
+                sram,
+                &self.labels,
+                self.driver.sidecar(),
+                self.driver.marked_slots(sram),
+            ) {
+                Ok(editor) => self.editor = Some(editor),
+                Err(error) => log::warn!("the save editor does not open: {error}"),
+            }
+        }
+        if let Some(editor) = self.editor.as_mut() {
+            if let Some(sram) = sram {
+                editor.observe(sram);
+            }
+            editor.tick();
+            editor.held(i8::from(live.right) - i8::from(live.left));
+            if editor.finished() {
+                self.editor = None;
+            }
+            // The game sees no button while the editor is open, nor on the frame that closes it.
+            return HdFrame {
+                pad: Joypad::default(),
+                events: Vec::new(),
+                saved: None,
+                saved_cheats: None,
+                saved_mods: None,
+                saved_options: false,
+                settings: None,
+                video: None,
+            };
+        }
         self.driver.frame(wram, sram, live)
+    }
+
+    /// Whether the save editor may open now: not while a replay plays or records.
+    pub fn allow_editor(&mut self, allowed: bool) {
+        self.editor_allowed = allowed;
+    }
+
+    /// The write the editor made, once: the host stores `commit.sram` in the machine's cartridge save (the editor's copy is
+    /// ahead of it), and the sidecar entries of the slot are re-keyed here. Returns the commit for the host's write.
+    pub fn take_editor_commit(&mut self) -> Option<ssd_menus::saveedit::Commit> {
+        let commit = self.editor.as_mut()?.take_commit()?;
+        commit.rekey(&mut self.driver.sidecars_mut());
+        Some(commit)
     }
 
     /// A replay's recorded application event, applied to the bag (see [`Driver::replay_event`]).
@@ -316,6 +425,13 @@ impl Hd {
         self.driver.busy()
     }
 
+    /// Whether the field is free: no menu has the curtain and no press is under way. Then the picture the window shows
+    /// is the game's own and may be drawn a frame late.
+    #[must_use]
+    pub fn field_free(&self) -> bool {
+        self.driver.curtain() == Curtain::Down && !self.driver.busy()
+    }
+
     /// Opens the Cheats screen over a battle (see [`Driver::open_battle_cheats`]).
     pub fn open_battle_cheats(&mut self) -> bool {
         self.driver.open_battle_cheats()
@@ -323,11 +439,30 @@ impl Hd {
 
     /// A navigation key of the HD on the menu of `wram` (see [`Driver::key`]).
     pub fn key(&mut self, key: Key, wram: &[u8]) {
+        if let Some(editor) = self.editor.as_mut() {
+            if let Some(key) = editor_key(key) {
+                editor.key(key);
+            }
+            return;
+        }
+        // Select on the title opens the save editor (nothing else of the HD lives there).
+        if key == Key::ResetAll
+            && self.editor_allowed
+            && self.driver.curtain() == Curtain::Down
+            && on_title(wram)
+        {
+            self.editor_wanted = true;
+            return;
+        }
         self.driver.key(key, wram);
     }
 
     /// Start on the Cards screen closes the menu (see [`Driver::close_menu`]).
     pub fn close_menu(&mut self) {
+        if let Some(editor) = self.editor.as_mut() {
+            editor.key(ssd_menus::saveedit::Key::Start);
+            return;
+        }
         self.driver.close_menu();
     }
 
@@ -397,6 +532,9 @@ impl Hd {
     /// The HD's picture of the menu now, if the curtain is up.
     #[must_use]
     pub fn scene(&self, wram: &[u8]) -> Option<DrawList> {
+        if let Some(editor) = self.editor.as_ref() {
+            return Some(self.translated(ssd_menus::saveedit::scene(editor), None));
+        }
         let context = match self.driver.screen() {
             Some(ssd_menus::view::Screen::Options) => Some("options"),
             _ => None,
@@ -436,6 +574,40 @@ impl Hd {
         options: ssd_hd::HdOptions,
     ) -> Option<WideHd> {
         self.wide.redraw_hd_pipelined(log, options)
+    }
+
+    /// The Enhanced picture for a run at its own speed that shows its pictures a window frame late: as
+    /// [`Hd::redraw_frame_hd_pipelined`], but a picture still being drawn is waited for, so none is dropped (see
+    /// [`WideRun::redraw_hd_next`]).
+    pub fn redraw_frame_hd_next(
+        &mut self,
+        log: Option<&FrameLog>,
+        options: ssd_hd::HdOptions,
+    ) -> Option<WideHd> {
+        self.wide.redraw_hd_next(log, options)
+    }
+
+    /// Whether a picture is being drawn in the background (or is done and not taken).
+    #[must_use]
+    pub fn drawing(&self) -> bool {
+        self.wide.drawing()
+    }
+
+    /// Waits for the picture being drawn in the background and returns it: the picture of the last frame handed over.
+    pub fn finish_drawing(&mut self) -> Option<WideHd> {
+        self.wide.finish_pipelined()
+    }
+
+    /// Starts the thread that draws the pictures in the background now, and returns its id for the Performance Hint
+    /// session (Android; `None` elsewhere): the session has to name the threads that work for the frame.
+    pub fn start_draw_worker(&mut self) -> Option<i32> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.wide.set_worker_start(std::sync::Arc::new(move || {
+            // (the window loop is waiting for this on the other end; a send to a gone receiver is nothing)
+            let _ = tx.send(crate::perf_hint::current_thread());
+        }));
+        self.wide.start_worker();
+        rx.recv().ok().flatten()
     }
 
     /// The 16:9 view of the frame last skipped ([`Hd::skip_frame`]), after all.

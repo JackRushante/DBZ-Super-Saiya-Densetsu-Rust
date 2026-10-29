@@ -56,6 +56,13 @@ pub struct HdFrame {
     pub logical: Rect,
 }
 
+impl Drop for HdFrame {
+    /// The picture's bytes go back to the pool the next picture is made in (see [`crate::pool`]).
+    fn drop(&mut self) {
+        crate::pool::BYTES.give(std::mem::take(&mut self.rgba));
+    }
+}
+
 /// The Mode 7 state of one line: the entry of the log it belongs to, the plane's parameters, the
 /// CGRAM it reads and the VRAM copy it reads (`None`: the log's own VRAM).
 #[derive(Clone, Copy)]
@@ -339,18 +346,10 @@ pub(crate) fn picture(
     let scale = options.scale as usize;
     let lines = frame.height;
     let wide = frame.width;
-    let source: Vec<u32> = frame.pixels.iter().map(|c| pack(c.r, c.g, c.b)).collect();
-    // A crisp picture of a power of two with no plane to sample again: the last Scale2x writes
-    // the picture
+    // A crisp picture of a power of two with no plane to sample again: the Scale2x passes write the
+    // picture's bytes directly
     if log.is_none() && options.look == Look::Crisp && scale.is_power_of_two() && scale > 1 {
-        let mut image = source;
-        let (mut w, mut h) = (wide, lines);
-        for _ in 1..scale.trailing_zeros() {
-            image = scale2x(&image, w, h);
-            w *= 2;
-            h *= 2;
-        }
-        let rgba = scale2x_rgba(&image, w, h);
+        let rgba = crisp_rgba(&frame.pixels, wide, lines, scale);
         let (width, height) = ((wide * scale) as u32, (lines * scale) as u32);
         return HdFrame {
             rgba,
@@ -360,13 +359,14 @@ pub(crate) fn picture(
             logical: Rect { x: 0, y: 0, width, height },
         };
     }
+    let source: Vec<u32> = frame.pixels.iter().map(|c| pack(c.r, c.g, c.b)).collect();
     let filtered = match options.look {
         Look::Crisp => crisp(&source, wide, lines, scale),
         Look::Smooth => smooth(&source, wide, lines, scale),
     };
     let width = wide * scale;
     let height = lines * scale;
-    let mut rgba = vec![0_u8; width * height * 4];
+    let mut rgba = crate::pool::BYTES.take(width * height * 4);
     rgba.par_chunks_mut(width * 4).enumerate().for_each(|(y, row)| {
         let line = y / scale;
         for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -463,21 +463,63 @@ fn crisp(source: &[u32], width: usize, height: usize, scale: usize) -> Vec<u32> 
 /// (upper left, upper right, lower left, lower right): a corner takes the colour of a neighbour
 /// when the two neighbours on that corner agree and the pixel differs from both.
 #[inline(always)]
+#[allow(clippy::needless_bitwise_bool)] // (the `&` keeps the corner rules free of branches: lanes are selected)
 fn epx(centre: u32, up: u32, right: u32, left: u32, down: u32) -> [u32; 4] {
-    let (mut e0, mut e1, mut e2, mut e3) = (centre, centre, centre, centre);
-    if left == up && left != down && up != right {
-        e0 = up;
-    }
-    if up == right && up != left && right != down {
-        e1 = right;
-    }
-    if down == left && down != right && left != up {
-        e2 = left;
-    }
-    if right == down && right != up && down != left {
-        e3 = down;
-    }
+    // (`&` and not `&&`: no branch, so the compiler can select lanes)
+    let e0 = if (left == up) & (left != down) & (up != right) { up } else { centre };
+    let e1 = if (up == right) & (up != left) & (right != down) { right } else { centre };
+    let e2 = if (down == left) & (down != right) & (left != up) { left } else { centre };
+    let e3 = if (right == down) & (right != up) & (down != left) { down } else { centre };
     [e0, e1, e2, e3]
+}
+
+/// The source rows one task of the Scale2x passes takes, at least and at most.
+const BAND_MIN: usize = 4;
+const BAND_MAX: usize = 32;
+
+/// How many source rows one task takes: about one band for each worker of the pool.
+fn band_rows(height: usize) -> usize {
+    height.div_ceil(rayon::current_num_threads().max(1)).clamp(BAND_MIN, BAND_MAX)
+}
+
+/// Scale2x of the row `cur` of an image, with the rows `up` and `down` around it: the two rows
+/// (`upper`, `lower`) of twice the width that it becomes. The ends of a row repeat their pixel.
+/// Written so that the inside of the row, which is nearly all of it, is a loop over slices of equal
+/// length with no index to check: the compiler turns it into vector code.
+#[inline(always)]
+fn epx_row(up: &[u32], cur: &[u32], down: &[u32], upper: &mut [u32], lower: &mut [u32]) {
+    let width = cur.len();
+    assert!(up.len() == width && down.len() == width);
+    assert!(upper.len() == 2 * width && lower.len() == 2 * width);
+    let edge = |x: usize, upper: &mut [u32], lower: &mut [u32]| {
+        let left = cur[x.saturating_sub(1)];
+        let right = cur[(x + 1).min(width - 1)];
+        let [e0, e1, e2, e3] = epx(cur[x], up[x], right, left, down[x]);
+        upper[2 * x] = e0;
+        upper[2 * x + 1] = e1;
+        lower[2 * x] = e2;
+        lower[2 * x + 1] = e3;
+    };
+    if width < 3 {
+        for x in 0..width {
+            edge(x, upper, lower);
+        }
+        return;
+    }
+    edge(0, upper, lower);
+    edge(width - 1, upper, lower);
+    let inside = width - 2;
+    let (left, centre, right) = (&cur[..inside], &cur[1..=inside], &cur[2..]);
+    let (above, below) = (&up[1..=inside], &down[1..=inside]);
+    let upper = upper[2..2 * width - 2].as_chunks_mut::<2>().0;
+    let lower = lower[2..2 * width - 2].as_chunks_mut::<2>().0;
+    for ((((((&l, &c), &r), &u), &d), upper), lower) in
+        left.iter().zip(centre).zip(right).zip(above).zip(below).zip(upper).zip(lower)
+    {
+        let [e0, e1, e2, e3] = epx(c, u, r, l, d);
+        *upper = [e0, e1];
+        *lower = [e2, e3];
+    }
 }
 
 /// The rows around source row `y` (above, the row, below), the edges repeating their row.
@@ -495,41 +537,108 @@ fn rows3(source: &[u32], width: usize, height: usize, y: usize) -> (&[u32], &[u3
 /// differs from both.
 fn scale2x(source: &[u32], width: usize, height: usize) -> Vec<u32> {
     let mut out = vec![0_u32; 4 * width * height];
-    out.par_chunks_mut(4 * width).enumerate().with_min_len(4).for_each(|(y, rows)| {
-        let (upper, lower) = rows.split_at_mut(2 * width);
-        let (up, cur, down) = rows3(source, width, height, y);
-        for x in 0..width {
-            let left = cur[x.saturating_sub(1)];
-            let right = cur[(x + 1).min(width - 1)];
-            let [e0, e1, e2, e3] = epx(cur[x], up[x], right, left, down[x]);
-            upper[2 * x] = e0;
-            upper[2 * x + 1] = e1;
-            lower[2 * x] = e2;
-            lower[2 * x + 1] = e3;
-        }
-    });
+    scale2x_into(source, width, height, &mut out);
     out
 }
 
-/// [`scale2x`], written as RGBA bytes (alpha 255): the last doubling of a picture that is drawn
-/// from the look alone, which saves the pass that unpacks it.
-fn scale2x_rgba(source: &[u32], width: usize, height: usize) -> Vec<u8> {
-    let mut out = vec![0_u8; 16 * width * height];
-    out.par_chunks_mut(16 * width).enumerate().with_min_len(4).for_each(|(y, rows)| {
-        let (upper, lower) = rows.split_at_mut(8 * width);
-        let (up, cur, down) = rows3(source, width, height, y);
-        let bytes = |packed: u32| [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8, 0xFF];
-        for x in 0..width {
-            let left = cur[x.saturating_sub(1)];
-            let right = cur[(x + 1).min(width - 1)];
-            let [e0, e1, e2, e3] = epx(cur[x], up[x], right, left, down[x]);
-            upper[8 * x..8 * x + 4].copy_from_slice(&bytes(e0));
-            upper[8 * x + 4..8 * x + 8].copy_from_slice(&bytes(e1));
-            lower[8 * x..8 * x + 4].copy_from_slice(&bytes(e2));
-            lower[8 * x + 4..8 * x + 8].copy_from_slice(&bytes(e3));
+/// [`scale2x`] written into `out`, `4 * width * height` words.
+fn scale2x_into(source: &[u32], width: usize, height: usize, out: &mut [u32]) {
+    let band = band_rows(height);
+    out.par_chunks_mut(4 * width * band).enumerate().for_each(|(n, rows)| {
+        for (k, rows) in rows.chunks_exact_mut(4 * width).enumerate() {
+            let (upper, lower) = rows.split_at_mut(2 * width);
+            let (up, cur, down) = rows3(source, width, height, n * band + k);
+            epx_row(up, cur, down, upper, lower);
         }
     });
-    out
+}
+
+/// Two Scale2x passes at once, a 4x picture of the `width` x `height` image `source`, written into
+/// `out` (`16 * width * height` words). Each task takes a band of source rows and makes into a
+/// scratch it keeps the rows of the first pass that its second pass reads (one above the band's
+/// own and one below, so that the second pass sees exactly the rows of the whole first picture),
+/// then writes the second pass's rows straight to `out`: the first picture, a megabyte or more, is
+/// never written out.
+fn scale4_into(source: &[u32], width: usize, height: usize, out: &mut [u32]) {
+    let band = band_rows(height);
+    let (mid_width, mid_height) = (2 * width, 2 * height);
+    out.par_chunks_mut(16 * width * band).enumerate().for_each_init(Vec::new, |mid, (n, rows)| {
+        let (first, past) = (n * band, (n * band + band).min(height));
+        // The rows of the first picture the band's second pass reads: from the one above its first
+        // row to the one below its last, inside the picture
+        let needed_from = (2 * first).saturating_sub(1);
+        let needed_to = (2 * past).min(mid_height - 1);
+        // They are made by these source rows, each making a pair of rows
+        let (source_from, source_to) = (needed_from / 2, needed_to / 2);
+        let base = 2 * source_from;
+        mid.clear();
+        mid.resize(2 * (source_to - source_from + 1) * mid_width, 0);
+        for (k, pair) in mid.chunks_exact_mut(2 * mid_width).enumerate() {
+            let (upper, lower) = pair.split_at_mut(mid_width);
+            let (up, cur, down) = rows3(source, width, height, source_from + k);
+            epx_row(up, cur, down, upper, lower);
+        }
+        let mid_row = |row: usize| &mid[(row - base) * mid_width..][..mid_width];
+        for (k, pair) in rows.chunks_exact_mut(4 * mid_width).enumerate() {
+            let row = 2 * first + k;
+            let (upper, lower) = pair.split_at_mut(2 * mid_width);
+            epx_row(
+                mid_row(row.saturating_sub(1)),
+                mid_row(row),
+                mid_row((row + 1).min(mid_height - 1)),
+                upper,
+                lower,
+            );
+        }
+    });
+}
+
+/// The word of the RGBA bytes `[r, g, b, 255]` of a colour, as they are in memory.
+#[inline(always)]
+fn rgba_word(colour: Color) -> u32 {
+    u32::from_ne_bytes([colour.r, colour.g, colour.b, 0xFF])
+}
+
+/// The crisp look of a power-of-two `scale` above 1, as RGBA bytes (alpha 255): Scale2x on the
+/// colours as words of their bytes (the filter only compares colours, so any one-to-one packing
+/// gives the same picture), the last passes written straight into the picture's bytes. The bytes
+/// are a buffer of [`crate::pool::BYTES`].
+fn crisp_rgba(pixels: &[Color], width: usize, height: usize, scale: usize) -> Vec<u8> {
+    let doublings = scale.trailing_zeros();
+    let mut image = crate::pool::WORDS.take(width * height);
+    for (word, &colour) in image.iter_mut().zip(pixels) {
+        *word = rgba_word(colour);
+    }
+    let (mut w, mut h) = (width, height);
+    // All the passes but the last two (or one) make a picture of their own
+    for _ in 0..doublings.saturating_sub(2) {
+        let mut next = crate::pool::WORDS.take(4 * w * h);
+        scale2x_into(&image, w, h, &mut next);
+        crate::pool::WORDS.give(std::mem::replace(&mut image, next));
+        w *= 2;
+        h *= 2;
+    }
+    let mut rgba = crate::pool::BYTES.take(4 * width * scale * height * scale);
+    let last = |image: &[u32], words: &mut [u32]| {
+        if doublings == 1 {
+            scale2x_into(image, w, h, words);
+        } else {
+            scale4_into(image, w, h, words);
+        }
+    };
+    match bytemuck::try_cast_slice_mut::<u8, u32>(&mut rgba) {
+        Ok(words) => last(&image, words),
+        // (a buffer whose address is not a multiple of four: the allocator never gives one)
+        Err(_) => {
+            let mut words = vec![0_u32; rgba.len() / 4];
+            last(&image, &mut words);
+            for (bytes, word) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+                *bytes = word.to_ne_bytes();
+            }
+        }
+    }
+    crate::pool::WORDS.give(image);
+    rgba
 }
 
 /// The Catmull-Rom weights of the four taps around a picture pixel, in whole units, and the index
@@ -730,6 +839,149 @@ mod tests {
         assert_eq!(six.len(), 12 * 12);
         assert_eq!(six[0], scale2x(&source, 2, 2)[0]);
         assert!(six[..3].iter().all(|&p| p == six[0]));
+    }
+
+    /// A small deterministic generator for the equality tests.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 16) as u32
+        }
+    }
+
+    /// The corner rules of the first version of the code, with the branches.
+    fn epx_original(centre: u32, up: u32, right: u32, left: u32, down: u32) -> [u32; 4] {
+        let (mut e0, mut e1, mut e2, mut e3) = (centre, centre, centre, centre);
+        if left == up && left != down && up != right {
+            e0 = up;
+        }
+        if up == right && up != left && right != down {
+            e1 = right;
+        }
+        if down == left && down != right && left != up {
+            e2 = left;
+        }
+        if right == down && right != up && down != left {
+            e3 = down;
+        }
+        [e0, e1, e2, e3]
+    }
+
+    /// The Scale2x of the first version of the code: one serial pass, every neighbour looked up
+    /// with its index clamped.
+    fn scale2x_reference(source: &[u32], width: usize, height: usize) -> Vec<u32> {
+        let mut out = vec![0_u32; 4 * width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let at = |x: usize, y: usize| source[y * width + x];
+                let [e0, e1, e2, e3] = epx_original(
+                    at(x, y),
+                    at(x, y.saturating_sub(1)),
+                    at((x + 1).min(width - 1), y),
+                    at(x.saturating_sub(1), y),
+                    at(x, (y + 1).min(height - 1)),
+                );
+                out[2 * y * 2 * width + 2 * x] = e0;
+                out[2 * y * 2 * width + 2 * x + 1] = e1;
+                out[(2 * y + 1) * 2 * width + 2 * x] = e2;
+                out[(2 * y + 1) * 2 * width + 2 * x + 1] = e3;
+            }
+        }
+        out
+    }
+
+    /// The first version of the crisp picture of a power-of-two scale: the colours packed as
+    /// `0xRRGGBB`, Scale2x for every doubling but the last, which unpacks into RGBA bytes.
+    fn crisp_rgba_reference(
+        pixels: &[Color],
+        width: usize,
+        height: usize,
+        scale: usize,
+    ) -> Vec<u8> {
+        let mut image: Vec<u32> = pixels.iter().map(|c| pack(c.r, c.g, c.b)).collect();
+        let (mut across, mut down) = (width, height);
+        for _ in 1..scale.trailing_zeros() {
+            image = scale2x_reference(&image, across, down);
+            across *= 2;
+            down *= 2;
+        }
+        let last = scale2x_reference(&image, across, down);
+        last.iter()
+            .flat_map(|&packed| {
+                let [r, g, b] = unpack(packed);
+                [r, g, b, 0xFF]
+            })
+            .collect()
+    }
+
+    /// An image of `colours` distinct colours, in runs and noise, so every Scale2x condition comes up.
+    fn random_pixels(random: &mut Random, count: usize, colours: u32) -> Vec<Color> {
+        let palette: Vec<Color> = (0..colours)
+            .map(|_| Color {
+                r: random.next() as u8,
+                g: random.next() as u8,
+                b: random.next() as u8,
+                a: random.next() as u8,
+            })
+            .collect();
+        (0..count).map(|_| palette[(random.next() % colours) as usize]).collect()
+    }
+
+    #[test]
+    fn scale2x_equals_the_serial_version_on_random_images() {
+        let mut random = Random(0x9E37_79B9_7F4A_7C15);
+        for (width, height) in
+            [(1, 1), (1, 5), (2, 2), (2, 7), (3, 3), (4, 1), (5, 9), (17, 6), (64, 33), (372, 40)]
+        {
+            for colours in [2, 3, 5, 200] {
+                let source: Vec<u32> =
+                    (0..width * height).map(|_| random.next() % colours).collect();
+                assert_eq!(
+                    scale2x(&source, width, height),
+                    scale2x_reference(&source, width, height),
+                    "{width} x {height}, {colours} colours"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_crisp_picture_equals_the_first_version_at_every_power_of_two() {
+        let mut random = Random(0xD1B5_4A32_D192_ED03);
+        for (width, height) in
+            [(1, 1), (2, 3), (3, 2), (5, 4), (16, 9), (37, 21), (96, 70), (372, 31)]
+        {
+            for colours in [2, 3, 6, 400] {
+                let pixels = random_pixels(&mut random, width * height, colours);
+                for scale in [2, 4, 8] {
+                    if width * height * scale * scale > 400_000 {
+                        continue;
+                    }
+                    let fast = crisp_rgba(&pixels, width, height, scale);
+                    let reference = crisp_rgba_reference(&pixels, width, height, scale);
+                    assert!(
+                        fast == reference,
+                        "{width} x {height}, {colours} colours, scale {scale}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_crisp_picture_is_the_same_in_a_pool_of_any_size() {
+        // The buffers come back dirty: a picture made after others is the same as the first
+        let mut random = Random(77);
+        let pixels = random_pixels(&mut random, 372 * 24, 4);
+        let first = crisp_rgba(&pixels, 372, 24, 4);
+        let mut dirty = crisp_rgba(&random_pixels(&mut random, 372 * 24, 90), 372, 24, 4);
+        dirty.fill(0xA5);
+        crate::pool::BYTES.give(dirty);
+        assert!(crisp_rgba(&pixels, 372, 24, 4) == first, "a dirty buffer changed the picture");
     }
 
     #[test]

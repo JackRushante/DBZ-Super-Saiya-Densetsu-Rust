@@ -20,10 +20,6 @@ pub const BIND_TAG: u8 = 1;
 /// The tag of the application event of the item spawner: its payload is the object and the count, so a replay puts
 /// the same units in the bag.
 pub const SPAWN_TAG: u8 = 3;
-/// Objects without the story bit that the story hands out or takes back itself, so that one spawned early can upset
-/// it: the "Moon" card (gone after the duel with Vegeta) and the Dragon Radar (given on Namek when it was not picked
-/// up). The item spawner warns before them as before a key item.
-const SPAWNER_STORY: [u8; 2] = [20, 23];
 /// The bus address of the item list's state words (`item_extra`), one word an entry.
 const EXTRA: u32 = d::ITEM_EXTRA;
 /// Offsets of the list and the count inside a save slot: the page starts at `$00:0100`, the image at
@@ -294,10 +290,13 @@ impl Keeper {
     }
 
     /// Whether the item spawner warns before `object`: a key item of the bag (the story bit, or a Dragon Ball), or one
-    /// the story hands out itself ([`SPAWNER_STORY`]).
+    /// the story hands out itself (`ssd_menus::bag::story_object`).
     #[must_use]
     pub fn story(labels: &Labels, object: u8) -> bool {
-        class_of(labels, object).key || SPAWNER_STORY.contains(&object)
+        ssd_menus::bag::story_object(
+            labels.objects.get(usize::from(object)).is_some_and(|label| label.story),
+            object,
+        )
     }
 
     /// The list writes that show `front` first, as the HD stages a use: the stack goes to the first

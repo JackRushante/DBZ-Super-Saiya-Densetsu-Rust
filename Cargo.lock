@@ -2355,6 +2355,7 @@ name = "ssd-hd"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "bytemuck",
  "image-webp",
  "log",
  "png",
@@ -2393,6 +2394,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "serde",
+ "ssd-save",
 ]
 
 [[package]]

@@ -16,6 +16,58 @@ pub struct Labels {
     pub objects: Vec<ObjectLabel>,
     /// What the Status screen reads from the cartridge's tables.
     pub status: StatusLabels,
+    /// One entry per character id: what a level gives (the save editor's rows).
+    pub growth: Vec<Growth>,
+}
+
+/// What the game gives a character at each level, as its level rows say (the values `ssd_catalogue::game::set_level` puts in a
+/// record): the BP and KI are the sums of the rows up to the level. Empty vectors: the character has no level table (Nail,
+/// Tsumuri and Maima take their stats from a unit row), so its level is fixed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Growth {
+    /// The battle power at each level, from level 1.
+    pub bp: Vec<u32>,
+    pub max_hp: Vec<u16>,
+    pub max_ki: Vec<u16>,
+    /// The EXP each level begins at.
+    pub exp: Vec<u32>,
+    /// Byte `$0E` of the record, copied from the level's row.
+    pub byte_0e: Vec<u8>,
+    /// The highest level the character reaches (the cap table).
+    pub cap: u8,
+    /// The lowest level the game gives the character (1; Vegeta's floor is 17).
+    pub min: u8,
+}
+
+/// The values of a record at one level ([`Growth::at`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtLevel {
+    pub bp: u32,
+    pub max_hp: u16,
+    pub max_ki: u16,
+    pub exp: u32,
+    pub byte_0e: u8,
+}
+
+impl Growth {
+    /// Whether the character has a level table.
+    #[must_use]
+    pub fn has_levels(&self) -> bool {
+        !self.bp.is_empty()
+    }
+
+    /// The values at `level` (1 or more), when the table has the row.
+    #[must_use]
+    pub fn at(&self, level: u8) -> Option<AtLevel> {
+        let i = usize::from(level).checked_sub(1)?;
+        Some(AtLevel {
+            bp: *self.bp.get(i)?,
+            max_hp: *self.max_hp.get(i)?,
+            max_ki: *self.max_ki.get(i)?,
+            exp: *self.exp.get(i)?,
+            byte_0e: *self.byte_0e.get(i)?,
+        })
+    }
 }
 
 /// The cartridge's tables the Status screen needs: the techniques of each unit with their names and KI costs, and the

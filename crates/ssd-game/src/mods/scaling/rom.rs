@@ -111,6 +111,10 @@ fn run_stub(machine: &mut Machine, routines: &[u32]) {
     registers.d = 0;
     registers.p = StatusRegister::from(0x24);
     machine.set_cpu_registers(registers);
+    // A stub of another length left its own breakpoint, which this one's code would run into.
+    for stale in machine.breakpoints().clone() {
+        machine.clear_breakpoint(stale);
+    }
     machine.set_breakpoint(back);
     let stops = Stops { frame_end: true, breakpoint: true, ..Stops::default() };
     for _ in 0..6 {
@@ -454,4 +458,303 @@ fn a_unit_of_a_pack_is_scaled_from_the_level_its_own_row_gives_the_record() {
         (38, 1280),
         "level 5 made for a party of 37.67: q = 256/60, and 300 * q = 1280"
     );
+}
+
+// ---- The offsets: a random encounter at the random offset, every other battle at the boss offset ----
+
+/// `$7E:0D8B`: the zone the pick reads, and `$7E:0051`: the random byte it indexes the zone's eight groups with.
+const ZONE: u32 = 0x7E_0D8B;
+/// `$7E:01A0`: the map.
+const MAP_ID: u32 = 0x7E_01A0;
+const RANDOM_BYTE: u32 = 0x7E_0051;
+
+/// The example pack with the two offsets in place of the difficulty.
+fn pack_offsets(random: i64, story: i64) -> Pack {
+    let mut pack = pack(None);
+    let params = &mut pack.manifest.feature[0].params;
+    params.clear();
+    params.insert("random_offset".into(), ParamValue::Number(random));
+    params.insert("boss_offset".into(), ParamValue::Number(story));
+    pack
+}
+
+/// What the scaling must make of an original record `r` for a party at `sixths`, a scaling and a kind of battle.
+fn expected_at(r: &Record, sixths: u32, scaling: Scaling, kind: Kind) -> Record {
+    if r.flags == 0 || r.level == 0 {
+        return *r;
+    }
+    let aim = target(sixths, scaling, kind);
+    let ratio = aim.ratio(r.level);
+    Record {
+        level: aim.level(),
+        hp: scale_hp(r.hp, ratio),
+        max_hp: scale_hp(r.max_hp, ratio),
+        ki: scale_ki(r.ki, ratio),
+        max_ki: scale_ki(r.max_ki, ratio),
+        bp: scale_bp(r.bp, ratio),
+        ..*r
+    }
+}
+
+/// A random encounter as the game starts it: the group is picked by `02:D34A` from the map, the zone and the random byte, and
+/// the records are built from it. Returns the group and the records.
+fn random_battle(machine: &mut Machine, map: u8, zone: u8, roll: u8) -> (u8, [Record; 5]) {
+    machine.write_wram(MAP_ID, &[map]).unwrap();
+    machine.write_wram(ZONE, &[zone]).unwrap();
+    machine.write_wram(RANDOM_BYTE, &[roll]).unwrap();
+    run_stub(machine, &[0x02_D34A, 0x01_F692, 0x01_F719]);
+    (byte(machine, GROUP_INDEX), records(machine))
+}
+
+/// The map and group of a Namek random encounter: the first map whose zone 1 picks one of the groups `$1E` to `$23` (the
+/// soldiers of Frieza on Namek: Appule, Banan, Vug, Bundt, Baimen) with the random byte 0.
+fn namek_map() -> (u8, u8) {
+    let mut machine = boot(&[], true, None);
+    for map in 0..48_u8 {
+        machine.write_wram(MAP_ID, &[map]).unwrap();
+        machine.write_wram(ZONE, &[1]).unwrap();
+        machine.write_wram(RANDOM_BYTE, &[0]).unwrap();
+        run_stub(&mut machine, &[0x02_D34A]);
+        let group = byte(&machine, GROUP_INDEX);
+        if (0x1E..=0x23).contains(&group) {
+            return (map, group);
+        }
+    }
+    panic!("no map picks a Namek group");
+}
+
+/// Vegeta (group 21) and Nappa (group 20) against Goku: story groups, built without the random pick.
+const VEGETA: u8 = 21;
+const NAPPA: u8 = 20;
+
+#[test]
+#[ignore = "needs SSD_ROM_PATH"]
+fn a_random_encounter_is_made_for_the_random_offset_and_a_story_battle_for_the_boss_offset() {
+    let scaling = Scaling::Offsets { random: -3, story: 3 };
+    let party = [(0_u8, 46_u8), (1, 46), (2, 46)];
+    let sixths = 6 * 46;
+    let (map, namek_group) = namek_map();
+    // The original's records, and the pack's (and the old pack's, for the numbers).
+    let mut original = boot(&[], true, None);
+    stage_party(&mut original, &party);
+    let (group, plain) = random_battle(&mut original, map, 1, 0);
+    assert_eq!(group, namek_group);
+    let mut machine = boot(&[pack_offsets(-3, 3)], true, None);
+    stage_party(&mut machine, &party);
+    let (group, random) = random_battle(&mut machine, map, 1, 0);
+    assert_eq!(group, namek_group, "the pick is the original's");
+    for (slot, (now, then)) in random.iter().zip(&plain).enumerate() {
+        assert_eq!(*now, expected_at(then, sixths, scaling, Kind::Random), "random, slot {slot}");
+        if now.flags != 0 {
+            assert_eq!(now.level, 43, "the random enemy is at P - 3");
+        }
+    }
+    assert!(random.iter().any(|r| r.flags != 0 && r.bp != 0), "the encounter has enemies");
+    // The same group, started without the pick (a script's battle), is a story battle at P + 3.
+    let mut story = boot(&[pack_offsets(-3, 3)], true, None);
+    stage_party(&mut story, &party);
+    let same_group = battle(&mut story, namek_group);
+    for (slot, (now, then)) in same_group.iter().zip(&plain).enumerate() {
+        assert_eq!(*now, expected_at(then, sixths, scaling, Kind::Story), "story, slot {slot}");
+        if now.flags != 0 {
+            assert_eq!(now.level, 49, "the story enemy is at P + 3");
+        }
+    }
+    // Vegeta and Nappa: story groups, at P + 3.
+    let mut numbers = Vec::new();
+    for (name, group) in [("Nappa", NAPPA), ("Vegeta", VEGETA)] {
+        let mut original = boot(&[], true, None);
+        stage_party(&mut original, &party);
+        let plain = battle(&mut original, group);
+        let mut old = boot(&[pack(None)], true, None);
+        stage_party(&mut old, &party);
+        let old = battle(&mut old, group);
+        let mut machine = boot(&[pack_offsets(-3, 3)], true, None);
+        stage_party(&mut machine, &party);
+        let scaled = battle(&mut machine, group);
+        let boss = scaled.iter().find(|r| r.flags != 0).unwrap();
+        assert_eq!(boss.level, 49, "{name} is made for P + 3");
+        for (slot, (now, then)) in scaled.iter().zip(&plain).enumerate() {
+            assert_eq!(
+                *now,
+                expected_at(then, sixths, scaling, Kind::Story),
+                "{name}, slot {slot}"
+            );
+        }
+        let first = |records: &[Record; 5]| *records.iter().find(|r| r.flags != 0).unwrap();
+        numbers.push(format!(
+            "{name}: original L{} HP {} BP {} | old pack (normal) L{} HP {} BP {} | offsets L{} HP {} BP {}",
+            first(&plain).level,
+            first(&plain).max_hp,
+            first(&plain).bp,
+            first(&old).level,
+            first(&old).max_hp,
+            first(&old).bp,
+            boss.level,
+            boss.max_hp,
+            boss.bp
+        ));
+    }
+    let mut old = boot(&[pack(None)], true, None);
+    stage_party(&mut old, &party);
+    let (_, old_random) = random_battle(&mut old, map, 1, 0);
+    let first = |records: &[Record; 5]| *records.iter().find(|r| r.flags != 0).unwrap();
+    numbers.push(format!(
+        "Namek random (group {namek_group}, map {map}): original L{} HP {} BP {} | old pack (normal) L{} HP {} BP {} | offsets L{} HP {} BP {}",
+        first(&plain).level,
+        first(&plain).max_hp,
+        first(&plain).bp,
+        first(&old_random).level,
+        first(&old_random).max_hp,
+        first(&old_random).bp,
+        first(&random).level,
+        first(&random).max_hp,
+        first(&random).bp,
+    ));
+    println!("party level 46:\n{}", numbers.join("\n"));
+}
+
+#[test]
+#[ignore = "needs SSD_ROM_PATH"]
+fn the_random_mark_is_taken_by_the_battle_it_belongs_to_and_the_next_one_is_a_story_battle() {
+    let scaling = Scaling::Offsets { random: -3, story: 3 };
+    let party = [(0_u8, 30_u8), (1, 30), (2, 30)];
+    let sixths = 6 * 30;
+    let (map, group) = namek_map();
+    let mut original = boot(&[], true, None);
+    stage_party(&mut original, &party);
+    let plain = battle(&mut original, group);
+    let mut machine = boot(&[pack_offsets(-3, 3)], true, None);
+    stage_party(&mut machine, &party);
+    let (_, random) = random_battle(&mut machine, map, 1, 0);
+    let live: Vec<&Record> = random.iter().filter(|r| r.flags != 0).collect();
+    assert!(live.iter().all(|r| r.level == 27), "random: P - 3");
+    // The next battle of the same machine, the same group, without a pick: a story battle, though a random one came before.
+    let after = battle(&mut machine, group);
+    for (slot, (now, then)) in after.iter().zip(&plain).enumerate() {
+        assert_eq!(
+            *now,
+            expected_at(then, sixths, scaling, Kind::Story),
+            "story after, slot {slot}"
+        );
+    }
+    // And a builder run again without a pick (a form change) stays a story battle.
+    run_stub(&mut machine, &[0x01_F692, 0x01_F719]);
+    assert_eq!(records(&machine), after);
+    // Two random battles one after the other are both random.
+    let (_, again) = random_battle(&mut machine, map, 1, 0);
+    assert_eq!(again, random);
+}
+
+#[test]
+#[ignore = "needs SSD_ROM_PATH"]
+fn the_scripted_loss_is_not_scaled_with_the_offsets_either() {
+    let party = [(0_u8, 45_u8), (1, 44), (2, 43)];
+    let loss = cheats::SCRIPTED_LOSS[0];
+    let mut original = boot(&[], true, None);
+    stage_party(&mut original, &party);
+    let plain = battle(&mut original, loss);
+    let mut machine = boot(&[pack_offsets(-3, 3)], true, None);
+    stage_party(&mut machine, &party);
+    assert_eq!(
+        battle(&mut machine, loss),
+        plain,
+        "Nail against Frieza keeps the original's numbers"
+    );
+    // And a fight after it is scaled again, at the boss offset.
+    let next = battle(&mut machine, VEGETA);
+    let boss = next.iter().find(|r| r.flags != 0).unwrap();
+    assert_eq!(boss.level, 47, "P = 44, +3");
+}
+
+#[test]
+#[ignore = "needs SSD_ROM_PATH"]
+fn the_exp_of_a_defeated_enemy_follows_the_kind_of_its_battle() {
+    let rom = rom();
+    let unit = 4_u8; // a Saibaman
+    let (level, reward) = unit_row(&rom, unit);
+    let party = [(0_u8, 40_u8), (2, 40), (3, 40)];
+    let scaling = Scaling::Offsets { random: -3, story: 3 };
+    let want = |kind| scale_exp(reward, target(6 * 40, scaling, kind).ratio(level));
+    assert!(want(Kind::Random) < want(Kind::Story));
+    let (map, _) = namek_map();
+    // The pack's EXP after a random battle was built, and after a story battle was built.
+    let award_after = |random: bool| {
+        let mut machine = boot(&[pack_offsets(-3, 3)], true, None);
+        stage_party(&mut machine, &party);
+        if random {
+            random_battle(&mut machine, map, 1, 0);
+        } else {
+            battle(&mut machine, 3);
+        }
+        machine.write_wram(ENEMY_OFFSET, &[0, 0]).unwrap();
+        machine.write_wram(SLOT_UNITS, &[unit]).unwrap();
+        machine.write_wram(BATTLE_EXP, &[0, 0, 0]).unwrap();
+        run_stub(&mut machine, &[0x1D_8C33]);
+        triple(&machine, BATTLE_EXP)
+    };
+    assert_eq!(award_after(true), want(Kind::Random));
+    assert_eq!(award_after(false), want(Kind::Story));
+}
+
+#[test]
+#[ignore = "needs SSD_ROM_PATH"]
+fn the_difficulty_pack_does_not_tell_the_kinds_apart_and_leaves_work_ram_alone() {
+    let party = [(0_u8, 46_u8), (1, 46), (2, 46)];
+    let (map, group) = namek_map();
+    let mut old = boot(&[pack(None)], true, None);
+    stage_party(&mut old, &party);
+    let (_, random) = random_battle(&mut old, map, 1, 0);
+    let mut reference = boot(&[pack(None)], true, None);
+    stage_party(&mut reference, &party);
+    let story = battle(&mut reference, group);
+    assert_eq!(random, story, "a random encounter and a story battle are alike for the difficulty");
+    for (slot, (now, then)) in random.iter().zip(&story).enumerate() {
+        if now.flags != 0 {
+            assert_eq!(now.level, 46, "normal: the party's level, slot {slot}");
+        }
+        assert_eq!(now, then);
+    }
+    let marker = (KIND_MARKER_AT - 0x7E_0000) as usize;
+    let mut bare = boot(&[], true, None);
+    stage_party(&mut bare, &party);
+    random_battle(&mut bare, map, 1, 0);
+    assert_eq!(
+        old.wram()[marker..marker + 6],
+        bare.wram()[marker..marker + 6],
+        "the bytes of the kind are not written"
+    );
+}
+
+#[test]
+#[ignore = "needs SSD_ROM_PATH"]
+fn the_cheats_wrappers_around_the_pick_and_the_builder_leave_the_kinds_apart() {
+    // A typical setup: enemy power x2 on, so the cheat wrappers of the pick (`02:D34A`), the group and the
+    // builder are all in the path of a random encounter.
+    let scaling = Scaling::Offsets { random: -3, story: 3 };
+    let party = [(0_u8, 46_u8), (1, 46), (2, 46)];
+    let sixths = 6 * 46;
+    let (map, group) = namek_map();
+    let mut cheating = Cheats::neutral();
+    let steps = Setting::Power.steps();
+    cheating
+        .set_index(Setting::Power, steps.iter().position(|m| *m == Multiplier::new(2, 1)).unwrap());
+    let mut original = boot(&[], true, None);
+    stage_party(&mut original, &party);
+    let plain = battle(&mut original, group);
+    let mut machine = boot(&[pack_offsets(-3, 3)], true, Some(&cheating));
+    stage_party(&mut machine, &party);
+    let (picked, random) = random_battle(&mut machine, map, 1, 0);
+    assert_eq!(picked, group);
+    let story = battle(&mut machine, group);
+    for (slot, (now, then)) in random.iter().zip(&plain).enumerate() {
+        let want = expected_at(then, sixths, scaling, Kind::Random);
+        assert_eq!((now.level, now.hp, now.bp), (want.level, want.hp * 2, want.bp * 2), "{slot}");
+    }
+    for (slot, (now, then)) in story.iter().zip(&plain).enumerate() {
+        let want = expected_at(then, sixths, scaling, Kind::Story);
+        assert_eq!((now.level, now.hp, now.bp), (want.level, want.hp * 2, want.bp * 2), "{slot}");
+    }
+    assert_eq!(random.iter().find(|r| r.flags != 0).unwrap().level, 43);
+    assert_eq!(story.iter().find(|r| r.flags != 0).unwrap().level, 49);
 }

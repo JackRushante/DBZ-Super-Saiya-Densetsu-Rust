@@ -30,6 +30,7 @@ mod mode7;
 pub mod mode7art;
 pub mod pack;
 pub mod png;
+mod pool;
 mod screen;
 mod sprites;
 mod tooltip;

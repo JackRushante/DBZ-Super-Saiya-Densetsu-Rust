@@ -31,7 +31,11 @@ const LEADER: usize = 0xA2;
 const FOLLOWER: usize = 0xA6;
 const LEADER_SAVED: usize = 0xAA;
 const ITEM_COUNT: usize = 0xB2;
+/// The rows of the item list's page the menu shows, derived from the count (`01:B782`).
+const ITEM_ROWS: usize = 0xB3;
 const ZENI: usize = 0xB4;
+/// Offset in the image of the item list's state words (`item_extra`, one word an entry).
+const ITEM_WORDS: usize = 0x3A0;
 
 use crate::SaveError;
 
@@ -372,6 +376,34 @@ impl Slot {
         Ok(())
     }
 
+    /// The state words of the item list (`item_extra`, image offset `$3A0`): one word an entry, 24 of them. The card changers
+    /// and Porunga keep the state of the unit there; the other entries hold zero.
+    #[must_use]
+    pub fn item_words(&self) -> [u16; ITEM_SLOTS] {
+        std::array::from_fn(|i| {
+            u16::from_le_bytes([self.image[ITEM_WORDS + 2 * i], self.image[ITEM_WORDS + 2 * i + 1]])
+        })
+    }
+
+    /// Sets the item list as the game's item screen keeps it: the entries (object and attribute), their state words, the count
+    /// at `$01B2` and the derived row count at `$01B3` (what `01:B782` gives for the first page: the count, at most 8). The rest
+    /// of the list and of the words is cleared. [`Slot::set_items`] writes the entries and the count only.
+    ///
+    /// # Errors
+    ///
+    /// [`SaveError::BadValue`] for more than [`ITEM_SLOTS`] entries.
+    pub fn set_item_list(&mut self, items: &[(Item, u16)]) -> Result<(), SaveError> {
+        let entries: Vec<Item> = items.iter().map(|&(item, _)| item).collect();
+        self.set_items(&entries)?;
+        self.image[ITEM_WORDS..ITEM_WORDS + 2 * ITEM_SLOTS].fill(0);
+        for (i, &(_, word)) in items.iter().enumerate() {
+            self.image[ITEM_WORDS + 2 * i..ITEM_WORDS + 2 * i + 2]
+                .copy_from_slice(&word.to_le_bytes());
+        }
+        self.page[ITEM_ROWS] = items.len().min(8) as u8;
+        Ok(())
+    }
+
     /// The zeni (the money), a word at `$01B4`.
     #[must_use]
     pub fn zeni(&self) -> u16 {
@@ -503,6 +535,28 @@ impl Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_item_list_is_written_with_its_state_words_its_count_and_its_page_rows() {
+        let mut slot = Slot::empty();
+        let list: Vec<(Item, u16)> = (0..10)
+            .map(|i| (Item { id: i, attr: 0xC8 }, if i == 3 { 0x9600 } else { 0 }))
+            .collect();
+        slot.set_item_list(&list).unwrap();
+        assert_eq!(slot.items().len(), 10);
+        assert_eq!(slot.items()[4], Item { id: 4, attr: 0xC8 });
+        assert_eq!(slot.item_words()[3], 0x9600);
+        assert_eq!(slot.item_words()[4], 0);
+        assert_eq!(slot.page()[0xB2], 10, "the count");
+        assert_eq!(slot.page()[0xB3], 8, "the rows of the first page");
+        // A shorter list clears what the longer one left.
+        slot.set_item_list(&list[..2]).unwrap();
+        assert_eq!((slot.page()[0xB2], slot.page()[0xB3]), (2, 2));
+        assert_eq!(slot.item_words()[3], 0, "the old word is gone");
+        assert_eq!(slot.page()[2 * 5], 0, "the old entry is gone");
+        let too_many = vec![list[0]; 25];
+        assert!(slot.set_item_list(&too_many).is_err());
+    }
 
     #[test]
     fn a_record_reads_and_writes_its_fields() {

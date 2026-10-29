@@ -236,7 +236,7 @@ Download from the [Releases](../../releases) page:
   `ssd-recompiled.exe` without unpacking it**.
 - **`dbz-ssd-recompiled-android.apk`** (optional): the game for Android phones and tablets (64-bit ARM, Android 8 or
   later), see [Android](#android).
-- **`ssj-goku-hd.ssdpack`**, **`ssj-kaioken.ssdpack`** and **`free-progression.ssdpack`** (optional): three mods, see
+- **`ssj-goku-hd.ssdpack`**, **`ssj-kaioken.ssdpack`**, **`free-progression.ssdpack`** and **`party-boosts.ssdpack`** (optional): four mods, see
   [Mods](#mods).
 
 ### 4. First launch
@@ -271,7 +271,7 @@ A mod (a *data pack*) changes the Remastered game and never Classic. Download it
 **Options > Gameplay > Data packs** and choose **Install a pack...**: pick the file (on Android the system's file picker,
 on Windows the file dialog) and the game copies it into its `mods` folder. Switch the mod on (A) and apply (X); the game
 restarts at the title. On Windows you can also put the file in `%LOCALAPPDATA%\dbz-ssd-recompiled\mods\` yourself.
-Three mods come with this release:
+Four mods come with this release:
 
 - **Super Saiyan Goku HD**: the Super Saiyan Goku's 27 battle poses redrawn with his hair standing up, past the box of
   the original sprite (which keeps it flat). The HD pack holds this art itself since 0.3.9: the mod is only for an older
@@ -280,8 +280,14 @@ Three mods come with this release:
   both costs 10% of his maximum HP. With his Super Saiyan poses redrawn with the Kaioken's aura, on the new Super Saiyan
   art.
 - **Free progression** (**under test**): the story moves on events, never on levels or battle power, and every enemy
-  follows your party's level, with a difficulty of `easy`, `normal` (the default) or `hard` (the `difficulty` line of the
-  `pack.toml` inside the `.ssdpack`, which is a zip). The balance of the scaled bosses has not been played end to end yet: save often.
+  follows your party's level: random battles are made for 3 levels below it and story and boss battles for 3 levels above
+  it (the `random_offset` and `boss_offset` lines of the `pack.toml` inside the `.ssdpack`, which is a zip, from -10 to 10;
+  a pack with a `difficulty` of `easy`, `normal` or `hard` instead still works). The balance of the scaled bosses has not been
+  played end to end yet: save often.
+- **Party-wide boosts** (not canon): in a battle, the Guru object (BP +50 percent), Porunga's second wish (+1 level) and
+  the Launch object (when it works: it makes the fighter's attacks favourites) work on the whole party instead of the one
+  fighter chosen. The object is used up once, and each fighter gets what the game gives a single use (its level cap, its
+  refusals).
 
 Making your own: the format of a pack is in [`docs/mods/`](docs/mods/README.md).
 

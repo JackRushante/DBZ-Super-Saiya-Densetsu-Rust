@@ -935,7 +935,9 @@ impl WideRenderer {
 
 /// Whether the environment asks for every frame in one piece (`SSD_HD_SERIAL`).
 fn serial_env() -> bool {
-    std::env::var_os("SSD_HD_SERIAL").is_some()
+    // (read once: the environment does not change while a run draws)
+    static SERIAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SERIAL.get_or_init(|| std::env::var_os("SSD_HD_SERIAL").is_some())
 }
 
 /// What every segment of a frame shares.
@@ -1180,6 +1182,74 @@ fn line_span(
     span
 }
 
+/// What the worker runs once on its own thread before the first picture (the app registers the thread with the
+/// system's performance hints there).
+pub type WorkerStart = Arc<dyn Fn() + Send + Sync>;
+
+/// A frame handed to the worker, with the renderer that draws it.
+struct DrawJob {
+    renderer: WideRenderer,
+    rom: Arc<[u8]>,
+    game_mode: u8,
+    field: Option<FieldState>,
+    log: FrameLog,
+    options: WideOptions,
+    hd: HdOptions,
+}
+
+/// What the worker hands back: the renderer, and the picture (`None`: the frame is refused).
+type DrawDone = (WideRenderer, Option<WideHd>);
+
+/// The thread `hd-draw` and the two channels to it. It lives as long as the [`WideRun`] (its jobs channel closing ends
+/// it), so a picture in the background costs no thread of its own.
+struct Worker {
+    jobs: std::sync::mpsc::Sender<DrawJob>,
+    done: std::sync::mpsc::Receiver<DrawDone>,
+}
+
+impl Worker {
+    fn start(first: Option<WorkerStart>) -> Self {
+        let (jobs, job_queue) = std::sync::mpsc::channel::<DrawJob>();
+        let (done_tx, done) = std::sync::mpsc::channel::<DrawDone>();
+        std::thread::Builder::new()
+            .name("hd-draw".to_owned())
+            .spawn(move || {
+                if let Some(first) = first {
+                    first();
+                }
+                while let Ok(mut job) = job_queue.recv() {
+                    let rom = Rom(&job.rom);
+                    let picture = job
+                        .renderer
+                        .render_hd(
+                            rom,
+                            job.game_mode,
+                            job.field.as_ref(),
+                            &job.log,
+                            job.options,
+                            job.hd,
+                        )
+                        .ok();
+                    if done_tx.send((job.renderer, picture)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("a thread for the picture");
+        Self { jobs, done }
+    }
+}
+
+/// How far the picture in the background has got.
+enum Settled {
+    /// None is being drawn.
+    Idle,
+    /// It is still being drawn.
+    Busy,
+    /// It is done: the picture, or `None` for a frame the renderer refused.
+    Done(Option<WideHd>),
+}
+
 /// The wide view of a run, one frame at a time: each frame is drawn as its scene class, from the
 /// work RAM it started from (the end of the frame before it), so the field's variables are the
 /// ones its NMI used. Feed it every frame of the run in order: the sprite line buffers carry over.
@@ -1187,9 +1257,13 @@ pub struct WideRun {
     rom: Arc<[u8]>,
     /// The renderer; `None` while a picture is being drawn in the background (`drawing`).
     renderer: Option<WideRenderer>,
-    /// The picture being drawn in the background ([`WideRun::redraw_hd_pipelined`]): the renderer
-    /// comes back with it.
-    drawing: Option<std::thread::JoinHandle<(WideRenderer, Option<WideHd>)>>,
+    /// The thread that draws the pictures in the background ([`WideRun::redraw_hd_pipelined`]), started on the first
+    /// one (or by [`WideRun::start_worker`]) and kept for the run.
+    worker: Option<Worker>,
+    /// A picture is being drawn in the background: the renderer is with the worker and comes back with it.
+    drawing: bool,
+    /// What the worker does first, on its own thread (see [`WideRun::set_worker_start`]).
+    worker_start: Option<WorkerStart>,
     /// The main loop's state and the field variables at the end of the last frame noted.
     ended: Option<Started>,
     /// What the last frame skipped ([`WideRun::skip`]) started from, until it is drawn after all
@@ -1282,7 +1356,9 @@ impl WideRun {
         Self {
             rom: Arc::from(rom),
             renderer: Some(WideRenderer::new()),
-            drawing: None,
+            worker: None,
+            drawing: false,
+            worker_start: None,
             ended: None,
             skipped: None,
             text: None,
@@ -1306,24 +1382,63 @@ impl WideRun {
         }
     }
 
-    /// The renderer, once the picture drawn in the background (if any) is done: that picture is
-    /// returned too, for the caller that wants it.
-    #[allow(clippy::option_option)] // nothing in the background / its refused frame / its picture
-    fn finish_drawing(&mut self) -> Option<Option<WideHd>> {
-        let handle = self.drawing.take()?;
-        let (renderer, picture) = match handle.join() {
-            Ok(done) => done,
-            Err(panic) => std::panic::resume_unwind(panic),
+    /// Looks at the picture drawn in the background: with `wait` the call waits for it. The renderer is back when the
+    /// picture is `Done`.
+    ///
+    /// # Panics
+    ///
+    /// The drawing in the background panicked.
+    fn settle(&mut self, wait: bool) -> Settled {
+        if !self.drawing {
+            return Settled::Idle;
+        }
+        let worker = self.worker.as_ref().expect("a picture in the background has its worker");
+        let done = if wait {
+            worker.done.recv().ok()
+        } else {
+            match worker.done.try_recv() {
+                Ok(done) => Some(done),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Settled::Busy,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+            }
         };
+        let (renderer, picture) = done.expect("the drawing in the background panicked");
+        self.drawing = false;
         self.renderer = Some(renderer);
-        Some(picture)
+        Settled::Done(picture)
     }
 
     fn renderer(&mut self) -> &mut WideRenderer {
-        if self.renderer.is_none() {
-            self.finish_drawing();
-        }
+        // (a picture still in the background is thrown away)
+        self.settle(true);
         self.renderer.as_mut().expect("the renderer is back once the drawing is done")
+    }
+
+    /// Sets what the worker thread does first, before its first picture; the app uses it to register the thread
+    /// with the system's performance hints. Call it before [`WideRun::start_worker`].
+    pub fn set_worker_start(&mut self, start: WorkerStart) {
+        self.worker_start = Some(start);
+    }
+
+    /// Starts the worker thread now instead of at the first picture drawn in the background.
+    pub fn start_worker(&mut self) {
+        if self.worker.is_none() {
+            self.worker = Some(Worker::start(self.worker_start.clone()));
+        }
+    }
+
+    /// Whether a picture is being drawn in the background, or done and not yet taken.
+    #[must_use]
+    pub fn drawing(&self) -> bool {
+        self.drawing
+    }
+
+    /// Waits for the picture being drawn in the background and returns it (`None`: none is, or the frame was refused).
+    pub fn finish_pipelined(&mut self) -> Option<WideHd> {
+        match self.settle(true) {
+            Settled::Done(picture) => picture,
+            Settled::Idle | Settled::Busy => None,
+        }
     }
 
     /// A frame ran and ended with the work RAM `wram`; `log` is its render log, if the log is on
@@ -1435,7 +1550,7 @@ impl WideRun {
     }
 
     /// [`WideRun::redraw_hd`] drawn in the background, for a run whose pictures are shown a window
-    /// frame late (a fast-forward): the frame is handed to a thread and the call returns the
+    /// frame late (a fast-forward): the frame is handed to the worker and the call returns the
     /// picture of the frame handed over by the call before if it is done; if it is not (a batch of
     /// frames is shorter than the drawing, or the machine is loaded), the call returns `None` and
     /// draws nothing, so the run never waits for a picture. `None` is the first call after the run's other
@@ -1448,18 +1563,39 @@ impl WideRun {
     ///
     /// The thread cannot be started, or the drawing in the background panicked.
     pub fn redraw_hd_pipelined(&mut self, log: Option<&FrameLog>, hd: HdOptions) -> Option<WideHd> {
-        // A picture still being drawn is not waited for: this frame is not drawn (the window keeps
-        // the last picture it has, and the next frame of the run is drawn instead). The skipped
-        // frame stays for the next call, which finds the thread done.
-        if self.drawing.as_ref().is_some_and(|handle| !handle.is_finished()) {
-            return None;
-        }
-        let previous = self.finish_drawing();
+        self.redraw_hd_ahead(log, hd, false)
+    }
+
+    /// [`WideRun::redraw_hd_pipelined`] for a run that shows every frame, one window frame late (the game at its
+    /// own speed): when the picture of the call before is not done the call waits for it, so no picture is dropped.
+    /// The wait is what the drawing takes beyond the frame emulated meanwhile.
+    ///
+    /// # Panics
+    ///
+    /// As for [`WideRun::redraw_hd_pipelined`].
+    pub fn redraw_hd_next(&mut self, log: Option<&FrameLog>, hd: HdOptions) -> Option<WideHd> {
+        self.redraw_hd_ahead(log, hd, true)
+    }
+
+    fn redraw_hd_ahead(
+        &mut self,
+        log: Option<&FrameLog>,
+        hd: HdOptions,
+        wait: bool,
+    ) -> Option<WideHd> {
+        // A picture still being drawn is not waited for (unless asked): this frame is not drawn (the
+        // window keeps the last picture it has, and the next frame of the run is drawn instead). The
+        // skipped frame stays for the next call, which finds the worker done.
+        let previous = match self.settle(wait) {
+            Settled::Busy => return None,
+            Settled::Done(picture) => picture,
+            Settled::Idle => None,
+        };
         let started = self.skipped.take().zip(log).map(|((game_mode, field, conditions), log)| {
             (game_mode, field, conditions, log.clone())
         });
         let Some((game_mode, field, conditions, log)) = started else {
-            return previous.flatten();
+            return previous;
         };
         let options = WideOptions { width: WIDTH_16_9, hud: HudPlacement::Window };
         let rom = Arc::clone(&self.rom);
@@ -1467,17 +1603,12 @@ impl WideRun {
         let mut renderer =
             self.renderer.take().expect("the renderer is back once the drawing is done");
         renderer.set_conditions(conditions);
-        let handle = std::thread::Builder::new()
-            .name("hd-draw".to_owned())
-            .spawn(move || {
-                let picture = renderer
-                    .render_hd(Rom(&rom), game_mode, field.as_ref(), &log, options, hd)
-                    .ok();
-                (renderer, picture)
-            })
-            .expect("a thread for the picture");
-        self.drawing = Some(handle);
-        previous.flatten()
+        self.start_worker();
+        let job = DrawJob { renderer, rom, game_mode, field, log, options, hd };
+        let worker = self.worker.as_ref().expect("the worker is started");
+        worker.jobs.send(job).expect("the worker of the pictures is running");
+        self.drawing = true;
+        previous
     }
 
     /// The art the Enhanced pictures draw (`None`: none).
@@ -2958,6 +3089,59 @@ mod tests {
         let view = run.note(&wram, Some(&log)).unwrap();
         assert_eq!((view.frame.width, view.scene), (WIDTH_16_9, Scene::Bordered));
     }
+    #[test]
+    fn the_worker_draws_in_the_background_and_gives_each_picture_back_once_in_order() {
+        let rom = rom();
+        let wram = vec![0_u8; 0x20000];
+        let hd = HdOptions { scale: 2, look: crate::Look::Crisp };
+        let (plain, lit) = (plane(224), {
+            let mut log = plane(224);
+            log.cgram_start[3] = 0x7FFF;
+            log
+        });
+        // The pictures drawn in the foreground are the reference
+        let mut reference = WideRun::new(&rom);
+        let expected: Vec<_> = [&plain, &lit]
+            .into_iter()
+            .map(|log| {
+                reference.skip(&wram);
+                reference.redraw_hd(Some(log), hd).unwrap().picture.rgba.clone()
+            })
+            .collect();
+        assert_ne!(expected[0], expected[1], "the two frames differ");
+
+        let mut run = WideRun::new(&rom);
+        let started = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&started);
+        run.set_worker_start(Arc::new(move || {
+            seen.lock().unwrap().push(std::thread::current().name().map(str::to_owned));
+        }));
+        assert!(!run.drawing());
+        run.skip(&wram);
+        assert!(run.redraw_hd_next(Some(&plain), hd).is_none(), "nothing was drawn before it");
+        assert!(run.drawing());
+        run.skip(&wram);
+        let first = run.redraw_hd_next(Some(&lit), hd).expect("the first picture, a call later");
+        assert_eq!(first.picture.rgba, expected[0]);
+        // Nothing to draw: the picture of the call before still comes back, once
+        let second = run.redraw_hd_next(None, hd).expect("the second picture");
+        assert_eq!(second.picture.rgba, expected[1]);
+        assert!(!run.drawing());
+        assert!(run.redraw_hd_next(None, hd).is_none() && run.finish_pipelined().is_none());
+        // A frame that is waited for at the end of the run
+        run.skip(&wram);
+        assert!(run.redraw_hd_pipelined(Some(&plain), hd).is_none());
+        assert_eq!(run.finish_pipelined().unwrap().picture.rgba, expected[0]);
+        // One thread for all of it, started by the first picture and named
+        assert_eq!(*started.lock().unwrap(), [Some("hd-draw".to_owned())]);
+        // The foreground draws again once the picture in the background is thrown away
+        run.skip(&wram);
+        assert!(run.redraw_hd_pipelined(Some(&lit), hd).is_none());
+        run.skip(&wram);
+        assert_eq!(run.redraw_hd(Some(&plain), hd).unwrap().picture.rgba, expected[0]);
+        assert!(!run.drawing());
+    }
+
     #[test]
     fn an_object_moved_during_the_display_shows_as_the_ppu_draws_it() {
         let rom = rom();

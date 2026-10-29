@@ -5,6 +5,7 @@ use super::poses::{Pose, ROW_OF_CAPTURE};
 use super::resample::Image;
 use super::{ArtPixel, NO_PICTURE};
 use crate::screen::Plan;
+use crate::transfer::Colouring;
 use crate::{Frame, NO_OBJECT};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -66,12 +67,13 @@ pub(crate) fn draw_pictures(
     images: &FxHashMap<(u32, u8), Arc<Image>>,
 ) -> u64 {
     let row_bytes = frame_width * scale * 4;
+    let lines = pixels.len() / frame_width.max(1);
     rgba.par_chunks_mut(row_bytes * scale)
         .enumerate()
+        .with_min_len(crate::pool::band(lines))
         .map(|(line, block)| {
             let mut drawn = 0_u64;
-            for x in 0..frame_width {
-                let pixel = pixels[line * frame_width + x];
+            for (x, pixel) in pixels[line * frame_width..][..frame_width].iter().enumerate() {
                 if pixel.picture == NO_PICTURE {
                     continue;
                 }
@@ -79,18 +81,21 @@ pub(crate) fn draw_pictures(
                 let (cell_x, cell_y) = (usize::from(pixel.cell % 4), usize::from(pixel.cell / 4));
                 let (col, row) = (usize::from(pixel.pos & 7), usize::from((pixel.pos >> 3) & 7));
                 let (x_flip, y_flip) = (pixel.pos & 0x40 != 0, pixel.pos & 0x80 != 0);
+                let plain = is_plain(pixel.plan, pixel.brightness);
                 for sy in 0..scale {
-                    for sx in 0..scale {
+                    let v = if y_flip { scale - 1 - sy } else { sy };
+                    let first =
+                        ((cell_y * 8 + row) * scale + v) * image.width + (cell_x * 8 + col) * scale;
+                    // The row of the art the sub-row reads: one bounds check, not one for a pixel
+                    let source = &image.rgba[first * 4..(first + scale) * 4];
+                    let target = &mut block[sy * row_bytes + x * scale * 4..][..scale * 4];
+                    for (sx, base) in target.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                         let u = if x_flip { scale - 1 - sx } else { sx };
-                        let v = if y_flip { scale - 1 - sy } else { sy };
-                        let at = ((cell_y * 8 + row) * scale + v) * image.width
-                            + (cell_x * 8 + col) * scale
-                            + u;
-                        let source = &image.rgba[at * 4..at * 4 + 4];
+                        let source = &source[u * 4..u * 4 + 4];
+                        let color = [source[0], source[1], source[2]];
                         let color =
-                            shade(pixel.plan, pixel.brightness, [source[0], source[1], source[2]]);
-                        let target = (sy * frame_width * scale + x * scale + sx) * 4;
-                        blend(&mut block[target..target + 4], color, source[3]);
+                            if plain { color } else { shade(pixel.plan, pixel.brightness, color) };
+                        blend(base, color, source[3]);
                     }
                 }
                 drawn += 1;
@@ -98,6 +103,13 @@ pub(crate) fn draw_pictures(
             drawn
         })
         .sum()
+}
+
+/// Whether [`shade`] leaves every colour as it is: no forced blanking, no colour math, full
+/// brightness.
+#[inline(always)]
+fn is_plain(plan: Plan, brightness: u8) -> bool {
+    !plan.force_black && plan.math.is_none() && brightness >= 15
 }
 
 /// The colour the game's pixel `pix` had where the art was made: the source picture's, or (a pack
@@ -137,17 +149,23 @@ pub(crate) fn pairs_of(
     hidden: u128,
 ) -> crate::transfer::Pairs {
     use crate::bgart::NO_COLOUR;
-    let mut pairs = crate::transfer::Pairs::default();
-    for pixel in pixels.iter().filter(|pixel| drawable(pixel, hidden)) {
-        let pix = pixel.bg.pix[slot];
-        if !pix.is_set() || pix.colour == NO_COLOUR {
-            continue;
-        }
-        if let Some(reference) = reference_of(image, pix) {
-            pairs.add(reference, expand(pix.colour));
-        }
-    }
-    pairs
+    // (the frame's records are megabytes: every worker takes a stretch of them, the counts are added)
+    let stretch = pixels.len().div_ceil(rayon::current_num_threads().max(1)).max(8192);
+    pixels
+        .par_chunks(stretch)
+        .fold(crate::transfer::Pairs::default, |mut pairs, pixels| {
+            for pixel in pixels.iter().filter(|pixel| drawable(pixel, hidden)) {
+                let pix = pixel.bg.pix[slot];
+                if !pix.is_set() || pix.colour == NO_COLOUR {
+                    continue;
+                }
+                if let Some(reference) = reference_of(image, pix) {
+                    pairs.add(reference, expand(pix.colour));
+                }
+            }
+            pairs
+        })
+        .reduce(crate::transfer::Pairs::default, crate::transfer::Pairs::merged)
 }
 
 /// Draws the art of the background layers: each 1x pixel the original showed a layer (or the
@@ -167,52 +185,46 @@ pub(crate) fn draw_backgrounds(
     fills: &[bool],
     hidden: u128,
 ) -> u64 {
-    use crate::transfer::Colouring;
-    let drawable_of = |pixel: &ArtPixel| drawable(pixel, hidden);
     let row_bytes = frame_width * scale * 4;
+    let lines = pixels.len() / frame_width.max(1);
     rgba.par_chunks_mut(row_bytes * scale)
         .enumerate()
+        .with_min_len(crate::pool::band(lines))
         .map(|(line, block)| {
             let mut drawn = 0_u64;
-            for x in 0..frame_width {
-                let pixel = pixels[line * frame_width + x];
-                if !drawable_of(&pixel) {
+            for (x, pixel) in pixels[line * frame_width..][..frame_width].iter().enumerate() {
+                if !drawable(pixel, hidden) {
                     continue;
                 }
                 let mut any = false;
                 for (j, image) in images.iter().enumerate() {
-                    let (pix, Some(image)) = (pixel.bg.pix[j], image) else { continue };
+                    let (pix, Some(image)) = (&pixel.bg.pix[j], image) else { continue };
                     if !pix.is_set() {
                         continue;
                     }
                     let (gx, gy) = (usize::from(pix.x), usize::from(pix.y));
                     // The art picture that holds the pixel (a field map's is in tiles)
                     let Some((art, ox, oy)) = image.block(gx, gy, scale) else { continue };
-                    for sy in 0..scale {
-                        for sx in 0..scale {
-                            // A mosaic block is flat: every point of it takes the middle of the
-                            // art's block of the game pixel
-                            let (ty, tx) = if pix.flat { (scale / 2, scale / 2) } else { (sy, sx) };
-                            let at = ((oy + ty) * art.width + ox + tx) * 4;
-                            let Some(source) = art.rgba.get(at..at + 4) else { continue };
-                            let alpha = if fills[j] { 255 } else { source[3] };
-                            if alpha == 0 {
-                                continue;
-                            }
-                            let mut color = [source[0], source[1], source[2]];
-                            match &colourings[j] {
-                                Colouring::Same => {}
-                                Colouring::Each(transfer) => color = transfer.apply(color),
-                                Colouring::Numbered { colours, transferred } => {
-                                    color = transferred[usize::from(colours.number[at / 4])];
-                                }
-                            }
-                            let color = shade(pix.plan, pixel.brightness, color);
-                            let target = (sy * frame_width * scale + x * scale + sx) * 4;
-                            blend(&mut block[target..target + 4], color, alpha);
-                            any = true;
-                        }
+                    let at = x * scale * 4;
+                    // The art as it is, shaded by nothing: its block is copied a row at a time
+                    if matches!(colourings[j], Colouring::Same)
+                        && !pix.flat
+                        && is_plain(pix.plan, pixel.brightness)
+                        && let Some(copied) =
+                            copy_block(block, (row_bytes, at), art, (ox, oy), scale, fills[j])
+                    {
+                        any |= copied;
+                        continue;
                     }
+                    any |= draw_block(
+                        block,
+                        (row_bytes, at),
+                        art,
+                        (ox, oy),
+                        scale,
+                        (pix, pixel.brightness),
+                        (&colourings[j], fills[j]),
+                    );
                 }
                 // (the pixels that count are the ones of the layers, not those under a sprite)
                 drawn += u64::from(any && pixel.bg.battle);
@@ -220,6 +232,103 @@ pub(crate) fn draw_backgrounds(
             drawn
         })
         .sum()
+}
+
+/// The block of `art` at `(ox, oy)` copied over the block of the picture at byte `at` of its rows
+/// (`row_bytes` apart), `scale` x `scale` pixels, when the colours are drawn as they are and
+/// shade nothing: what [`draw_block`] makes of such a block, without the tests for each pixel. A
+/// `fill` layer is opaque, another is drawn by the art's alpha. `None`: the block is not wholly
+/// inside a row range of the art (the general drawing then does what it does there). Otherwise
+/// whether any pixel was drawn.
+#[inline(always)]
+fn copy_block(
+    block: &mut [u8],
+    (row_bytes, at): (usize, usize),
+    art: &Image,
+    (ox, oy): (usize, usize),
+    scale: usize,
+    fill: bool,
+) -> Option<bool> {
+    let pixels = art.rgba.len() / 4;
+    if scale == 0 || ox + scale > art.width || (oy + scale - 1) * art.width + ox + scale > pixels {
+        return None;
+    }
+    // The colour of a source pixel over a target pixel, the target's alpha kept
+    let rgb = u32::from_ne_bytes([255, 255, 255, 0]);
+    let covered = |target: &mut [u8; 4], source: &[u8; 4]| {
+        let word = u32::from_ne_bytes(*source) & rgb | u32::from_ne_bytes(*target) & !rgb;
+        *target = word.to_ne_bytes();
+    };
+    let mut any = false;
+    for sy in 0..scale {
+        let first = ((oy + sy) * art.width + ox) * 4;
+        let source = art.rgba[first..first + scale * 4].as_chunks::<4>().0;
+        let target = block[sy * row_bytes + at..][..scale * 4].as_chunks_mut::<4>().0;
+        if fill {
+            for (target, source) in target.iter_mut().zip(source) {
+                covered(target, source);
+            }
+            any = true;
+        } else {
+            for (target, source) in target.iter_mut().zip(source) {
+                match source[3] {
+                    0 => {}
+                    255 => {
+                        covered(target, source);
+                        any = true;
+                    }
+                    alpha => {
+                        blend(target, [source[0], source[1], source[2]], alpha);
+                        any = true;
+                    }
+                }
+            }
+        }
+    }
+    Some(any)
+}
+
+/// The block of `art` at `(ox, oy)` drawn over the block of the picture at byte `at` of its rows
+/// (`row_bytes` apart), `scale` x `scale` pixels, in the colours the layer has now (see
+/// [`Colouring`]) with the colour math and brightness of the game's pixel `pix`. A `fill` layer is
+/// opaque, another is drawn by the art's alpha. Whether any pixel was drawn.
+#[inline(always)]
+fn draw_block(
+    block: &mut [u8],
+    (row_bytes, at): (usize, usize),
+    art: &Image,
+    (ox, oy): (usize, usize),
+    scale: usize,
+    (pix, brightness): (&crate::bgart::BgPix, u8),
+    (colouring, fill): (&Colouring, bool),
+) -> bool {
+    let mut any = false;
+    for sy in 0..scale {
+        for sx in 0..scale {
+            // A mosaic block is flat: every point of it takes the middle of the art's block of the
+            // game pixel
+            let (ty, tx) = if pix.flat { (scale / 2, scale / 2) } else { (sy, sx) };
+            let index = (oy + ty) * art.width + ox + tx;
+            let Some(source) = art.rgba.get(index * 4..index * 4 + 4) else { continue };
+            let alpha = if fill { 255 } else { source[3] };
+            if alpha == 0 {
+                continue;
+            }
+            let mut color = [source[0], source[1], source[2]];
+            match colouring {
+                Colouring::Same => {}
+                Colouring::Each(transfer) => color = transfer.apply(color),
+                Colouring::Numbered { colours, transferred } => {
+                    color = transferred[usize::from(colours.number[index])];
+                }
+            }
+            let color = shade(pix.plan, brightness, color);
+            let target = sy * row_bytes + at + sx * 4;
+            blend(&mut block[target..target + 4], color, alpha);
+            any = true;
+        }
+    }
+    any
 }
 
 /// What the Mode 7 plane's art is drawn from.
@@ -521,6 +630,7 @@ pub(crate) fn draw_objects(
             .par_chunks_mut(width * 4)
             .take(rows.saturating_sub(skipped))
             .enumerate()
+            .with_min_len(crate::pool::band(rows))
             .map(|(n, row)| {
                 let mut sums = Drawn::default();
                 let py = n + skipped;
@@ -1074,5 +1184,299 @@ mod tests {
         let mut clear = [200, 100, 80, 255];
         darken(&mut clear, light, 0);
         assert_eq!(clear, [200, 100, 80, 255]);
+    }
+
+    /// A small deterministic generator for the equality tests.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 16) as u32
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            self.next() % n
+        }
+
+        fn chance(&mut self, percent: u32) -> bool {
+            self.below(100) < percent
+        }
+    }
+
+    /// Art pixels of the kinds that matter: transparent, opaque, half-covered.
+    fn random_art(random: &mut Random, width: usize, height: usize) -> Image {
+        let mut rgba = Vec::with_capacity(width * height * 4);
+        for _ in 0..width * height {
+            let alpha = match random.below(6) {
+                0 => 0,
+                1 => random.next() as u8,
+                _ => 255,
+            };
+            rgba.extend([random.next() as u8, random.next() as u8, random.next() as u8, alpha]);
+        }
+        Image::new(width, height, rgba)
+    }
+
+    fn random_plan(random: &mut Random, plain: u32) -> Plan {
+        if random.chance(plain) {
+            return Plan { force_black: false, math: None };
+        }
+        Plan {
+            force_black: random.chance(10),
+            math: random.chance(60).then(|| crate::screen::Math {
+                sub: random.next() as u16 & 0x7FFF,
+                subtract: random.chance(50),
+                divide: random.chance(50),
+            }),
+        }
+    }
+
+    /// The pictures as the first version of the code drew them, a sub-pixel at a time.
+    fn draw_pictures_reference(
+        rgba: &mut [u8],
+        scale: usize,
+        frame_width: usize,
+        pixels: &[ArtPixel],
+        images: &FxHashMap<(u32, u8), Arc<Image>>,
+    ) -> u64 {
+        let row_bytes = frame_width * scale * 4;
+        let mut drawn = 0_u64;
+        for (line, block) in rgba.chunks_mut(row_bytes * scale).enumerate() {
+            for x in 0..frame_width {
+                let pixel = pixels[line * frame_width + x];
+                if pixel.picture == NO_PICTURE {
+                    continue;
+                }
+                let Some(image) = images.get(&(pixel.picture, pixel.row)) else { continue };
+                let (cell_x, cell_y) = (usize::from(pixel.cell % 4), usize::from(pixel.cell / 4));
+                let (col, row) = (usize::from(pixel.pos & 7), usize::from((pixel.pos >> 3) & 7));
+                let (x_flip, y_flip) = (pixel.pos & 0x40 != 0, pixel.pos & 0x80 != 0);
+                for sy in 0..scale {
+                    for sx in 0..scale {
+                        let u = if x_flip { scale - 1 - sx } else { sx };
+                        let v = if y_flip { scale - 1 - sy } else { sy };
+                        let at = ((cell_y * 8 + row) * scale + v) * image.width
+                            + (cell_x * 8 + col) * scale
+                            + u;
+                        let source = &image.rgba[at * 4..at * 4 + 4];
+                        let color =
+                            shade(pixel.plan, pixel.brightness, [source[0], source[1], source[2]]);
+                        let target = (sy * frame_width * scale + x * scale + sx) * 4;
+                        blend(&mut block[target..target + 4], color, source[3]);
+                    }
+                }
+                drawn += 1;
+            }
+        }
+        drawn
+    }
+
+    /// The backgrounds as the first version of the code drew them, a sub-pixel at a time.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_backgrounds_reference(
+        rgba: &mut [u8],
+        scale: usize,
+        frame_width: usize,
+        pixels: &[ArtPixel],
+        images: &[Option<Arc<crate::bgart::BgImage>>],
+        colourings: &[Colouring],
+        fills: &[bool],
+        hidden: u128,
+    ) -> u64 {
+        let row_bytes = frame_width * scale * 4;
+        let mut drawn = 0_u64;
+        for (line, block) in rgba.chunks_mut(row_bytes * scale).enumerate() {
+            for x in 0..frame_width {
+                let pixel = pixels[line * frame_width + x];
+                if !drawable(&pixel, hidden) {
+                    continue;
+                }
+                let mut any = false;
+                for (j, image) in images.iter().enumerate() {
+                    let (pix, Some(image)) = (pixel.bg.pix[j], image) else { continue };
+                    if !pix.is_set() {
+                        continue;
+                    }
+                    let (gx, gy) = (usize::from(pix.x), usize::from(pix.y));
+                    let Some((art, ox, oy)) = image.block(gx, gy, scale) else { continue };
+                    for sy in 0..scale {
+                        for sx in 0..scale {
+                            let (ty, tx) = if pix.flat { (scale / 2, scale / 2) } else { (sy, sx) };
+                            let at = ((oy + ty) * art.width + ox + tx) * 4;
+                            let Some(source) = art.rgba.get(at..at + 4) else { continue };
+                            let alpha = if fills[j] { 255 } else { source[3] };
+                            if alpha == 0 {
+                                continue;
+                            }
+                            let mut color = [source[0], source[1], source[2]];
+                            match &colourings[j] {
+                                Colouring::Same => {}
+                                Colouring::Each(transfer) => color = transfer.apply(color),
+                                Colouring::Numbered { colours, transferred } => {
+                                    color = transferred[usize::from(colours.number[at / 4])];
+                                }
+                            }
+                            let color = shade(pix.plan, pixel.brightness, color);
+                            let target = (sy * frame_width * scale + x * scale + sx) * 4;
+                            blend(&mut block[target..target + 4], color, alpha);
+                            any = true;
+                        }
+                    }
+                }
+                drawn += u64::from(any && pixel.bg.battle);
+            }
+        }
+        drawn
+    }
+
+    #[test]
+    fn the_pictures_equal_the_first_version_on_random_frames() {
+        let mut random = Random(0x1234_5678_9ABC_DEF1);
+        for scale in [1_usize, 2, 4, 5] {
+            for plain in [0, 70, 100] {
+                let (frame_width, lines) = (13, 9);
+                let side = 32 * scale;
+                let mut images = FxHashMap::default();
+                for picture in 0..2_u32 {
+                    for row in 0..2_u8 {
+                        images
+                            .insert((picture, row), Arc::new(random_art(&mut random, side, side)));
+                    }
+                }
+                let pixels: Vec<ArtPixel> = (0..frame_width * lines)
+                    .map(|_| {
+                        let mut pixel = ArtPixel::NONE;
+                        if random.chance(80) {
+                            pixel.picture = random.below(3);
+                            pixel.row = random.below(2) as u8;
+                            pixel.cell = random.below(16) as u8;
+                            pixel.pos = random.below(64) as u8
+                                | if random.chance(40) { 0x40 } else { 0 }
+                                | if random.chance(40) { 0x80 } else { 0 };
+                            pixel.plan = random_plan(&mut random, plain);
+                            pixel.brightness =
+                                if random.chance(plain) { 15 } else { random.below(16) as u8 };
+                        }
+                        pixel
+                    })
+                    .collect();
+                let size = frame_width * scale * lines * scale * 4;
+                let start: Vec<u8> = (0..size).map(|_| random.next() as u8).collect();
+                let (mut fast, mut slow) = (start.clone(), start);
+                let counted = draw_pictures(&mut fast, scale, frame_width, &pixels, &images);
+                let expected =
+                    draw_pictures_reference(&mut slow, scale, frame_width, &pixels, &images);
+                assert_eq!(counted, expected, "scale {scale}, plain {plain}");
+                assert!(fast == slow, "scale {scale}, plain {plain}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_backgrounds_equal_the_first_version_on_random_frames() {
+        use crate::bgart::{BgArt, BgImage, BgPix, Kind, NO_COLOUR};
+        use crate::transfer::{Colours, Transfer};
+        let mut random = Random(0x0FED_CBA9_8765_4321);
+        for scale in [1_usize, 2, 3, 4] {
+            for plain in [0, 60, 100] {
+                let (frame_width, lines) = (11, 10);
+                let (art_w, art_h) = (20 * scale, 14 * scale);
+                let whole = Arc::new(BgImage {
+                    art: BgArt::Whole(random_art(&mut random, art_w, art_h)),
+                    base: None,
+                    source: None,
+                });
+                let mut tiles = FxHashMap::default();
+                // (two whole tiles, one cut short, one missing)
+                let side = crate::mapart::TILE * scale;
+                tiles.insert((0, 0), Arc::new(random_art(&mut random, side, side)));
+                tiles.insert((1, 0), Arc::new(random_art(&mut random, side, side)));
+                tiles.insert((1, 1), Arc::new(random_art(&mut random, 30 * scale, 20 * scale)));
+                let tiled =
+                    Arc::new(BgImage { art: BgArt::Tiled(tiles), base: None, source: None });
+                let images = [Some(Arc::clone(&whole)), Some(tiled)];
+                let numbered = |random: &mut Random| {
+                    let BgArt::Whole(art) = &whole.art else { unreachable!() };
+                    let colours = Colours::of(art).expect("few colours");
+                    let transferred = colours
+                        .list
+                        .iter()
+                        .map(|c| [c[0] / 2 + random.below(3) as u8, c[1], c[2]])
+                        .collect();
+                    Colouring::Numbered { colours: Arc::new(colours), transferred }
+                };
+                for colourings in [
+                    [Colouring::Same, Colouring::Same],
+                    [Colouring::Same, Colouring::Each(Transfer::Same)],
+                    [numbered(&mut random), Colouring::Same],
+                ] {
+                    for fills in [[true, false], [false, true], [false, false]] {
+                        let pixels: Vec<ArtPixel> = (0..frame_width * lines)
+                            .map(|_| {
+                                let mut pixel = ArtPixel::NONE;
+                                pixel.bg.kind = match random.below(5) {
+                                    0 => Kind::Hidden,
+                                    1 => Kind::Under,
+                                    2 => Kind::Object,
+                                    _ => Kind::Layer,
+                                };
+                                pixel.oam = random.below(128) as u8;
+                                pixel.bg.battle = random.chance(70);
+                                pixel.brightness =
+                                    if random.chance(plain) { 15 } else { random.below(16) as u8 };
+                                for slot in 0..2 {
+                                    // (some positions are outside the art, and some of the
+                                    // tiles are missing)
+                                    pixel.bg.pix[slot] = if random.chance(85) {
+                                        BgPix {
+                                            x: random.below(if slot == 0 { 22 } else { 300 })
+                                                as u16,
+                                            y: random.below(if slot == 0 { 15 } else { 300 })
+                                                as u16,
+                                            colour: NO_COLOUR,
+                                            index: 0,
+                                            plan: random_plan(&mut random, plain),
+                                            flat: random.chance(10),
+                                        }
+                                    } else {
+                                        BgPix::NONE
+                                    };
+                                }
+                                pixel
+                            })
+                            .collect();
+                        let hidden = u128::from(random.next()) | u128::from(random.next()) << 64;
+                        let size = frame_width * scale * lines * scale * 4;
+                        let start: Vec<u8> = (0..size).map(|_| random.next() as u8).collect();
+                        let (mut fast, mut slow) = (start.clone(), start);
+                        let counted = draw_backgrounds(
+                            &mut fast,
+                            scale,
+                            frame_width,
+                            &pixels,
+                            &images,
+                            &colourings,
+                            &fills,
+                            hidden,
+                        );
+                        let expected = draw_backgrounds_reference(
+                            &mut slow,
+                            scale,
+                            frame_width,
+                            &pixels,
+                            &images,
+                            &colourings,
+                            &fills,
+                            hidden,
+                        );
+                        assert_eq!(counted, expected, "scale {scale}, plain {plain}");
+                        assert!(fast == slow, "scale {scale}, plain {plain}, fills {fills:?}");
+                    }
+                }
+            }
+        }
     }
 }

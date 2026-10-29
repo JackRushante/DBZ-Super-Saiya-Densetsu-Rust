@@ -13,7 +13,10 @@ mod android_setup;
 use std::ffi::{OsString, c_char, c_int};
 
 /// The file of extra launch arguments, one line, split on spaces, read from the data folder (a test aid:
-/// `--mode enhanced`, `--install-hd-pack <zip>`). Without it the game starts in Classic mode.
+/// `--mode enhanced`, `--install-hd-pack <zip>`, `--bench-app <replay>...`). Without it the game starts in Classic
+/// mode. `ENV:NAME=value` sets an environment variable. A `--bench-app` run (README, "Developer commands") has no
+/// standard output here: its report goes to `bench-report.txt` in the data folder, and replays named relatively are
+/// looked for there too.
 const ARGS_FILE: &str = "android-args.txt";
 
 /// The folder of the game's files: the app's internal folder (private to the app, removed with it; a debug
@@ -55,6 +58,10 @@ pub extern "C" fn SDL_main(_argc: c_int, _argv: *mut *mut c_char) -> c_int {
                 Some((name, value)) => unsafe { std::env::set_var(name, value) },
                 None => base.push(arg),
             }
+        }
+        if base.iter().any(|arg| arg == "--bench-app") && !base.iter().any(|arg| arg == "--bench-report") {
+            base.push(OsString::from("--bench-report"));
+            base.push(dir.join("bench-report.txt").into_os_string());
         }
     }
     // One SDL context for the whole life of the activity: the setup screens and the game each open their window

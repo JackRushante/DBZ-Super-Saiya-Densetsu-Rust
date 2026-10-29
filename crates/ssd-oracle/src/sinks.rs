@@ -18,6 +18,9 @@ pub(crate) struct FrameCapture {
     pub pixels: Vec<Color>,
     pub size: Option<FrameSize>,
     pub options: RenderFrameOptions,
+    /// The PPU is not drawing its pixels (`Machine::set_compose_pixels`): a 256-pixel frame is not copied either, as
+    /// the buffer holds nothing of it. The size and options are noted all the same.
+    pub skip_pixels: bool,
 }
 
 impl Renderer for FrameCapture {
@@ -31,10 +34,18 @@ impl Renderer for FrameCapture {
         options: RenderFrameOptions,
     ) -> Result<(), Infallible> {
         let len = (frame_size.width * frame_size.height) as usize;
-        self.pixels.clear();
-        self.pixels.extend_from_slice(&frame_buffer[..len]);
         self.size = Some(frame_size);
         self.options = options;
+        // Only a frame of the size the PPU leaves undrawn, over a copy of that size: a hi-res frame is always drawn
+        if self.skip_pixels
+            && frame_size.width <= 256
+            && frame_size.height <= 239
+            && self.pixels.len() == len
+        {
+            return Ok(());
+        }
+        self.pixels.clear();
+        self.pixels.extend_from_slice(&frame_buffer[..len]);
         Ok(())
     }
 }

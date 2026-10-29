@@ -72,6 +72,12 @@ The state of a run is carried by the application event with tag `4` (the next fr
 `2` and the spawner's `3`). Its payload is the state's own bytes. Playing the event writes the state into work RAM as the
 run did, so a replay of a loaded save plays with the same flags and high parts.
 
+## The save editor
+
+The save editor (title screen, `docs/re/data/save-format.md`, "What the save editor writes") sets a BP of at most 9 999 999. When it edits
+the level or the BP of a member it drops that member's high part (the party slot's, and the snapshot's of its character) from the slot's
+entry of `ssd.mods`, and re-keys the entry to the slot's new checksum word with the rest of the state.
+
 ## Limits
 
 - The damage shift keeps the larger side within 24 bits with its class bonus. A side much smaller than the other shifts

@@ -1314,17 +1314,17 @@ mod tests {
         key(&mut nav, Key::Tab);
         key(&mut nav, Key::Tab);
         assert_eq!(nav.options_category(), Category::Video);
-        // Display, Scale, V-Sync, Look, Aspect, [Picture size], Scanlines, CRT filter.
-        for _ in 0..5 {
+        // Display, Scale, V-Sync, Latency, Look, Aspect, [Picture size], Scanlines, CRT filter.
+        for _ in 0..6 {
             key(&mut nav, Key::Down);
         }
-        assert_eq!(nav.options_row(), 6, "Down from Aspect skips Picture size");
+        assert_eq!(nav.options_row(), 7, "Down from Aspect skips Picture size");
         key(&mut nav, Key::Up);
-        assert_eq!(nav.options_row(), 4, "and Up from Scanlines skips it back");
+        assert_eq!(nav.options_row(), 5, "and Up from Scanlines skips it back");
         nav.open_video_confirm();
         assert_eq!(nav.options_video_confirm(), Some(1), "the cursor is on Revert");
         assert_eq!(key(&mut nav, Key::Down), Action::None, "no row moves meanwhile");
-        assert_eq!(nav.options_row(), 4);
+        assert_eq!(nav.options_row(), 5);
         assert_eq!(nav.options_video_confirm(), Some(0));
         assert_eq!(key(&mut nav, Key::Confirm), Action::OptionsVideo { keep: true });
         key(&mut nav, Key::Right);

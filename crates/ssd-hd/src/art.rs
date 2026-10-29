@@ -378,6 +378,10 @@ pub struct ArtStats {
 pub struct FieldMapArt {
     pub available: Option<u32>,
     pub bound: Option<u32>,
+    /// The tiles of the art the frame read as it was drawn: no read ahead had brought them.
+    pub read: u32,
+    /// The tiles of the art the reading thread brought since the frame before (read ahead).
+    pub read_ahead: u32,
 }
 
 /// The Mode 7 plane a frame shows: the matrix of each line (by scanline; `None` for a line that
@@ -452,7 +456,7 @@ pub(crate) struct ArtState {
     /// The field maps' art: the source of the layer shown, and the tiles of art read at the
     /// picture's scale, by layer and tile.
     field_sources: FxHashMap<u32, Option<Arc<Image>>>,
-    field_tiles: FxHashMap<(u32, u16, u16), Option<Arc<Image>>>,
+    field_tiles: field::FieldTiles,
     /// The Mode 7 plane's art, by the index of the entry.
     plane_arts: FxHashMap<u32, Option<Arc<crate::mode7art::PlaneArt>>>,
     /// The plane the frame shows (see [`ArtState::begin_bg`]): the matrix of each line, by
@@ -533,7 +537,7 @@ impl ArtState {
             conditions: Conditions::default(),
             bg_images: FxHashMap::default(),
             field_sources: FxHashMap::default(),
-            field_tiles: FxHashMap::default(),
+            field_tiles: field::FieldTiles::default(),
             plane_arts: FxHashMap::default(),
             plane: None,
             cgram: Vec::new(),
@@ -595,8 +599,14 @@ impl ArtState {
             self.plane_arts.clear();
         }
         self.field_frame = None;
-        self.pixels.clear();
-        self.pixels.resize(width * height, ArtPixel::NONE);
+        // (a record is a hundred bytes: a frame's are megabytes, written by every worker)
+        if self.pixels.len() == width * height {
+            let band = crate::pool::band(height) * width;
+            self.pixels.par_chunks_mut(band).for_each(|chunk| chunk.fill(ArtPixel::NONE));
+        } else {
+            self.pixels.clear();
+            self.pixels.resize(width * height, ArtPixel::NONE);
+        }
         self.width = width;
         self.height = height;
         self.stats = ArtStats::default();
@@ -947,14 +957,35 @@ impl ArtState {
         if !bg_fighters.is_empty() {
             found.extend(bg_fighters);
         }
-        let mut shown = [0_u32; 128];
-        // The visible pixels of each sprite that belong to a picture (a portrait drawn as sprites)
-        let mut pictured = [0_u32; 128];
-        for pixel in self.pixels.iter().filter(|p| p.oam != crate::NO_OBJECT) {
-            let at = usize::from(pixel.oam) & 127;
-            shown[at] += 1;
-            pictured[at] += u32::from(pixel.picture != NO_PICTURE);
-        }
+        // The visible pixels of each sprite, and those of them that belong to a picture (a portrait
+        // drawn as sprites); every worker counts a stretch of the frame's records
+        let stretch = self.pixels.len().div_ceil(rayon::current_num_threads().max(1)).max(8192);
+        let (shown, pictured) = self
+            .pixels
+            .par_chunks(stretch)
+            .fold(
+                || ([0_u32; 128], [0_u32; 128]),
+                |(mut shown, mut pictured), pixels| {
+                    for pixel in pixels.iter().filter(|p| p.oam != crate::NO_OBJECT) {
+                        let at = usize::from(pixel.oam) & 127;
+                        shown[at] += 1;
+                        pictured[at] += u32::from(pixel.picture != NO_PICTURE);
+                    }
+                    (shown, pictured)
+                },
+            )
+            .reduce(
+                || ([0_u32; 128], [0_u32; 128]),
+                |mut a, b| {
+                    for (x, y) in a.0.iter_mut().zip(b.0) {
+                        *x += y;
+                    }
+                    for (x, y) in a.1.iter_mut().zip(b.1) {
+                        *x += y;
+                    }
+                    a
+                },
+            );
         let sum_of = |counts: &[u32; 128], pose: &Pose| {
             (0..128).filter(|&at| pose.sprites >> at & 1 != 0).map(|at| counts[at]).sum::<u32>()
         };

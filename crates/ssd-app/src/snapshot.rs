@@ -47,6 +47,31 @@ pub struct PresentTimes {
     pub wait: std::time::Duration,
 }
 
+/// The adapter an offscreen run draws on: the first backend to try, no surface.
+fn offscreen_adapter() -> anyhow::Result<wgpu::Adapter> {
+    let instance = canvas::instance();
+    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .map_err(|e| anyhow::anyhow!("no wgpu adapter: {e}"))
+}
+
+/// One line naming the adapter an offscreen run draws on (the backend, the kind of device, the driver).
+///
+/// # Errors
+///
+/// No adapter is available.
+pub fn describe_gpu() -> anyhow::Result<String> {
+    let info = offscreen_adapter()?.get_info();
+    Ok(format!(
+        "{} ({:?}, {:?}), driver {} {}",
+        info.name, info.backend, info.device_type, info.driver, info.driver_info
+    ))
+}
+
 /// The interface drawn into an offscreen texture, on a device of its own (no window, no surface).
 pub struct Offscreen {
     canvas: Canvas,
@@ -65,14 +90,7 @@ impl Offscreen {
     ///
     /// No adapter or device is available.
     pub fn new(width: u32, height: u32) -> anyhow::Result<Self> {
-        let instance = canvas::instance();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .map_err(|e| anyhow::anyhow!("no wgpu adapter: {e}"))?;
+        let adapter = offscreen_adapter()?;
         let info = adapter.get_info();
         log::info!("wgpu adapter {} ({:?}), offscreen", info.name, info.backend);
         let (device, queue) = canvas::device(&adapter)?;

@@ -976,6 +976,6 @@ mod tests {
         assert_eq!(options.pc.get("video.scale"), None);
         assert_eq!(options.game.get("gameplay.a"), Some(1));
         let indices = options.indices(Category::Video, &Cheats::neutral(), 0);
-        assert_eq!(indices, [0, 2, 0, 0, 0, 0, 0, 0], "the page was reset: the defaults");
+        assert_eq!(indices, [0, 2, 0, 1, 0, 0, 0, 0, 0], "the page was reset: the defaults");
     }
 }

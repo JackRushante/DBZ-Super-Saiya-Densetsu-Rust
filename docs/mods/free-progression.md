@@ -4,7 +4,8 @@ In the original game an enemy has fixed stats: a party that trains outgrows it, 
 bosses. The feature `enemy_scaling` (a [named feature](features.md) of a data pack) makes the **enemies follow the party**:
 each enemy of a battle is set to the strength it would have if it had been made for the party's level, and it pays the EXP of
 that strength. A `difficulty` moves that level up or down. It is part of the "Free progression" mod; the other part, the story
-that no longer waits for levels, is another page.
+that no longer waits for levels, is another page. Instead of a difficulty a pack may give **two offsets in levels**, one for
+the random battles and one for the story and boss battles ([the offsets](#the-offsets)); the released pack does.
 
 The feature is for the Enhanced mode only and is off unless a pack enables it (`examples/enemy-scaling` is a pack that does).
 Classic is not changed. This page is the design with its numbers; `features.md` has the parameter.
@@ -49,6 +50,50 @@ How far the same law moves an enemy made for another level (`q^3`, the BP factor
 | 5 | 0.22 | **1** | 3.4 | 16 | 43 | 91 | 140 |
 | 20 | 0.014 | 0.064 | 0.22 | **1** | 2.7 | 5.8 | 9.0 |
 | 40 | 0.0024 | 0.011 | 0.037 | 0.17 | 0.47 | **1** | 1.5 |
+
+## The offsets
+
+A pack may set the target level by **offsets in levels** from the party's level instead of a difficulty (the two ways are
+exclusive, `features.md`). Two kinds of battle, each with its own offset, `random_offset` and `boss_offset` (whole numbers, -10 to
++10):
+
+- a **random battle** is one the map's roll starts in its normal branch, where the game picks the group of the zone;
+- a **boss battle** is every other: the battles a script starts (the story's fights, the bosses, the Saiyans, Ginyu, Frieza), the
+  story branches of the roll (Frieza's first form, the Ginyu map's fights) and the next form of a boss.
+
+The target is `P + offset` where `P` is the party's level (the mean of the top three, in sixths), kept between level 1 and level
+200, and everything else is the rule above with the target in place of `d * (P + 5) - 5`:
+`q = (P + offset + 5) / (L + 5)`, HP and KI times `q`, BP times `q^3`, EXP times `q^2`, and the record's level is the target,
+rounded. A target below 1 is 1 (and `q` is taken from that level, not from the lower number), so a party at level 3 with `-10`
+meets enemies made for level 1. An offset of 0 is the normal difficulty, number for number.
+
+| Party level `P` | random, `-3` | story and boss, `+3` | random, `-5` | story and boss, `+5` |
+|---:|---:|---:|---:|---:|
+| 1 | 1 | 4 | 1 | 6 |
+| 10 | 7 | 13 | 5 | 15 |
+| 30 | 27 | 33 | 25 | 35 |
+| 46 | 43 | 49 | 41 | 51 |
+
+For an enemy made for level `L`, against a party of level 46 (the BP of a level 8 Nappa row is 4 000 and of a level 10 Vegeta
+row 18 000, HP 220 and 240; the numbers are read from the run described below):
+
+| Enemy | Original | `difficulty = "normal"` (the target 46) | offsets (the target 49 for the two fights, 43 for the Namek random) |
+|---|---|---|---|
+| Nappa (group 20) | level 8, HP 220, BP 4 000 | level 46, HP 863, BP 241 513 | level 49, HP 914, BP 286 689 |
+| Vegeta (group 21) | level 10, HP 240, BP 18 000 | level 46, HP 816, BP 707 472 | level 49, HP 864, BP 839 808 |
+| Namek random (group 30, first enemy of the pair) | level 4, HP 70, BP 1 700 | level 46, HP 397, BP 309 337 | level 43, HP 373, BP 257 896 |
+
+(These are the numbers before the cheats. The enemy power cheat, the Options difficulty and the damage and card cheats act after the
+scaling, as always.)
+
+**How the game tells the two apart.** The roll of the map (`02:D241`) calls `02:D289`, which says whether a story battle starts
+(carry set: Frieza's first form on map 22, the scenes of map 24) or a normal one. A normal one
+runs `02:D34A` to pick the group of the map's zone, and `02:D34A` has no other caller (`battle.md`). A script's battle sets the
+group and the mode itself (the scene language's poke) and never runs it. The feature marks the pick, at its `RTL` (`02:D37C`), and
+the builder of the enemy records (`01:F7F1`) takes the mark: a battle whose builder finds it is a random battle, any other is a
+boss battle. The mark is taken at once, so a builder run again for the same battle (the form changes of Frieza, `00:961A` and
+`05:9852`) or for the next battle finds none, and the kind is kept for the EXP award of the defeated enemies of the same battle
+(`1D:8C66`). The mark and the kind are kept in six bytes of the mod state block (`state.md`, `$7F:FB50`), with their own marker.
 
 ## The party's level
 
@@ -129,7 +174,8 @@ equal. The game also reads the acting fighter's level to pick a band of attack a
 
 ## Bosses and scripted fights
 
-Every battle is scaled, the bosses and the story's fights with the rest, so that the story stays passable at any level: a
+Every battle is scaled, the bosses and the story's fights with the rest (with the offsets, at their own offset, `boss_offset`, and the
+random battles at `random_offset`), so that the story stays passable at any level: a
 party below a boss's level meets a boss weakened in the proportions of the table above, and a party above it a boss
 strengthened in them. **There is no floor at the original's numbers**, because that floor is exactly what keeps a party that
 did not train from passing a boss: the feature exists to remove it. (The floor that remains is 1: a number that is not 0
@@ -159,7 +205,9 @@ party far above it (with the level cap raised) a Frieza the Super Saiyan may not
 
 ## Difficulty
 
-`difficulty` is one of three names, each a factor `d` on the party's `u = P + 5`:
+`difficulty` is the older way to set the target (the offsets above are the newer, and the released pack uses them since its version
+0.3.0). A pack written with `difficulty` alone is read exactly as it was: the same bytes in the image, the same numbers, no mark
+written, one factor for every battle. It is one of three names, each a factor `d` on the party's `u = P + 5`:
 
 | `difficulty` | `d` | HP and KI | BP | EXP | The enemy's level is |
 |---|---:|---:|---:|---:|---|
@@ -186,6 +234,7 @@ made to multiply that wide BP whole when the block is live.
 |---|---|---|---|
 | `01:F7F1` | the `RTL` of `01:F719`, the builder of the five enemy records | scales every record the builder filled (level, HP and maximum HP, KI and maximum KI, BP) | `Patch`; `resume_at(01:F7F1)` |
 | `1D:8C66` | the `RTL` of `1D:8C33`, the EXP of one defeated enemy | replaces the unit row's EXP the original added to the battle's EXP by the scaled one | `Patch`; `resume_at(1D:8C66)` |
+| `02:D37C` | the `RTL` of `02:D34A`, the pick of a random encounter's group | marks the battle as random (only for a pack with offsets) | `Patch`; `resume_at(02:D37C)` |
 
 Both are reached with M8 X16 and read and write work RAM by bus address, so they depend on neither the direct page nor the
 data bank. Both decline at once (they only resume) without the feature in the image, in a battle of the scripted-loss list,
@@ -229,6 +278,6 @@ HUD digits, take the low 24 bits (`state.md`).
 - A scaled BP past 24 bits meets the routines that `state.md` lists as not yet wide (the form changes `05:A54A` and `05:A622`,
   the power-up `05:A727`): they wrap it at 24 bits. It takes a party above level 50 (a raised level cap) to reach it: 51 at
   hard and 58 at normal for the largest BP of the original's rows.
-- The recompiled build must be regenerated: the two keys are new stops of the recompiler.
+- The recompiled build must be regenerated: the keys are stops of the recompiler (`02:D37C` came with the offsets).
 - The party's level is read from the records as the game holds them: a character the game raises on building the record
   (Vegeta is raised to level 17) counts at that level.

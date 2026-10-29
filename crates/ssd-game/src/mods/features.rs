@@ -15,11 +15,14 @@
 //!
 //! **`enemy_scaling`** (`docs/mods/free-progression.md`): the enemies of a battle follow the party's level; its hooks are
 //! [`super::scaling`]'s.
+//!
+//! **`party_boosts`**: Guru, Porunga's level wish and Launch act on every member of the party; its hooks are
+//! [`super::party_boosts`]'s.
 
 use super::redirect::overlay;
 use super::state::{PARTY_SLOTS, party_record, side_record};
 use ssd_mod::Family;
-use ssd_mod::feature::{ENEMY_SCALING, FREE_PROGRESSION, SSJ_KAIOKEN};
+use ssd_mod::feature::{ENEMY_SCALING, FREE_PROGRESSION, PARTY_BOOSTS, SSJ_KAIOKEN};
 use ssd_oracle::{Ctx, HookAction, HookEntry, HookMode, ReturnKind, RoutineFn};
 
 /// The unit id of the Super Saiyan Goku (`$3B`).
@@ -193,7 +196,7 @@ fn ssj_kaioken_hooks() -> Vec<HookEntry> {
 }
 
 /// The features the game has, by id (the ids of `ssd_mod::feature`).
-const REGISTERED: &[u16] = &[SSJ_KAIOKEN, FREE_PROGRESSION, ENEMY_SCALING];
+const REGISTERED: &[u16] = &[SSJ_KAIOKEN, FREE_PROGRESSION, ENEMY_SCALING, PARTY_BOOSTS];
 
 /// The hooks of the feature `id`: a match on the id, the registry of the named features.
 fn hooks_of(id: u16) -> Vec<HookEntry> {
@@ -201,6 +204,7 @@ fn hooks_of(id: u16) -> Vec<HookEntry> {
         SSJ_KAIOKEN => ssj_kaioken_hooks(),
         FREE_PROGRESSION => super::progression::hook_entries(),
         ENEMY_SCALING => super::scaling::hooks(),
+        PARTY_BOOSTS => super::party_boosts::hooks(),
         _ => Vec::new(),
     }
 }
@@ -230,11 +234,14 @@ mod tests {
         assert_eq!(progression[0], "mod_fp_raditz_goku");
         assert_eq!(progression[9], "mod_fp_piccolo_bp_high");
         let scaling = hooks_of(ENEMY_SCALING).len();
-        assert_eq!(scaling, 2, "the record builder's exit and the EXP award");
+        assert_eq!(scaling, 3, "the record builder's exit, the EXP award and the random pick");
+        let boosts: Vec<String> =
+            hooks_of(PARTY_BOOSTS).into_iter().map(|entry| entry.name).collect();
+        assert_eq!(boosts, ["mod_party_guru", "mod_party_porunga_level", "mod_party_lunch"]);
         assert_eq!(
             hook_entries().len(),
-            names.len() + progression.len() + scaling,
-            "the registry is the three"
+            names.len() + progression.len() + scaling + boosts.len(),
+            "the registry is the four"
         );
     }
 

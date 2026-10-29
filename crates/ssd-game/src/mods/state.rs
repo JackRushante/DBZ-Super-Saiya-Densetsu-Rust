@@ -12,7 +12,11 @@
 //! - `+0x12`: the high parts of the 5 enemy records (enemy slot `j` at `+0x12 + 2j`).
 //! - `+0x1C`: the high parts of the side records, `$7E:1400` (side A, `+0x1C`) and `$7E:1440` (side B, `+0x1E`).
 //! - `+0x20`: the high parts of the BP snapshot `$7E:4C00 + 3 * id` for the 12 characters (character `id` at `+0x20 + 2id`).
-//! - `+0x38` to `+0xFF`: free, zero.
+//! - `+0x38` to `+0x3B`: the marker `SSDc` of a completed game (`chapter`).
+//! - `+0x50`: the kind of the battle, for `enemy_scaling` with offsets: the marker `SSDe` (4 bytes), then one byte that is 1
+//!   between a random encounter's group pick and the build of its records, and one that is 1 while the battle whose records
+//!   were built last is a random encounter. Its own marker, so it is valid whether or not this block is live.
+//! - the rest to `+0xFF`: free, zero.
 //!
 //! **Decision: the extended flags are not copied into the block.** The 256 flag bytes do not fit beside the high parts in
 //! the block's 256 bytes, and the flags already sit at `$7F:FD00` outside the save image. The sidecar keeps them with their
@@ -71,6 +75,13 @@ pub const SCRATCH_SIDE_B_LOW: usize = 0x44;
 pub const SCRATCH_KAIOKEN_HIGH: usize = 0x48;
 /// The end (exclusive) of the scratch: the bytes from [`SCRATCH_SHIFT`] to here are zeroed when a state is applied.
 pub const SCRATCH_END: usize = SCRATCH_KAIOKEN_HIGH + 2;
+
+/// The kind of the battle (`scaling`): the block offset of its marker. Six bytes (the marker, the pending mark and the kind),
+/// none of them saved with the block or zeroed with the scratch. The marker is its own, because the power-on fill of work RAM
+/// is random.
+pub const BATTLE_KIND: usize = 0x50;
+/// The marker of the kind-of-battle bytes.
+pub const KIND_MARKER: [u8; 4] = *b"SSDe";
 
 /// The shift a damage pair needs: the smallest `s` such that the larger of the two BPs, plus a quarter of it (the class
 /// bonus of `05:B6F2`, which can add 25 percent before the damage), fits 24 bits. Both BPs are shifted by it.

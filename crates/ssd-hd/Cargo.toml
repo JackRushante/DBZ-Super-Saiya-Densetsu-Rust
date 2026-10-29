@@ -11,6 +11,7 @@ ssd-catalogue = { workspace = true } # the title set's LZ stream (graphics::lz_d
 ssd-mod = { workspace = true }       # the HD art of the pack maps and faces (Overlay::of_pack, from the image)
 rustc-hash = { workspace = true }   # the tile index of the pack
 rayon = { workspace = true }         # the row-parallel passes of the Enhanced picture
+bytemuck = { workspace = true }      # the Enhanced picture as words (the Scale2x passes write it directly)
 serde = { workspace = true }        # hdpack.toml
 ab_glyph = { workspace = true }     # the HD text: Share Tech Mono rasterised at the picture scale
 png = { workspace = true }          # decoding the pack's art

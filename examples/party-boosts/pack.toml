@@ -1,0 +1,14 @@
+# Party-wide boosts: Guru, Porunga's level wish and Launch act on every member of the party, not on the one chosen (not canon;
+# Enhanced mode only, off unless the pack is enabled). The feature is described in docs/mods/features.md.
+[pack]
+id = "party.boosts"
+name = "Party-wide boosts"
+version = "1.1.0"
+game = "A8CF4F2A"
+description = "The objects Guru (BP +50 percent), Porunga's second wish (+1 level) and Launch (the favourite attacks) act on the whole party in a battle. The object is used up once, and every fighter gets the same effect, by the game's own rules."
+
+[[feature]]
+name = "party_boosts"
+guru = 1
+porunga_level = 1
+lunch = 1

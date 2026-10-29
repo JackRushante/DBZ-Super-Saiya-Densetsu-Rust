@@ -173,3 +173,20 @@ first, by an ignored test that compares the game's memory with the edited slot
    levels are plausible values, not the ones a player would have; the event bits and the map's other state
    stay as the first-chapter save left them. Which events a later map expects to have happened is not known
    (see "What identifies a story point").
+
+## What the save editor writes (`ssd_menus::saveedit`)
+
+- **Level-up adds, it does not set.** `03:851B` (the raise a level-up and the story's gifts use) adds the BP gain of the new level's
+  row to the record's BP (a 16-bit add of the low word and an add with carry of the high byte, then the next row). So a BP that is
+  the table's sum plus a delta stays that far over the table after every level-up; the editor stores no delta of its own, it is
+  `BP - table[level]`. SEEN: `crates/ssd-catalogue/tests/save_editor_real_rom.rs` runs `03:C64A` on an edited Gohan (+3000 and -1000 over
+  the table) and reads the table's BP for the new level plus the delta. Routines that *set* BP from a table (Piccolo's return,
+  `03:C58D`; the Super Saiyan builder, `03:85F0`) do not keep it.
+- **A level in the editor** is `ssd_catalogue::game::set_level`: level, max HP and KI from the rows, HP and KI full, EXP at the start of
+  the level, byte `+0E` from the row; the BP is the table's value plus the delta (at most 9 999 999).
+- **The item list** is written as the bag projects it (`Bag::project`: at most 21 entries, 24 when the bag is full, key items first):
+  object and attribute (`item_attributes` without bit 0), the state words (image `$3A0`, one word an entry), the count at `$01B2`, and
+  `$01B3`, which `01:B782` derives from the count for the page shown (the count, at most 8, for the first page).
+- **Sidecars** of the slot (`ssd.bag`, `ssd.cheats`, `ssd.options`, `ssd.mods`) are keyed by the slot's checksum word, which a write
+  changes; the editor stores each entry again under the new word. The wide BP's high part of an edited member is dropped.
+

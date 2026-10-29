@@ -135,6 +135,12 @@ use all (slot 0 is the centre; the `catalogue --kind encounters` rows show it: a
 even starts at slot 1 when the count is even, so a patch that changes the count must also move the units into the slots of the
 new count's formation.
 
+- **Random or story battle.** The only caller of the group pick `02:D34A` is `02:D250`, in the normal-battle branch of the
+  roll that starts a battle (`02:D241`); a script's battle pokes `$0EA3` and the mode itself, and the story branches of the roll
+  (carry set from `02:D289`) never pick. So a hook at the pick's `RTL` (`02:D37C`) sees every random encounter and nothing else,
+  and a hook at the builder's `RTL` (`01:F7F1`) that finds the mark knows the battle it builds is random. The scaling with offsets
+  does that (`free-progression.md`, "The offsets"); the cheats' own mark (`RANDOM_ONLY`) is the same idea, kept in the cheat block and
+  set only while a battle cheat is on.
 - **Enemy power (HP and BP)**: at the return of 01:F719 (01:F7F1) multiply, for every slot with flag `$40`, the HP word `+03`
   and the maximum `+0A` (saturate at `$FFFF`) and the BP `+07`..`+09` (saturate at `$FFFFFF`; the largest row BP,
   10 000 000, times 5 would overflow 24 bits). It runs at every battle start and at every form change, which is wanted. Seen:

@@ -52,6 +52,12 @@ pub struct Args {
     pub pack: Option<PathBuf>,
     /// Compare every picture of the 16:9 configurations that is shared (not drawn again) with a fresh one.
     pub check: bool,
+    /// Print, for each replay and configuration, a checksum of every picture drawn in order: two builds that draw the
+    /// same pictures print the same sums.
+    pub sum: bool,
+    /// `hd-skip-check`: the PPU's pixels are left undrawn for every frame, the one shown too (as the app does in
+    /// Enhanced mode), and no PPU frame is compared.
+    pub undrawn: bool,
 }
 
 /// Parses the arguments after `bench-hd`: `[--frames N] [--pack DIR] [replay|dir...]`.
@@ -60,7 +66,14 @@ pub struct Args {
 ///
 /// An unknown option, or `--frames` without a number.
 pub fn parse_args(args: &[&str]) -> Result<Args, String> {
-    let mut parsed = Args { paths: Vec::new(), frames: None, pack: None, check: false };
+    let mut parsed = Args {
+        paths: Vec::new(),
+        frames: None,
+        pack: None,
+        check: false,
+        sum: false,
+        undrawn: false,
+    };
     let mut args = args.iter();
     while let Some(&arg) = args.next() {
         match arg {
@@ -73,6 +86,8 @@ pub fn parse_args(args: &[&str]) -> Result<Args, String> {
                 );
             }
             "--check" => parsed.check = true,
+            "--sum" => parsed.sum = true,
+            "--undrawn" => parsed.undrawn = true,
             "--pack" => {
                 parsed.pack = Some(PathBuf::from(
                     args.next().ok_or_else(|| "--pack takes a folder".to_owned())?,
@@ -94,6 +109,22 @@ struct Timings {
     reused: Vec<u64>,
     checked: Vec<u64>,
     differing: Vec<u64>,
+    /// With `--sum`: the chain of the checksums of the pictures drawn, per configuration.
+    sums: Vec<u64>,
+}
+
+/// The checksum chain `sum` followed by the picture `rgba` of `width` x `height` pixels: every byte counts, in order.
+fn chain(sum: u64, rgba: &[u8], (width, height): (u32, u32)) -> u64 {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h = (sum.rotate_left(5) ^ u64::from(width) << 32 ^ u64::from(height)).wrapping_mul(K);
+    let words = rgba.as_chunks::<8>();
+    for word in words.0 {
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(*word)).wrapping_mul(K);
+    }
+    for &byte in words.1 {
+        h = (h.rotate_left(5) ^ u64::from(byte)).wrapping_mul(K);
+    }
+    h
 }
 
 /// The mean, the 99th percentile (nearest rank) and the worst of `times`, in milliseconds.
@@ -165,6 +196,7 @@ pub fn run(
             reused: vec![0; configurations],
             checked: vec![0; configurations],
             differing: vec![0; configurations],
+            sums: vec![0; configurations],
         };
         let mut last: Vec<Option<u64>> = vec![None; configurations];
         while machine.frame_count() < frames {
@@ -178,6 +210,15 @@ pub fn run(
                         let Some(log) = log else { continue };
                         let picture = renderer.render_hd(log, HdOptions { scale, look })?;
                         std::hint::black_box(&picture);
+                        timings.frames[slot].push(started.elapsed());
+                        if args.sum {
+                            timings.sums[slot] = chain(
+                                timings.sums[slot],
+                                &picture.rgba,
+                                (picture.width, picture.height),
+                            );
+                        }
+                        continue;
                     }
                     Kind::Wide | Kind::WideArt => {
                         // The wide runs follow the work RAM frame by frame, logged or not
@@ -195,6 +236,11 @@ pub fn run(
                 if let Some(picture) = &shown[slot] {
                     timings.reused[slot] += u64::from(last[slot] == Some(picture.serial));
                     last[slot] = Some(picture.serial);
+                    if args.sum {
+                        let hd = &picture.picture.picture;
+                        timings.sums[slot] =
+                            chain(timings.sums[slot], &hd.rgba, (hd.width, hd.height));
+                    }
                 }
             }
             // Outside the timing: the fresh runs follow every frame too (a frame with no log is no picture)
@@ -257,6 +303,14 @@ pub fn run(
         ]);
     }
     write!(out, "{}", render_table(&header, &rows))?;
+    if args.sum {
+        for timings in &replays {
+            for (slot, &configuration) in CONFIGURATIONS.iter().enumerate() {
+                let (scale, look) = label(configuration);
+                writeln!(out, "sum {} {scale} {look}: {:016x}", timings.name, timings.sums[slot])?;
+            }
+        }
+    }
     if args.check {
         let mut differing = 0;
         for timings in &replays {
@@ -351,7 +405,7 @@ pub fn skip_check(
             for (slot, &batch) in BATCHES.iter().enumerate() {
                 let other = &mut machines[slot];
                 let shown = frame % batch == 0;
-                other.set_compose_pixels(shown);
+                other.set_compose_pixels(shown && !args.undrawn);
                 other.set_line_log(shown);
                 other.set_audio_resampling(frame % batch == 1 || batch == 1);
                 other.run_frame_with(&mut |f| replay.input(f), &mut NullAudio)?;
@@ -364,7 +418,7 @@ pub fn skip_check(
                     compared[slot] += 1;
                     differing[slot] += u64::from(drawn != wanted);
                     frames_differing[slot] +=
-                        u64::from(other.frame().pixels != machine.frame().pixels);
+                        u64::from(!args.undrawn && other.frame().pixels != machine.frame().pixels);
                     machines_differing[slot] += u64::from(
                         other.wram() != machine.wram()
                             || format!("{:?}", other.cpu_registers())
@@ -398,9 +452,17 @@ mod tests {
         let args = parse_args(&["--frames", "300", "a.ssdreplay"]).unwrap();
         assert_eq!(args.frames, Some(300));
         assert_eq!(args.paths, [PathBuf::from("a.ssdreplay")]);
-        let plain = Args { paths: Vec::new(), frames: None, pack: None, check: false };
+        let plain = Args {
+            paths: Vec::new(),
+            frames: None,
+            pack: None,
+            check: false,
+            sum: false,
+            undrawn: false,
+        };
         assert_eq!(parse_args(&[]).unwrap(), plain);
         assert!(parse_args(&["--check"]).unwrap().check);
+        assert!(parse_args(&["--undrawn"]).unwrap().undrawn && !plain.undrawn);
         assert_eq!(parse_args(&["--pack", "p"]).unwrap().pack, Some(PathBuf::from("p")));
         assert!(parse_args(&["--frames"]).unwrap_err().contains("needs a number"));
         assert!(parse_args(&["--fast"]).unwrap_err().contains("unknown option"));

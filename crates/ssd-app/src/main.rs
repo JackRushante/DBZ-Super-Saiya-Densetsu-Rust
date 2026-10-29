@@ -172,6 +172,20 @@ struct Cli {
     /// With --bench-app: draw with the debug panel closed.
     #[arg(long, requires = "bench_app")]
     bench_panel_closed: bool,
+    /// With --bench-app: run exactly the speed's frames in every window frame (a steady 60 Hz clock) instead of the
+    /// flat-out batches, so the percentiles are those of a window frame.
+    #[arg(long, requires = "bench_app")]
+    bench_lockstep: bool,
+    /// With --bench-app: Latency Low (each frame's picture drawn and shown at once) instead of the default Smooth.
+    #[arg(long, requires = "bench_app")]
+    bench_low_latency: bool,
+    /// With --bench-app: the size of the offscreen target, `WIDTHxHEIGHT` [default: 1440x900].
+    #[arg(long, requires = "bench_app", value_name = "WxH", value_parser = parse_size)]
+    bench_size: Option<(u32, u32)>,
+    /// With --bench-app: also write the report to this file (Android has no standard output: its launch adds
+    /// `bench-report.txt` in the data folder). Replays given as relative paths are also looked for in the data folder.
+    #[arg(long, requires = "bench_app", value_name = "FILE")]
+    bench_report: Option<PathBuf>,
     /// The rules and visuals: `classic` (the original, the reference of the replays) or `enhanced`
     /// (the HD menus in the window and in UI snapshots) [default: classic].
     #[arg(long, value_enum, default_value_t = ModeArg::Classic)]
@@ -372,6 +386,10 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
             enhanced: enhanced.unwrap_or(HdOptions { scale: 4, look: Look::default() }),
             panel: !cli.bench_panel_closed,
             warm_up: cli.bench_warm_up,
+            lockstep: cli.bench_lockstep,
+            low_latency: cli.bench_low_latency,
+            size: cli.bench_size.unwrap_or(app::bench::SIZE),
+            report: cli.bench_report.clone(),
         };
         let switch = load_switch(&cli);
         return match app::bench::run(&rom, hooks.as_ref(), switch.as_ref(), &request) {
@@ -577,7 +595,7 @@ impl From<LookArg> for Look {
     }
 }
 
-/// `--ui-size`: `WIDTHxHEIGHT` in pixels, each side from 1 to [`snapshot::MAX_SIDE`].
+/// `--ui-size` and `--bench-size`: `WIDTHxHEIGHT` in pixels, each side from 1 to [`snapshot::MAX_SIDE`].
 fn parse_size(text: &str) -> Result<(u32, u32), String> {
     let (width, height) = text
         .split_once(['x', 'X'])
@@ -677,6 +695,29 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("ssd-recompiled").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn the_bench_options_parse() {
+        let cli = parse(&[
+            "--bench-app",
+            "a.ssdreplay",
+            "b.ssdreplay",
+            "--bench-lockstep",
+            "--bench-low-latency",
+            "--bench-size",
+            "2772x1272",
+            "--bench-report",
+            "report.txt",
+        ]);
+        assert_eq!(cli.bench_app.as_ref().map(Vec::len), Some(2));
+        assert!(cli.bench_lockstep && cli.bench_low_latency);
+        assert_eq!(cli.bench_size, Some((2772, 1272)));
+        assert_eq!(cli.bench_report, Some(PathBuf::from("report.txt")));
+        assert!(
+            parse_size("0x5").is_err() && parse_size("100").is_err() && parse_size("axb").is_err()
+        );
+        assert!(Cli::try_parse_from(["ssd-recompiled", "--bench-lockstep"]).is_err());
     }
 
     #[test]

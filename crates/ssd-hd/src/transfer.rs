@@ -56,21 +56,55 @@ struct Anchor {
 #[derive(Debug, Default)]
 pub(crate) struct Pairs {
     counts: FxHashMap<([u8; 3], [u8; 3]), u32>,
+    /// The pair of the pixels added last and how many there were in a row, not yet in `counts`: a
+    /// run of one pair (flat art, a gradient seen from far) is one entry, not a hash lookup for each pixel.
+    run: Option<(Pair, u32)>,
 }
 
 impl Pairs {
     /// The pixel whose colour was `reference` where the art was made and is `current` now.
     pub(crate) fn add(&mut self, reference: [u8; 3], current: [u8; 3]) {
-        *self.counts.entry((reference, current)).or_default() += 1;
+        match &mut self.run {
+            Some((pair, count)) if *pair == (reference, current) => *count += 1,
+            run => {
+                if let Some((pair, count)) = run.replace(((reference, current), 1)) {
+                    *self.counts.entry(pair).or_default() += count;
+                }
+            }
+        }
+    }
+
+    /// The pairs of both, each counted as many times as in both together.
+    pub(crate) fn merged(mut self, mut other: Self) -> Self {
+        self.settle();
+        other.settle();
+        if self.counts.len() < other.counts.len() {
+            std::mem::swap(&mut self.counts, &mut other.counts);
+        }
+        for (pair, count) in other.counts {
+            *self.counts.entry(pair).or_default() += count;
+        }
+        self
+    }
+
+    /// The run in `counts`.
+    fn settle(&mut self) {
+        if let Some((pair, count)) = self.run.take() {
+            *self.counts.entry(pair).or_default() += count;
+        }
     }
 
     /// Whether every pair keeps its colour: the transfer is the identity ([`Transfer::Same`]).
     pub(crate) fn is_identity(&self) -> bool {
-        self.counts.keys().all(|(reference, current)| same(*reference, *current))
+        self.counts
+            .keys()
+            .chain(self.run.iter().map(|(pair, _)| pair))
+            .all(|(reference, current)| same(*reference, *current))
     }
 
     /// The transfer of these pairs.
-    pub(crate) fn transfer(self) -> Transfer {
+    pub(crate) fn transfer(mut self) -> Transfer {
+        self.settle();
         let mut pairs: Vec<(Pair, u32)> = self.counts.into_iter().collect();
         if pairs.iter().all(|((reference, current), _)| same(*reference, *current)) {
             return Transfer::Same;
@@ -240,7 +274,10 @@ fn luma(rgb: [f32; 3]) -> f32 {
 /// A colour transfer sampled on a regular grid of the art's colours.
 #[derive(Debug)]
 pub(crate) struct Table {
-    nodes: Vec<[f32; 3]>,
+    /// The grid, a node (padded to four lanes) for each triple of levels.
+    nodes: Vec<[f32; 4]>,
+    /// For each level of a channel: the cell of the grid it falls in and how far into it.
+    steps: Box<[(u8, f32); 256]>,
 }
 
 impl Table {
@@ -252,30 +289,36 @@ impl Table {
             for g in 0..NODES {
                 for b in 0..NODES {
                     let art = [r as f32 * step, g as f32 * step, b as f32 * step];
-                    nodes.push(shepard(art, pairs));
+                    let [x, y, z] = shepard(art, pairs);
+                    nodes.push([x, y, z, 0.0]);
                 }
             }
         }
-        Self { nodes }
+        let steps = Box::new(std::array::from_fn(|level| {
+            let at = level as f32 * (NODES - 1) as f32 / 255.0;
+            let base = (at.floor() as usize).min(NODES - 2);
+            (base as u8, at - base as f32)
+        }));
+        Self { nodes, steps }
     }
 
+    /// The colour `art` becomes: the trilinear interpolation of the eight nodes around it. The
+    /// sums are taken in one fixed order, so the result is the same on any machine.
     fn apply(&self, art: [u8; 3]) -> [u8; 3] {
-        let at = art.map(|v| f32::from(v) * (NODES - 1) as f32 / 255.0);
-        let base = at.map(|v| (v.floor() as usize).min(NODES - 2));
-        let frac = [at[0] - base[0] as f32, at[1] - base[1] as f32, at[2] - base[2] as f32];
-        let node = |r: usize, g: usize, b: usize| self.nodes[(r * NODES + g) * NODES + b];
-        let mut out = [0.0_f32; 3];
+        let [(br, fr), (bg, fg), (bb, fb)] = art.map(|level| self.steps[usize::from(level)]);
+        let first = (usize::from(br) * NODES + usize::from(bg)) * NODES + usize::from(bb);
+        let cell = &self.nodes[first..=first + NODES * NODES + NODES + 1];
+        let (wr, wg, wb) = ([1.0 - fr, fr], [1.0 - fg, fg], [1.0 - fb, fb]);
+        let mut out = [0.0_f32; 4];
         for corner in 0..8_usize {
             let (dr, dg, db) = (corner & 1, corner >> 1 & 1, corner >> 2 & 1);
-            let weight = (if dr == 1 { frac[0] } else { 1.0 - frac[0] })
-                * (if dg == 1 { frac[1] } else { 1.0 - frac[1] })
-                * (if db == 1 { frac[2] } else { 1.0 - frac[2] });
-            let n = node(base[0] + dr, base[1] + dg, base[2] + db);
-            for c in 0..3 {
-                out[c] += n[c] * weight;
+            let weight = wr[dr] * wg[dg] * wb[db];
+            let node = cell[(dr * NODES + dg) * NODES + db];
+            for (sum, value) in out.iter_mut().zip(node) {
+                *sum += value * weight;
             }
         }
-        out.map(|v| (v + 0.5).clamp(0.0, 255.0) as u8)
+        [out[0], out[1], out[2]].map(|v| (v + 0.5).clamp(0.0, 255.0) as u8)
     }
 }
 
@@ -419,5 +462,115 @@ mod tests {
         for (pixel, &number) in rgba.as_chunks::<4>().0.iter().zip(&colours.number) {
             assert_eq!(mapped[usize::from(number)], transfer.apply([pixel[0], pixel[1], pixel[2]]));
         }
+    }
+
+    /// The first version of the table's lookup, the eight corners one by one.
+    fn apply_reference(nodes: &[[f32; 3]], art: [u8; 3]) -> [u8; 3] {
+        let at = art.map(|v| f32::from(v) * (NODES - 1) as f32 / 255.0);
+        let base = at.map(|v| (v.floor() as usize).min(NODES - 2));
+        let frac = [at[0] - base[0] as f32, at[1] - base[1] as f32, at[2] - base[2] as f32];
+        let node = |r: usize, g: usize, b: usize| nodes[(r * NODES + g) * NODES + b];
+        let mut out = [0.0_f32; 3];
+        for corner in 0..8_usize {
+            let (dr, dg, db) = (corner & 1, corner >> 1 & 1, corner >> 2 & 1);
+            let weight = (if dr == 1 { frac[0] } else { 1.0 - frac[0] })
+                * (if dg == 1 { frac[1] } else { 1.0 - frac[1] })
+                * (if db == 1 { frac[2] } else { 1.0 - frac[2] });
+            let n = node(base[0] + dr, base[1] + dg, base[2] + db);
+            for c in 0..3 {
+                out[c] += n[c] * weight;
+            }
+        }
+        out.map(|v| (v + 0.5).clamp(0.0, 255.0) as u8)
+    }
+
+    #[test]
+    fn the_table_lookup_equals_the_first_version_on_every_level_of_random_tables() {
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as u32
+        };
+        for _ in 0..3 {
+            // A table of a random set of anchors
+            let anchors: Vec<Anchor> = (0..(3 + next() % 20))
+                .map(|_| Anchor {
+                    reference: [next() as u8, next() as u8, next() as u8],
+                    current: [(next() % 256) as f32, (next() % 256) as f32, (next() % 256) as f32],
+                    weight: 1.0 + (next() % 50) as f32,
+                })
+                .collect();
+            let table = Table::new(&anchors);
+            let nodes: Vec<[f32; 3]> = table.nodes.iter().map(|n| [n[0], n[1], n[2]]).collect();
+            // Every level of each channel, with the others random, and random colours
+            for level in 0..=255_u8 {
+                for channel in 0..3 {
+                    let mut art = [next() as u8, next() as u8, next() as u8];
+                    art[channel] = level;
+                    assert_eq!(table.apply(art), apply_reference(&nodes, art), "{art:?}");
+                }
+            }
+            for _ in 0..20_000 {
+                let art = [next() as u8, next() as u8, next() as u8];
+                assert_eq!(table.apply(art), apply_reference(&nodes, art), "{art:?}");
+            }
+            for art in [[0, 0, 0], [255, 255, 255], [255, 0, 255], [0, 255, 0]] {
+                assert_eq!(table.apply(art), apply_reference(&nodes, art), "{art:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn runs_of_pairs_count_as_the_pairs_one_by_one() {
+        let mut state = 99_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as u32
+        };
+        let mut pairs = Pairs::default();
+        let mut plain: FxHashMap<Pair, u32> = FxHashMap::default();
+        for _ in 0..5000 {
+            let pair = ([(next() % 3) as u8, 5, 9], [(next() % 4) as u8, 1, 2]);
+            for _ in 0..=next() % 6 {
+                pairs.add(pair.0, pair.1);
+                *plain.entry(pair).or_default() += 1;
+            }
+        }
+        pairs.settle();
+        assert_eq!(pairs.counts, plain);
+        assert!(pairs.run.is_none());
+    }
+
+    #[test]
+    fn pairs_counted_in_pieces_and_merged_are_those_counted_at_once() {
+        let mut state = 4242_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as u32
+        };
+        let sequence: Vec<Pair> = (0..3000)
+            .map(|_| ([(next() % 5) as u8, 5, 9], [(next() % 4) as u8, (next() % 2) as u8, 2]))
+            .collect();
+        let mut whole = Pairs::default();
+        for &(reference, current) in &sequence {
+            whole.add(reference, current);
+        }
+        whole.settle();
+        let mut merged = Pairs::default();
+        for piece in sequence.chunks(317) {
+            let mut part = Pairs::default();
+            for &(reference, current) in piece {
+                part.add(reference, current);
+            }
+            merged = merged.merged(part);
+        }
+        merged.settle();
+        assert_eq!(merged.counts, whole.counts);
     }
 }

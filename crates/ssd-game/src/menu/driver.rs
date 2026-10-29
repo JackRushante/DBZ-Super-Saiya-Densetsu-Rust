@@ -501,6 +501,17 @@ impl Driver {
         &self.state.sidecar
     }
 
+    /// The four sidecar files of the save slots, to change from outside the game: the save editor re-keys the entries of a slot
+    /// it wrote ([`ssd_menus::saveedit::Commit::rekey`]).
+    pub fn sidecars_mut(&mut self) -> ssd_menus::saveedit::Sidecars<'_> {
+        ssd_menus::saveedit::Sidecars {
+            bags: &mut self.state.sidecar,
+            cheats: &mut self.state.cheat_sidecar,
+            mods: &mut self.state.mods_sidecar,
+            options: &mut self.state.option_slots,
+        }
+    }
+
     /// The bag, once it is bound.
     #[must_use]
     pub fn bag(&self) -> Option<&Bag> {
@@ -3115,11 +3126,11 @@ mod tests {
     /// A driver on the Video page with the cursor on the Aspect row.
     fn driver_on_video() -> (Driver, FakeMenu) {
         let (mut driver, menu) = driver_on_options(&saved_slots(&[0]));
-        for key in [Key::Tab, Key::Tab, Key::Down, Key::Down, Key::Down, Key::Down] {
+        for key in [Key::Tab, Key::Tab, Key::Down, Key::Down, Key::Down, Key::Down, Key::Down] {
             driver.key(key, &menu.wram());
         }
         assert_eq!(driver.nav().options_category(), Category::Video);
-        assert_eq!(driver.nav().options_row(), 4, "Aspect");
+        assert_eq!(driver.nav().options_row(), 5, "Aspect");
         (driver, menu)
     }
 
@@ -3189,7 +3200,7 @@ mod tests {
         for key in [Key::Down, Key::Right] {
             driver.key(key, &menu.wram());
         }
-        assert_eq!(driver.nav().options_row(), 6, "Scanlines");
+        assert_eq!(driver.nav().options_row(), 7, "Scanlines");
         assert_eq!(
             driver.nav().options_video_confirm(),
             None,

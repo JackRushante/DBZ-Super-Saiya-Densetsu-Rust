@@ -24,6 +24,7 @@ pub mod chapter;
 mod families;
 mod features;
 mod maps;
+mod party_boosts;
 mod progression;
 mod redirect;
 mod scaling;
@@ -211,6 +212,10 @@ mod tests {
                 "mod_fp_piccolo_bp_high",
                 "mod_enemy_scaling_stats",
                 "mod_enemy_scaling_exp",
+                "mod_enemy_scaling_pick",
+                "mod_party_guru",
+                "mod_party_porunga_level",
+                "mod_party_lunch",
             ]
         );
         for entry in &entries {
@@ -297,6 +302,10 @@ mod tests {
                 progression::PICCOLO_BP_HIGH_KEY,
                 scaling::STATS_KEY,
                 scaling::EXP_KEY,
+                scaling::PICK_KEY,
+                party_boosts::GURU_KEY,
+                party_boosts::PORUNGA_KEY,
+                party_boosts::LUNCH_KEY,
             ]
         );
     }

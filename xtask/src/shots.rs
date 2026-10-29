@@ -688,9 +688,9 @@ pub fn run(
                 continue;
             }
             match run.note_hd(machine.wram(), machine.frame_log(), *options) {
-                Some(shown) => {
+                Some(mut shown) => {
                     let (w, h) = (shown.picture.width, shown.picture.height);
-                    picture = Some((w, h, shown.picture.rgba));
+                    picture = Some((w, h, std::mem::take(&mut shown.picture.rgba)));
                     line = format!("frame {frame:6} hd {w}x{h}");
                 }
                 None => line = format!("frame {frame:6} hd not drawn"),

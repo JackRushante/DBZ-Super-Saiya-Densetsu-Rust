@@ -2788,6 +2788,29 @@ fn battle_suite(
             }
         }
     }
+    for &(name, object) in &PARTY_SCENARIOS {
+        if !only.is_empty() && !only.iter().any(|o| o == name) {
+            continue;
+        }
+        ran += 1;
+        let mut report = Report::default();
+        let result = if object == LAUNCH {
+            launch_scenario(rom, &starts, &labels, &mut report)
+        } else {
+            party_scenario(rom, &starts, &labels, object, &mut report)
+        };
+        if let Err(error) = &result {
+            report.check(false, &format!("the scenario failed: {error:#}"));
+        }
+        let ok = report.passed();
+        all_ok &= ok;
+        writeln!(out, "{} {name}", if ok { "ok  " } else { "FAIL" })?;
+        for (passed, what) in &report.lines {
+            if !passed {
+                writeln!(out, "       - {what}")?;
+            }
+        }
+    }
     writeln!(
         out,
         "menu-test battle: {ran} scenarios, {}",
@@ -2949,4 +2972,406 @@ fn battle_gohan(h: &mut Harness, r: &mut Report) -> anyhow::Result<()> {
     let before = units(h, 26);
     battle_use(h, r, 0)?;
     battle_finish(h, r, 26, before)
+}
+
+// --- the pack `party-boosts` against the original (suite `battle`): Guru, Porunga's level wish and Launch ------
+
+/// The scenarios of the example pack `examples/party-boosts`, with the object each uses.
+const PARTY_SCENARIOS: [(&str, u8); 3] =
+    [("party-guru", 6), ("party-porunga", 15), ("party-launch", 9)];
+
+/// The pack folder of the example.
+const PARTY_PACK: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/party-boosts");
+
+/// The bytes of a party record that the two effects change (flags, level, BP, maximum HP and KI, the byte copied from the
+/// level row, the EXP's bytes the level row sets) and its character.
+const PARTY_FIELDS: [u32; 15] =
+    [0x00, 0x02, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x18, 0x1C];
+
+/// What a party member is, as the effects change it: the fields of the record and the three bytes of its BP snapshot.
+type Member = Vec<u8>;
+
+/// The slots of the party (the first `$01BB` records in use) as [`Member`]s.
+fn party_members(h: &Harness) -> Vec<Member> {
+    let size = u32::from(h.byte(0x7E_01BB));
+    (0..size)
+        .map(|slot| d::PARTY_RECORDS + 32 * slot)
+        .filter(|&record| h.byte(record) & 0xC0 != 0)
+        .map(|record| {
+            let mut member: Vec<u8> = PARTY_FIELDS.iter().map(|&at| h.byte(record + at)).collect();
+            let snapshot = 0x7E_4C00 + 3 * u32::from(h.byte(record + 0x1C));
+            member.extend((0..3).map(|k| h.byte(snapshot + k)));
+            member
+        })
+        .collect()
+}
+
+/// A save state of the plain game made loadable on the image of a pack: the state has the ROM's CRC32 in its header
+/// (`ssd-oracle`'s `state.rs`: magic, format, the CRC32 of everything after it, then the ROM's CRC32), and the pack's image
+/// is the same ROM with the pack's data after it, so only that CRC32 and the CRC32 over it are written again.
+fn rebound(state: &[u8], image_crc32: u32) -> Vec<u8> {
+    let mut bytes = state.to_vec();
+    bytes[16..20].copy_from_slice(&image_crc32.to_le_bytes());
+    let covered = ssd_rom::crc32(&bytes[16..]);
+    bytes[12..16].copy_from_slice(&covered.to_le_bytes());
+    bytes
+}
+
+/// A battle harness on the image of the pack (`pack` set) or on the plain game, the bag bound to one unit of `object`.
+fn party_harness(
+    rom: &[u8],
+    starts: &Starts,
+    labels: &Labels,
+    object: u8,
+    pack: bool,
+) -> anyhow::Result<Harness> {
+    let mut machine = if pack {
+        let image = ssd_mod::build(rom, &[ssd_mod::Pack::open(Path::new(PARTY_PACK))?])?.bytes;
+        Machine::with_image(
+            image,
+            ssd_rom::crc32(rom),
+            Box::new(MemorySaveStore::default()),
+            ssd_oracle::DEFAULT_WRAM_SEED,
+        )?
+    } else {
+        (starts.fresh)()?
+    };
+    if pack {
+        machine.load_state(&rebound(&starts.state, machine.image_crc32()))?;
+    } else {
+        machine.load_state(&starts.state)?;
+    }
+    enhanced_hooks(&mut machine);
+    let mut driver = Driver::with_bag(labels.clone(), Rules::default(), Sidecar::empty())
+        .with_cheats(ssd_menus::cheats::CheatSidecar::empty());
+    let mut bag = Bag::new(Rules::default());
+    let story = labels.objects.get(usize::from(object)).is_some_and(|label| label.story);
+    bag.add(object, 0, Class::of(object, story)).map_err(|_| anyhow::anyhow!("bag full"))?;
+    let events = driver
+        .replay_event(ssd_game::menu::keeper::BIND_TAG, &bag.to_bytes(), machine.wram())
+        .map_err(anyhow::Error::msg)?;
+    apply_events(&mut machine, &events)?;
+    let mut h = Harness::new(machine, driver);
+    h.frames(20)?;
+    Ok(h)
+}
+
+/// The party before the use, given the room the effects need: every member in the party and nothing else in his flags (no
+/// boost, no mark), the byte at `+18` clear.
+fn party_ready(h: &mut Harness) -> anyhow::Result<()> {
+    let size = u32::from(h.byte(0x7E_01BB));
+    for slot in 0..size {
+        let record = d::PARTY_RECORDS + 32 * slot;
+        let flags = h.byte(record) & 0xC0;
+        h.machine.write_wram(record, &[flags])?;
+        h.machine.write_wram(record + 0x18, &[0])?;
+    }
+    Ok(())
+}
+
+/// Uses `object` from the bag on the party's member at `row` (the original's member window: Down `row` times, then A), and
+/// returns the party after the use has run its course. Porunga's second wish is the one chosen.
+fn party_use(
+    h: &mut Harness,
+    r: &mut Report,
+    object: u8,
+    row: usize,
+) -> anyhow::Result<Vec<Member>> {
+    battle_use(h, r, 0)?;
+    if object == 15 {
+        // The wishes window: wait for its step (6), Down to the second wish, A; then the member window (step 7): Down
+        // `row` times, A. The wish window opens a few frames after the use.
+        let wait_step = |h: &mut Harness, step: u8| -> anyhow::Result<()> {
+            for _ in 0..200 {
+                if h.byte(0x7E_073C) == step {
+                    return Ok(());
+                }
+                h.frame(Joypad::default())?;
+            }
+            bail!("the effect did not reach its step {step}")
+        };
+        wait_step(h, 6)?;
+        h.frames(20)?;
+        h.press(Joypad { down: true, ..Joypad::default() })?;
+        h.frames(20)?;
+        h.press(a())?;
+        wait_step(h, 7)?;
+        h.frames(20)?;
+        for _ in 0..row {
+            h.press(Joypad { down: true, ..Joypad::default() })?;
+            h.frames(20)?;
+        }
+        h.press(a())?;
+        // The growth animation, then the wishes again with the points left: B leaves them.
+        h.frames(400)?;
+        h.press(b())?;
+        h.frames(60)?;
+    }
+    h.answer()?;
+    h.frames(SETTLE)?;
+    Ok(party_members(h))
+}
+
+/// One object, with and without the pack, on a party of several members.
+///
+/// Without the pack the use changes only the member chosen. With the pack the chosen member ends as he does without it,
+/// and every other member ends as he does when the original's single use is made on him. For Guru, who works on the fighter
+/// whose turn it is, the other members' end is the formula of the original's step (BP + BP/2, at most 9 999 999, flags
+/// `$24`); the level wish is compared with the original's own use on each member in turn.
+fn party_scenario(
+    rom: &[u8],
+    starts: &Starts,
+    labels: &Labels,
+    object: u8,
+    r: &mut Report,
+) -> anyhow::Result<()> {
+    // The party before.
+    let mut h = party_harness(rom, starts, labels, object, false)?;
+    party_ready(&mut h)?;
+    let before = party_members(&h);
+    let size = before.len();
+    anyhow::ensure!(size >= 3, "the battle's party has {size} members: at least three are needed");
+
+    // The original: the single use on each member in turn (Guru: on the actor only).
+    let rows: Vec<usize> = if object == 6 { vec![0] } else { (0..size).collect() };
+    let mut single: Vec<Vec<Member>> = Vec::new();
+    for &row in &rows {
+        let mut h = party_harness(rom, starts, labels, object, false)?;
+        party_ready(&mut h)?;
+        single.push(party_use(&mut h, r, object, row)?);
+    }
+    // Who the use changed without the pack: exactly one member.
+    let changed: Vec<Vec<usize>> =
+        single.iter().map(|after| (0..size).filter(|&m| after[m] != before[m]).collect()).collect();
+    for (k, c) in changed.iter().enumerate() {
+        r.check(
+            c.len() == 1 && (object == 6 || c[0] == rows[k]),
+            &format!(
+                "without the pack the use (row {}) changes the chosen member only: {c:?}",
+                rows[k]
+            ),
+        );
+    }
+    let chosen = if object == 6 { changed[0].first().copied().unwrap_or(0) } else { 1 };
+
+    // The pack.
+    let mut h = party_harness(rom, starts, labels, object, true)?;
+    party_ready(&mut h)?;
+    let on = party_use(&mut h, r, object, chosen)?;
+    r.check(on.len() == size, "the party is the same size");
+    let k = if object == 6 { 0 } else { chosen };
+    r.check(
+        on[chosen] == single[k][chosen],
+        &format!(
+            "with the pack the chosen member (slot {chosen}) ends as he does without it: {:?} against {:?}",
+            on[chosen], single[k][chosen]
+        ),
+    );
+    for m in (0..size).filter(|&m| m != chosen) {
+        let expected = if object == 6 {
+            // The original's Guru step on member m: BP + BP/2 capped, boosted marks (bits 5 and 2).
+            let mut e = before[m].clone();
+            let bp = u32::from(e[2]) | u32::from(e[3]) << 8 | u32::from(e[4]) << 16;
+            let boosted = (bp + bp / 2).min(9_999_999);
+            e[2] = boosted as u8;
+            e[3] = (boosted >> 8) as u8;
+            e[4] = (boosted >> 16) as u8;
+            e[0] |= 0x24;
+            e
+        } else {
+            single[m][m].clone()
+        };
+        r.check(
+            on[m] == expected,
+            &format!(
+                "with the pack member {m} ends as the original's use on him: {:?} against {:?}",
+                on[m], expected
+            ),
+        );
+        r.check(on[m] != before[m], &format!("with the pack member {m} is changed"));
+    }
+    Ok(())
+}
+
+/// The object id of Launch. In a battle its Item screen (`01:8C63`) lets the normal effect (`01:E066`, the favourite attacks) happen
+/// three times in four, by `rng_seed_a`; otherwise the object becomes object 27 (`01:ECAA`, "attack everyone").
+const LAUNCH: u8 = 9;
+const LAUNCH_ALTERNATIVE: u8 = 27;
+/// The marks Launch's normal effect sets in a member's record: bit 4 of the flags and bit 3 of the byte `+18`.
+const LAUNCH_FLAGS: u8 = 0x10;
+const LAUNCH_MARK: u8 = 0x08;
+/// The places of those two bytes in a [`Member`] (the order of [`PARTY_FIELDS`]).
+const MEMBER_FLAGS: usize = 0;
+const MEMBER_MARK: usize = 13;
+
+/// A battle harness for Launch on the plain game or the image of the pack, the party ready and `offset` frames on: the start frame
+/// decides what `rng_seed_a` is when the Item screen rolls the one in four.
+fn launch_harness(
+    rom: &[u8],
+    starts: &Starts,
+    labels: &Labels,
+    pack: bool,
+    offset: u32,
+) -> anyhow::Result<Harness> {
+    let mut h = party_harness(rom, starts, labels, LAUNCH, pack)?;
+    party_ready(&mut h)?;
+    h.frames(offset)?;
+    Ok(h)
+}
+
+/// The first start frames (offsets) at which the plain game gives Launch its normal effect and its alternative effect: the object
+/// stays 9 or becomes 27 once the use has run its plan.
+fn launch_offsets(
+    rom: &[u8],
+    starts: &Starts,
+    labels: &Labels,
+) -> anyhow::Result<(Option<u32>, Option<u32>)> {
+    let (mut normal, mut alternative) = (None, None);
+    for offset in 0..64 {
+        let mut h = launch_harness(rom, starts, labels, false, offset)?;
+        battle_use(&mut h, &mut Report::default(), 0)?;
+        match h.byte(d::MENU_ITEM_ID) {
+            LAUNCH => normal = normal.or(Some(offset)),
+            LAUNCH_ALTERNATIVE => alternative = alternative.or(Some(offset)),
+            _ => {}
+        }
+        if normal.is_some() && alternative.is_some() {
+            break;
+        }
+    }
+    Ok((normal, alternative))
+}
+
+/// One use of Launch at `offset`, with `marked` (a member who is marked before the use, as a second use would find him), on the
+/// plain game or with the pack: the party before and after, and the object the use ran as (9 or 27).
+fn launch_use(
+    rom: &[u8],
+    starts: &Starts,
+    labels: &Labels,
+    r: &mut Report,
+    pack: bool,
+    offset: u32,
+    marked: Option<usize>,
+) -> anyhow::Result<(Vec<Member>, Vec<Member>, u8)> {
+    let mut h = launch_harness(rom, starts, labels, pack, offset)?;
+    if let Some(slot) = marked {
+        let record = d::PARTY_RECORDS + 32 * slot as u32;
+        let flags = h.byte(record) | LAUNCH_FLAGS;
+        h.machine.write_wram(record, &[flags])?;
+    }
+    let before = party_members(&h);
+    battle_use(&mut h, r, 0)?;
+    let object = h.byte(d::MENU_ITEM_ID);
+    h.answer()?;
+    h.frames(SETTLE)?;
+    Ok((before, party_members(&h), object))
+}
+
+/// Launch, with and without the pack, on a party of several members.
+///
+/// Normal effect: without the pack the use marks the acting member only (bit 4 of his flags, bit 3 of `+18`). With the pack he ends
+/// as he does without it, and every other member ends marked in the same two bytes, except one who was marked before: he is the
+/// original's refusal and is left as he is. Alternative effect (the one in four): the same with and without the pack, no record
+/// changes, so nobody is marked.
+fn launch_scenario(
+    rom: &[u8],
+    starts: &Starts,
+    labels: &Labels,
+    r: &mut Report,
+) -> anyhow::Result<()> {
+    let (normal, alternative) = launch_offsets(rom, starts, labels)?;
+    r.check(
+        normal.is_some() && alternative.is_some(),
+        &format!(
+            "both outcomes of the roll are found: normal {normal:?}, alternative {alternative:?}"
+        ),
+    );
+    let (Some(normal), Some(alternative)) = (normal, alternative) else { return Ok(()) };
+
+    // The normal effect without the pack.
+    let (before, single, object) = launch_use(rom, starts, labels, r, false, normal, None)?;
+    let size = before.len();
+    anyhow::ensure!(size >= 3, "the battle's party has {size} members: at least three are needed");
+    r.check(object == LAUNCH, "the roll gives the normal effect at that start frame");
+    let changed: Vec<usize> = (0..size).filter(|&m| single[m] != before[m]).collect();
+    r.check(
+        changed.len() == 1,
+        &format!("without the pack the use marks the acting member only: {changed:?}"),
+    );
+    let actor = changed.first().copied().unwrap_or(0);
+    let marks = |member: &Member| {
+        let mut marked = member.clone();
+        marked[MEMBER_FLAGS] |= LAUNCH_FLAGS;
+        marked[MEMBER_MARK] |= LAUNCH_MARK;
+        marked
+    };
+    r.check(
+        single[actor] == marks(&before[actor]),
+        &format!(
+            "the original sets bit 4 of the flags and bit 3 of +18 and nothing else: {:?} against {:?}",
+            single[actor], before[actor]
+        ),
+    );
+
+    // The normal effect with the pack.
+    let (on_before, on, object) = launch_use(rom, starts, labels, r, true, normal, None)?;
+    r.check(on_before == before, "the pack leaves the party as it is before the use");
+    r.check(object == LAUNCH, "with the pack the roll is the same: the normal effect");
+    r.check(
+        on[actor] == single[actor],
+        &format!("with the pack the acting member (slot {actor}) ends as he does without it"),
+    );
+    for m in (0..size).filter(|&m| m != actor) {
+        r.check(
+            on[m] == marks(&before[m]),
+            &format!(
+                "with the pack member {m} ends as the original makes one member: {:?} against {:?}",
+                on[m],
+                marks(&before[m])
+            ),
+        );
+    }
+
+    // A member who is marked already is the original's refusal: he is left as he is.
+    let other = (0..size).find(|&m| m != actor).unwrap_or(1);
+    let (marked_before, marked_plain, _) =
+        launch_use(rom, starts, labels, r, false, normal, Some(other))?;
+    let (_, marked_on, _) = launch_use(rom, starts, labels, r, true, normal, Some(other))?;
+    r.check(
+        marked_plain[other] == marked_before[other],
+        "without the pack the use leaves a member marked already as he is",
+    );
+    r.check(
+        marked_on[other] == marked_before[other],
+        &format!(
+            "with the pack member {other}, marked already, is refused as the original refuses: {:?}",
+            marked_on[other]
+        ),
+    );
+    for m in (0..size).filter(|&m| m != other) {
+        r.check(
+            marked_on[m][MEMBER_FLAGS] & LAUNCH_FLAGS != 0
+                && marked_on[m][MEMBER_MARK] & LAUNCH_MARK != 0,
+            &format!("with the pack member {m} is marked, the other one being refused"),
+        );
+    }
+
+    // The alternative effect (object 27) is the original's with the pack: nothing is marked, nothing in the records changes.
+    let (alt_before, alt_plain, object) =
+        launch_use(rom, starts, labels, r, false, alternative, None)?;
+    r.check(
+        object == LAUNCH_ALTERNATIVE,
+        "the roll gives the alternative effect at that start frame",
+    );
+    r.check(alt_plain == alt_before, "without the pack the alternative effect changes no record");
+    let (_, alt_on, object) = launch_use(rom, starts, labels, r, true, alternative, None)?;
+    r.check(
+        object == LAUNCH_ALTERNATIVE,
+        "with the pack the roll is the same: the alternative effect",
+    );
+    r.check(
+        alt_on == alt_before,
+        "with the pack the alternative effect still changes no record: nobody is marked",
+    );
+    Ok(())
 }

@@ -2440,6 +2440,29 @@ impl Machine {
         Ok(())
     }
 
+    /// Writes `bytes` into the cartridge's SRAM from `offset` (`$70:0000` onwards on the bus), between two frames: the host's
+    /// write (the save editor's), not the game's. The next [`Machine::flush_saves`] stores the SRAM. Not for a replay: a replay
+    /// starts from the SRAM it recorded.
+    ///
+    /// # Errors
+    ///
+    /// The cartridge has no SRAM, or the bytes do not fit it.
+    pub fn write_sram(&mut self, offset: usize, bytes: &[u8]) -> Result<(), String> {
+        let size = self.emu.peek_sram().map_or(0, <[u8]>::len);
+        if offset + bytes.len() > size {
+            return Err(format!(
+                "{} bytes at {offset:04X} do not fit the {size} bytes of SRAM",
+                bytes.len()
+            ));
+        }
+        self.emu.set_cpu_write_log(false);
+        for (address, &byte) in (0x70_0000_u32 + offset as u32..).zip(bytes) {
+            self.emu.bus_write(address, byte);
+        }
+        self.emu.set_cpu_write_log(self.cpu_write_log);
+        Ok(())
+    }
+
     /// Work RAM, 128 KiB (`$7E:0000` is index 0).
     #[must_use]
     pub fn wram(&self) -> &[u8] {
@@ -2492,6 +2515,8 @@ impl Machine {
     /// frames. On by default, and it survives a state load.
     pub fn set_compose_pixels(&mut self, on: bool) {
         self.emu.set_ppu_compose_pixels(on);
+        // (the frame is not copied for [`Machine::frame`] either while the PPU leaves it undrawn)
+        self.capture.skip_pixels = !on;
     }
 
     /// Turns the resampling of the audio on or off. With it off the sound chip runs as ever but
@@ -2682,6 +2707,7 @@ impl Machine {
             pixels: Vec::new(),
             size: self.capture.size,
             options: self.capture.options,
+            skip_pixels: self.capture.skip_pixels,
         };
         Self { is_verify_snapshot: true, ..self.copy_with_capture(capture) }
     }

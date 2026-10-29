@@ -1300,10 +1300,10 @@ fn usage() -> ExitCode {
         "       cargo run --release -p xtask -- hd-tour [--class a,b] [--maps [N,..]] [--groups [N,..]] [--replays [name,..]] [--menus] [--title] [--only part,..] [--out DIR] [--fresh] [--jobs N] [--stride N] [--frames N] [--seed N] [--config FILE] [--base SAVE] [--dump DIR[:EVERY]] [--gaps DIR] [--no-font] [--list] [--report]"
     );
     eprintln!(
-        "       cargo run --release -p xtask -- bench-hd [--frames N] [--pack DIR] [replay|dir...]"
+        "       cargo run --release -p xtask -- bench-hd [--frames N] [--pack DIR] [--check] [--sum] [replay|dir...]"
     );
     eprintln!(
-        "       cargo run --release -p xtask -- hd-skip-check [--frames N] [--pack DIR] [replay...]"
+        "       cargo run --release -p xtask -- hd-skip-check [--frames N] [--pack DIR] [--undrawn] [replay...]"
     );
     eprintln!(
         "       cargo run --release -p xtask -- bench-app [--frames N] [--speeds A,B] [--scale N] [--hooks MODE] [--panel-closed] [replay...]"

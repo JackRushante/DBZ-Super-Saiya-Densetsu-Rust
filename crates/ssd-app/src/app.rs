@@ -269,6 +269,18 @@ struct WindowState {
     turbo: crate::turbo::Turbo,
     /// A screenshot asked for, taken once the frame is drawn (windowed runs only).
     shot: Option<screenshot::Kind>,
+    /// The window frame being run starts where the picture shown left off: the Enhanced picture on show is that of the
+    /// frame the machine is at, so nothing was loaded, reset or stepped since (see [`window_frames`]).
+    continuous: bool,
+    /// The last frame run left the PPU's pixels undrawn (see [`may_skip_pixels`]): the picture is the one drawn from the
+    /// render log, and [`Machine::frame`] holds an older frame.
+    ppu_stale: bool,
+    /// The last frame run was one the Enhanced picture refuses with the PPU's pixels undrawn: the window keeps the
+    /// picture it had, for that one frame.
+    held_picture: bool,
+    /// The frames left in which the PPU draws its pixels whatever the run (see [`may_skip_pixels`]): a frame the
+    /// Enhanced picture refused was seen lately.
+    compose_hold: u32,
 }
 
 /// The time the frame loop spent in its first stages: the HD menu's driver, the machine's frames,
@@ -319,6 +331,10 @@ impl WindowState {
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(932.0, 430.0)),
             ),
             shot: None,
+            continuous: false,
+            ppu_stale: false,
+            held_picture: false,
+            compose_hold: 0,
         }
     }
 
@@ -373,6 +389,27 @@ fn hd_frame(
     // the table (a hook mode, the start of a recording) takes them out, so they go back before the frame.
     ensure_cheats(machine);
     hd.note_cheats(machine.wram());
+    // The save editor: it opens only when no replay plays or records, and a write it made goes to the machine's cartridge save
+    // (flushed to `ssd.sav` at once) before its sidecar files, which `take_editor_commit` re-keyed, are written.
+    hd.allow_editor(!playing && state.panel.replays.recording.is_none());
+    if let Some(commit) = hd.take_editor_commit() {
+        match machine.write_sram(0, &commit.sram) {
+            Ok(()) => save_sram(machine),
+            Err(error) => {
+                log::warn!("the save editor's write did not reach the cartridge save: {error}");
+            }
+        }
+        for (what, result) in [
+            ("bags", hd.save_sidecar()),
+            ("cheats", hd.save_cheats_sidecar()),
+            ("mod state", hd.save_mods_sidecar()),
+            ("options", hd.save_options_sidecar()),
+        ] {
+            if let Err(error) = result {
+                log::warn!("the save editor's {what} file was not written: {error:#}");
+            }
+        }
+    }
     let frame = hd.frame(machine.wram(), machine.sram(), live);
     let (write_bags, write_cheats, write_mods) = sidecar_writes(&frame, playing);
     let settings = frame.settings.clone().filter(|_| !playing);
@@ -795,6 +832,9 @@ enum Draw {
     /// a fast-forward shows its pictures a window frame late, so its drawing does not hold up the
     /// frames that follow.
     Later,
+    /// As [`Draw::Later`] for a run at its own speed (Latency Smooth): the picture of the frame before is waited for
+    /// when it is not done, so no frame is dropped, and the drawing of this one overlaps the next window frame's.
+    Next,
 }
 
 /// The 16:9 view of the frame that just ran, in Enhanced mode: the picture the window shows, and
@@ -813,11 +853,15 @@ fn note_view(state: &mut WindowState, machine: &Machine, draw: Draw) {
             Draw::Later => hd
                 .redraw_frame_hd_pipelined(machine.frame_log(), options)
                 .map(ssd_hd::world::SharedHd::new),
+            Draw::Next => hd
+                .redraw_frame_hd_next(machine.frame_log(), options)
+                .map(ssd_hd::world::SharedHd::new),
             _ => hd.note_frame_hd_shared(machine.wram(), machine.frame_log(), options),
         };
-        if matches!(draw, Draw::Again | Draw::Later) && view.is_none() {
-            if draw == Draw::Later {
-                // No picture came back yet: the window keeps showing the last one
+        if matches!(draw, Draw::Again | Draw::Later | Draw::Next) && view.is_none() {
+            if matches!(draw, Draw::Later | Draw::Next) || state.held_picture {
+                // No picture came back yet (or the frame is refused and the PPU did not draw it): the window keeps
+                // showing the last one
                 if let Some((frame, _)) = state.hd_view.as_mut() {
                     *frame = machine.frame_count();
                 }
@@ -832,10 +876,10 @@ fn note_view(state: &mut WindowState, machine: &Machine, draw: Draw) {
         return;
     }
     let view = match draw {
-        Draw::Again | Draw::Later => hd.redraw_frame(machine.frame_log()),
+        Draw::Again | Draw::Later | Draw::Next => hd.redraw_frame(machine.frame_log()),
         _ => hd.note_frame(machine.wram(), machine.frame_log()),
     };
-    if matches!(draw, Draw::Again | Draw::Later) && view.is_none() {
+    if matches!(draw, Draw::Again | Draw::Later | Draw::Next) && view.is_none() {
         return;
     }
     state.view = view.map(|view| (machine.frame_count(), view));
@@ -1043,6 +1087,9 @@ fn run_frames(
         && !state.hd.as_ref().is_some_and(hd::Hd::busy);
     state.fast_forward = fast_forward;
     let logging = state.hd.is_some() || machine.line_log_enabled();
+    // Whether the PPU may leave its pixels undrawn: the picture is drawn from the render log (the window frame starts
+    // where its last picture left off, and nothing needs the pixels)
+    let skip_pixels = state.continuous && may_skip_pixels(state, machine, session);
     for n in 0..frames {
         let started = Instant::now();
         // The turbo of the Controls page pulses a held A (and B) one machine frame at a time, here where the frame's
@@ -1058,9 +1105,12 @@ fn run_frames(
         // While the HD menu has the curtain, its presses are the frame's joypad (the game gets no
         // other buttons); otherwise the live joypad goes through.
         let (pad, events) = hd_frame(state, machine, session, live);
+        // The last frame of the window frame is the one that is shown. The PPU draws its pixels for it unless the
+        // picture is drawn from the log: then none is drawn, in a fast-forward's frames either
+        let shown = n + 1 == frames;
+        let compose = !skip_pixels && (shown || !fast_forward);
+        machine.set_compose_pixels(compose);
         if fast_forward {
-            let shown = n + 1 == frames;
-            machine.set_compose_pixels(shown);
             machine.set_line_log(logging && shown);
             machine.set_audio_resampling(n == 0 || every_sound);
         }
@@ -1078,6 +1128,9 @@ fn run_frames(
             break;
         }
         ran += 1;
+        if shown {
+            note_pixels(state, machine, compose);
+        }
         note_render(&mut state.history, machine);
         let noted = Instant::now();
         state.stages.history += noted - ran_at;
@@ -1088,21 +1141,108 @@ fn run_frames(
         }
         state.stages.hd += noted.elapsed();
     }
+    // Back to the whole of every frame, for the other runs (a state load, a single step)
+    machine.set_compose_pixels(true);
     if fast_forward {
-        // Back to the whole of every frame, for the other runs (a state load, a single step)
-        machine.set_compose_pixels(true);
         machine.set_audio_resampling(true);
     }
     Ok(ran)
+}
+
+/// The frames the PPU draws its pixels for after one the Enhanced picture refused (a mode of the screen it does not
+/// draw): the pixels are the picture then, and a screen like that lasts.
+const COMPOSE_HOLD: u32 = 120;
+
+/// Whether the frames about to run may leave the PPU's pixels undrawn (`Machine::set_compose_pixels`). In Enhanced
+/// mode the picture of every frame is drawn again from the render log, which the parity check shows equal to the PPU's,
+/// and nothing else reads the pixels. The PPU draws them all the same
+///
+/// * in Classic, and where the picture is not the Enhanced one at a scale (the 4:3 and 16:9 views without it);
+/// * while the log is off, or a frame the picture cannot be drawn from was seen lately (`compose_hold`);
+/// * while a recording runs, a routine is verified against the original, a breakpoint is set, or a single frame is
+///   stepped, and while a screenshot of the PPU's own frame is waiting: those read the frame as the PPU drew it;
+/// * when the window frame does not start where the picture on show left off (a state loaded, a reset, a new machine,
+///   the first frame: `WindowState::continuous`), which the caller checks.
+///
+/// The replays' verification (xtask) never leaves them undrawn: it runs the machine whole.
+fn may_skip_pixels(state: &WindowState, machine: &Machine, session: &Session) -> bool {
+    state.hd.is_some()
+        && state.scaled.is_some()
+        && state.compose_hold == 0
+        && !state.step_once
+        && state.shot != Some(screenshot::Kind::Frame)
+        && machine.line_log_enabled()
+        && machine.breakpoints().is_empty()
+        && !session.is_recording()
+        && !any_verify(machine)
+}
+
+/// Whether the Enhanced picture can draw `log`: a complete frame in the modes of the game (0, 1 and 7), not hi-res or
+/// interlaced. A frame that fails this is refused by the renderer (`ssd_hd::Unsupported`).
+fn drawable(log: Option<&ssd_oracle::FrameLog>) -> bool {
+    let Some(log) = log else { return false };
+    log.complete
+        && !log.h_hi_res
+        && !log.v_hi_res
+        && log.entries.iter().all(|entry| {
+            let regs = &entry.regs;
+            !(regs.interlaced || regs.pseudo_h_hi_res || regs.pseudo_obj_hi_res)
+                && matches!(regs.bg_mode, 0 | 1 | 7)
+        })
+}
+
+/// Notes what the frame shown left in the PPU's buffer: whether it is the frame (`composed`), and, when it is not and
+/// the Enhanced picture cannot draw the frame, that the window keeps its last picture for this one frame and that the
+/// PPU draws its pixels from now on for a while.
+fn note_pixels(state: &mut WindowState, machine: &Machine, composed: bool) {
+    state.ppu_stale = !composed;
+    let drawable = drawable(machine.frame_log());
+    state.held_picture = !composed && !drawable;
+    state.compose_hold = if drawable { state.compose_hold.saturating_sub(1) } else { COMPOSE_HOLD };
 }
 
 /// Draws the 16:9 view of the last frame run to its end: the picture the window shows for the
 /// frames it just ran ([`run_frames`] draws none).
 fn draw_shown(state: &mut WindowState, machine: &Machine) {
     let drawn = Instant::now();
-    let draw = if state.fast_forward { Draw::Later } else { Draw::Again };
+    let draw = if state.fast_forward {
+        Draw::Later
+    } else if drawn_next(state, machine) {
+        Draw::Next
+    } else {
+        Draw::Again
+    };
     note_view(state, machine, draw);
     state.stages.hd += drawn.elapsed();
+}
+
+/// Whether the picture of the frame just run is drawn while the next window frame runs and shown then (Latency
+/// Smooth). Not when it must be shown now: the picture on show was not that of the frame before (the first frame, a
+/// load, a reset), a single frame is stepped, a screenshot is waiting (the picture and the state beside it are one
+/// frame), a breakpoint is set, or a menu has the field (its curtain, a press under way): those draw the frame and
+/// show it at once.
+fn drawn_next(state: &WindowState, machine: &Machine) -> bool {
+    state.video.smooth
+        && state.scaled.is_some()
+        && state.continuous
+        && !state.step_once
+        && state.shot.is_none()
+        && machine.breakpoints().is_empty()
+        && state.hd.as_ref().is_some_and(Hd::field_free)
+}
+
+/// A window frame that runs no frame (paused) shows the picture of the last frame run, which Latency Smooth may still be
+/// drawing: waits for it. A picture of a machine that moved since (a state loaded) is dropped.
+fn settle_draw(state: &mut WindowState, machine: &Machine) {
+    let Some(hd) = state.hd.as_mut().filter(|hd| hd.drawing()) else { return };
+    let picture = hd.finish_drawing();
+    if let Some(picture) = picture
+        && current_hd_view(state.hd_view.as_ref(), machine).is_some()
+    {
+        let shared = ssd_hd::world::SharedHd::new(picture);
+        hd.note_field_picture(&shared);
+        state.hd_view = Some((machine.frame_count(), shared));
+    }
 }
 
 /// Runs the frames of one window frame while the machine runs: `frames` of them, or as many as the
@@ -1130,12 +1270,21 @@ fn window_frames(
     // takes, in one go, without waiting for the clock or drawing them.
     let burst = if state.hd.as_ref().is_some_and(hd::Hd::busy) { HD_BURST } else { 1 };
     let mut frames_run = 0_u32;
+    // The picture on show is that of the frame the machine is at (nothing moved it since): only then are the frames
+    // that follow drawn from where it left off
+    let started = current_hd_view(state.hd_view.as_ref(), machine).is_some();
+    state.continuous = started;
+    let mut rounds = 0_u32;
     for round in 0..burst {
         if round > 0 && !state.hd.as_ref().is_some_and(hd::Hd::busy) {
             break;
         }
         frames_run += run_frames(state, machine, session, symbols, pad, audio, frames)?;
+        // (the frames of a menu's press, behind its curtain, run from where the first left off)
+        state.continuous = false;
+        rounds += 1;
     }
+    state.continuous = started && rounds == 1;
     draw_shown(state, machine);
     audio.end_frame();
     state.step_once = false;
@@ -1816,7 +1965,10 @@ fn windowed_loop(
     let mut stats_start = pacer.next;
     let mut stats_frames = 0_u32;
     // The Performance Hint session of the window's frames (Android; elsewhere it only keeps its target).
-    let mut perf = crate::perf_hint::Session::new(pacer.frame_time);
+    // (the thread that draws the pictures in the background is one of them: it starts now so the session names it)
+    let draw_threads: Vec<i32> =
+        state.hd.as_mut().and_then(Hd::start_draw_worker).into_iter().collect();
+    let mut perf = crate::perf_hint::Session::new(pacer.frame_time, &draw_threads);
     // Android: set between the events that send the app to the background and bring it back. While it is set
     // nothing runs, and the event pump blocks (SDL waits there until the app is in the foreground again).
     #[cfg(target_os = "android")]
@@ -2118,6 +2270,9 @@ fn windowed_loop(
                 window_frames(&mut state, machine, session, &env, pad, &mut audio, requested)?;
             pacer.note_cost(frames_run, state.stages.frames());
             stats_frames += frames_run;
+        } else {
+            // Nothing ran: the picture on show is the last frame's, which Latency Smooth may still be drawing
+            settle_draw(&mut state, machine);
         }
         if std::mem::take(&mut state.video_apply) {
             video.set_fullscreen(state.video.fullscreen);
@@ -2203,6 +2358,7 @@ fn windowed_loop(
                 (scene.as_ref(), overlay.as_ref()),
                 hd_art,
                 machine,
+                state.ppu_stale,
             );
             match &result {
                 Ok((png, state)) => log::info!(
@@ -2239,6 +2395,7 @@ fn take_screenshot(
     (scene, overlay): (Option<&ssd_menus::DrawList>, Option<&ssd_menus::DrawList>),
     mut art: Option<&mut hd::Art>,
     machine: &Machine,
+    ppu_stale: bool,
 ) -> std::io::Result<(PathBuf, PathBuf)> {
     let (width, height, rgba) = match kind {
         screenshot::Kind::Window => video
@@ -2246,15 +2403,27 @@ fn take_screenshot(
                 ui::draw_game(ui, games, frame_layer(scene, overlay, art.as_deref_mut()));
             })
             .map_err(std::io::Error::other)?,
-        screenshot::Kind::Frame => {
-            let frame = machine.frame();
-            (frame.size.width, frame.size.height, screenshot::frame_rgba(&frame))
-        }
+        screenshot::Kind::Frame => original_frame(machine, ppu_stale),
     };
     let png =
         screenshot::save(&screenshot::folder(), screenshot::Stamp::now(), width, height, &rgba)?;
     let state = screenshot::save_state(&png, &machine.save_state())?;
     Ok((png, state))
+}
+
+/// The PPU's own frame as RGBA, with its size. When the PPU left the frame undrawn (`stale`: the picture on show was
+/// drawn from the render log) the frame is drawn from the log by the plain renderer, which the parity check shows
+/// equal to the PPU's.
+fn original_frame(machine: &Machine, stale: bool) -> (u32, u32, Vec<u8>) {
+    if stale
+        && let Some(log) = machine.frame_log()
+        && let Ok(frame) = ssd_hd::Renderer::new().render(log)
+    {
+        let rgba = frame.pixels.iter().flat_map(|c| [c.r, c.g, c.b, 255]).collect();
+        return (frame.width as u32, frame.height as u32, rgba);
+    }
+    let frame = machine.frame();
+    (frame.size.width, frame.size.height, screenshot::frame_rgba(&frame))
 }
 
 /// Windowed run: clock-paced at the core's target rate, audio queued to SDL, video via wgpu.
@@ -2722,6 +2891,59 @@ mod tests {
 
     fn window_state(hooks_switch: HooksSwitch) -> WindowState {
         WindowState::new(Controls::new(HooksArg::Original, hooks_switch, true, true))
+    }
+
+    /// A complete log of 224 lines with `lines` set to `regs` and nothing else.
+    fn log_of(regs: ssd_oracle::LineRegs, lines: u16) -> ssd_oracle::FrameLog {
+        ssd_oracle::FrameLog {
+            complete: true,
+            height: 224,
+            h_hi_res: false,
+            v_hi_res: false,
+            entries: (1..=lines)
+                .map(|scanline| ssd_oracle::LineEntry { scanline, regs, ..Default::default() })
+                .collect(),
+            cgram_start: vec![0; 256],
+            cgram_writes: Vec::new(),
+            vram: vec![0; 32768],
+            vram_writes: Vec::new(),
+            oam_low: vec![0; 512],
+            oam_high: vec![0; 32],
+            oam_writes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_frame_is_drawable_when_the_enhanced_renderer_does_not_refuse_it() {
+        use ssd_oracle::LineRegs;
+        let drawn = |log: &ssd_oracle::FrameLog| ssd_hd::Renderer::new().render(log).is_ok();
+        let mut cases = Vec::new();
+        for bg_mode in 0..=7 {
+            cases.push(log_of(LineRegs { bg_mode, ..LineRegs::default() }, 224));
+        }
+        for tweak in [
+            |regs: &mut LineRegs| regs.interlaced = true,
+            |regs: &mut LineRegs| regs.pseudo_h_hi_res = true,
+            |regs: &mut LineRegs| regs.pseudo_obj_hi_res = true,
+        ] {
+            let mut regs = LineRegs::default();
+            tweak(&mut regs);
+            // (from the middle of the frame on: the lines before are plain)
+            let mut log = log_of(LineRegs::default(), 100);
+            log.entries.extend(log_of(regs, 224).entries.split_off(100));
+            cases.push(log);
+        }
+        let mut incomplete = log_of(LineRegs::default(), 224);
+        incomplete.complete = false;
+        let mut h_hi_res = log_of(LineRegs::default(), 224);
+        h_hi_res.h_hi_res = true;
+        let mut v_hi_res = log_of(LineRegs::default(), 224);
+        v_hi_res.v_hi_res = true;
+        cases.extend([incomplete, h_hi_res, v_hi_res, log_of(LineRegs::default(), 0)]);
+        for (at, log) in cases.iter().enumerate() {
+            assert_eq!(drawable(Some(log)), drawn(log), "case {at}");
+        }
+        assert!(!drawable(None), "no log, no picture");
     }
 
     fn symbols_switch() -> HookSwitch {
@@ -3252,6 +3474,75 @@ mod tests {
         }
         *previous = pad;
         window_frames(state, machine, session, env, pad, audio, frames).unwrap();
+    }
+
+    /// Latency Smooth and the PPU's pixels left undrawn, on the window's own frame path with the real game: the work
+    /// RAM is the same as with the pixels drawn, the picture of each frame is the one the pixels-drawn run shows, and
+    /// Smooth shows it one window frame later (the first twice: it has nothing before it) and drops none.
+    #[test]
+    #[ignore = "needs SSD_ROM_PATH"]
+    fn smooth_latency_shows_the_same_pictures_one_window_frame_late_with_the_pixels_undrawn() {
+        let _guard = paths::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: serialised by ENV_LOCK.
+        unsafe { std::env::set_var("SSD_DATA_DIR", dir.path()) };
+        let rom = std::fs::read(std::env::var("SSD_ROM_PATH").expect("SSD_ROM_PATH")).unwrap();
+        let ruleset = Ruleset::enhanced();
+        let env = Env { rom: &rom, switch: None, verify: None };
+        let options = HdOptions { scale: 2, look: ssd_hd::Look::Crisp };
+        // The pictures on show after each window frame, whether the last frame left the pixels undrawn, the work RAM
+        let run = |smooth: bool, drawn: bool| -> (Vec<u32>, bool, Vec<u8>) {
+            let mut audio = audio::Audio::muted();
+            let mut session = Session::default();
+            let mut machine = new_machine(rom.clone(), None, &mut session).unwrap();
+            let mut state = WindowState::new(Controls::new(
+                HooksArg::Original,
+                HooksSwitch::Allowed,
+                false,
+                false,
+            ));
+            state.hd = hd_layer(&rom, ruleset).unwrap();
+            state.scaled = Some(options);
+            state.video.smooth = smooth;
+            if drawn {
+                state.compose_hold = u32::MAX;
+            }
+            machine.set_line_log(true);
+            let mut previous = Joypad::default();
+            let mut shown = Vec::new();
+            for _ in 0..300 {
+                window_step(
+                    &mut state,
+                    &mut machine,
+                    &mut session,
+                    &env,
+                    &mut audio,
+                    1,
+                    Joypad::default(),
+                    &mut previous,
+                );
+                let (frame, view) = state.hd_view.as_ref().expect("a picture is on show");
+                assert_eq!(*frame, machine.frame_count(), "and it is the machine's frame");
+                shown.push(ssd_rom::crc32(&view.picture.picture.rgba));
+            }
+            (shown, state.ppu_stale, machine.wram().to_vec())
+        };
+        let (reference, stale, wram) = run(false, true);
+        assert!(!stale, "the reference draws the pixels");
+        assert!(reference.windows(2).any(|pair| pair[0] != pair[1]), "the pictures change");
+        let (low, stale, low_wram) = run(false, false);
+        assert!(stale, "the PPU's pixels are left undrawn");
+        assert_eq!(low, reference, "and the pictures are the same");
+        assert_eq!(low_wram, wram, "and so is the game");
+        let (smooth, stale, smooth_wram) = run(true, false);
+        assert!(stale);
+        assert_eq!(smooth_wram, wram);
+        assert_eq!(smooth[0], reference[0]);
+        for (n, picture) in smooth.iter().enumerate().skip(1) {
+            assert_eq!(*picture, reference[n - 1], "window frame {n} shows the frame before it");
+        }
+        // SAFETY: serialised by ENV_LOCK.
+        unsafe { std::env::remove_var("SSD_DATA_DIR") };
     }
 
     /// Turbo on the window's own frame path with the real game: a held A reaches the game as the pulse the turbo makes

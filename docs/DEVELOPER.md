@@ -253,6 +253,35 @@ that the menu does not draw yet. Four objects (Yemma, Baba, 27 and Goku) have a 
 original fills from a message: the menu shows an ellipsis there. `menu-test items` checks all of this (the `pictures`
 check names each gap).
 
+### Save editor
+
+On the title screen (Enhanced mode, not while a replay plays or records) a small strip at the foot says "Select  Edit saves". Select
+opens the three save slots as the Save screen shows them; A opens a slot that holds a game (an empty slot has nothing to edit, a damaged
+one is refused), B goes back to the title. A slot opens on its pages, walked with L and R: **Party**, then the bag's **All**, **Allies**
+and **Tools**.
+
+- **Party.** Up and Down choose LV or BP, Left and Right change it (hold to repeat; a held BP speeds up to x10, x100 and x1000), L and R
+  change the member, Y gives the BP back to the game's own value for the level. The level goes from the character's first row to its cap
+  (47 for Goku, Piccolo and Vegeta, 48 for Gohan, Krillin, Tien, Yamcha and Chiaotzu, 3 for Dende; Vegeta starts at 17; Nail, Tsumuri
+  and Maima have no level table, so only their BP changes). A new level sets the max HP and KI and the EXP from the game's rows and fills
+  HP and KI. The BP stops at 9 999 999.
+- **BP as a delta.** The game's level-up adds the table's rows to a member's BP, so what a member has over the table for its level
+  ("+3000 over the game's") is kept by every level-up of the game: set Gohan to level 30 (the table's 16409) and add 3000, and the next
+  level he gains gives the table's BP for that level plus 3000. The editor keeps the delta when you change the level, and it is in the BP
+  itself, so Classic play keeps it too (Classic is the original and does the same add). A scene that assigns BP from a table (Piccolo's
+  return, the Super Saiyan transformation) sets its own value, as in the original.
+- **Bag.** Left and Right change the count of the stack under the cursor (0 removes the stack, 99 is the top, key items are one at a
+  time); X opens the picker of the 40 objects (Left and Right choose how many, L and R and Up and Down choose the object, A adds, Y
+  goes back to 1, B returns); Y removes the whole stack. The Moon, the D.Radar, Gohan, the N.Toad and the Dragon Balls are story
+  objects: adding or removing one asks first, with the cursor on Cancel.
+- **Finishing.** Start (or B, once something changed) asks "Write / Discard / Keep editing", with the cursor on Keep editing. Write
+  stores the slot as the game's Save does (mark, checksum, backup copy), and keeps the slot's bag, cheats, options and mod state linked
+  to it; the slot gets the CHEATS badge. Nothing is written until then. The edit is made in the machine's battery save and flushed to
+  `ssd.sav`.
+
+A refusal shows as one short line in the foot of the screen. With the touch controls the same buttons work (Select and Start are on
+the layout).
+
 ### Cheats (M5)
 
 In Enhanced mode the Menu list's Cheats entry opens the Cheats screen (original style, over the field; the original's
@@ -343,8 +372,10 @@ reads and writes the two files. A headless run (`--headless-frames`), a UI snaps
 replay (`--replay`) read neither and write neither; their settings stay in memory for that run.
 `menu show options` in a UI script checks the screen.
 
-The Video page (this PC, keys `video.display`, `video.scale`, `video.vsync`, `video.look`, `video.aspect`, `video.scanlines`,
-`video.crt`): Display (window or fullscreen), Scale (2x to 8x), V-Sync, Look (crisp or smooth), Aspect (16:9 shows the extra
+The Video page (this PC, keys `video.display`, `video.scale`, `video.vsync`, `video.latency`, `video.look`, `video.aspect`,
+`video.scanlines`, `video.crt`): Display (window or fullscreen), Scale (2x to 8x), V-Sync, Latency (Smooth, the default: the
+picture of a frame is drawn on its own thread while the next frame runs and shown one frame later, so a frame costs the longer of
+the two and not both; Low draws and shows each frame at once), Look (crisp or smooth), Aspect (16:9 shows the extra
 map at the sides, 4:3 shows only the original window), the size of the picture it gives, and two filters, Scanlines (light,
 strong) and CRT filter (soft, full). Every row works while the game runs. A change of display, scale or aspect asks "Apply
 video changes?": Keep writes it to `ssd.settings`, Revert (B) puts the old choice back, and after 10 s without an answer it
@@ -842,7 +873,7 @@ the first frame of that number that differs is described on stderr (partial rend
 The Enhanced picture at 1x (`ssd_hd::Renderer::render_hd`, scale 1) is compared with the PPU's frame in the same way
 (the `enhanced 1x` column; it must be the same frame).
 
-    cargo run --release -p xtask -- bench-hd [--frames N] [--pack DIR] [replay|dir...]
+    cargo run --release -p xtask -- bench-hd [--frames N] [--pack DIR] [--check] [--sum] [replay|dir...]
 
 times the drawing of the Enhanced picture: each replay (default `battle` and `wander` of `.work/replays`) is played with
 the render log on, and every frame is drawn at 1x, at 2x and at 4x (crisp) and at 4x (smooth); only the drawing is
@@ -853,9 +884,10 @@ their pictures as the window does (a frame whose inputs are those of the picture
 column counts those frames. `--check` also draws every frame of the 16:9 configurations afresh, with each table transfer
 applied to each colour as it is drawn, and fails when a shared picture differs from its fresh one. The default look at 4x
 is the budget of M6: a mean of at most 4 ms a frame, and the same for the 16:9 view with art on the target machine (99th
-percentile at most 8 ms).
+percentile at most 8 ms). `--sum` also prints, per replay and configuration, a checksum over every picture drawn, in order:
+two builds that draw the same pictures print the same sums (the check of a change to the drawing that must not change a pixel).
 
-    cargo run --release -p xtask -- hd-skip-check [--frames N] [--pack DIR] [replay|dir...]
+    cargo run --release -p xtask -- hd-skip-check [--frames N] [--pack DIR] [--undrawn] [replay|dir...]
 
 checks the fast-forward's shortcuts: at a speed above 1 the app runs the frames of a batch before the last without drawing
 the PPU's pixels, without the render log and without resampling their sound, follows the 16:9 view with the last two only
@@ -863,7 +895,9 @@ the PPU's pixels, without the render log and without resampling their sound, fol
 window frame late, and skipped when the picture before is still being drawn: `redraw_hd_pipelined`). Each replay (default `battle` and `wander`) is played with the render log on and
 drawn frame by frame (the reference); for each batch of 2, 4, 7, 8 and 16 frames a second machine plays it the app's way, and
 at the end of every batch its Enhanced picture, its PPU frame, its work RAM, CPU registers and master cycles must be the
-reference's. Exit 0 when everything is equal.
+reference's. Exit 0 when everything is equal. `--undrawn` leaves the PPU's pixels undrawn for every frame, the last of a batch
+too, as the app does in Enhanced mode at every speed (`may_skip_pixels`); no PPU frame is compared then, and the pictures,
+the work RAM, the registers and the master cycles still must be the reference's.
 
     cargo run --release -p xtask -- bench-app [--frames N] [--speeds A,B] [--scale N] [--hooks MODE] [--panel-closed] [replay...]
 
@@ -879,6 +913,13 @@ emulated frames per second, whether that holds 60 times the speed, and where a w
 (`emulate`: the machine and the HD menu's driver; `hd`: the 16:9 picture; `status`: the header's figures; `views`: the
 pictures chosen; `ui`: the interface run and the game texture uploaded; `paint`: the pass painted and submitted;
 `wait`: for the GPU) and the cores busy (the process's CPU time over the wall time).
+A second table gives the 50th, 95th and 99th percentile and the worst of each stage over the window frames, and how many were
+late (over 16.7 ms). `--bench-lockstep` runs exactly the speed's frames in every window frame (a steady 60 Hz clock) instead of
+the flat-out batches, `--bench-low-latency` runs Latency Low (each picture drawn and shown at once) instead of the default Smooth
+(drawn while the next frame runs; the `hd` column is then the wait for it), `--bench-size WxH` sets the offscreen target (1440x900 by
+default), and `--bench-report FILE` also writes the report to a file. On Android there is no standard output: put `--mode enhanced --hooks rust --bench-app <replays>` in
+`android-args.txt` (see "Android") and the report is written to `bench-report.txt` in the data folder; a relative replay path is
+also looked for there.
 
     cargo run --release -p xtask -- hd-wide check [--frames N] [--jobs N] [--widths A,B] [replay|dir...]
     cargo run --release -p xtask -- hd-wide shots [--widths A,B] [label=replay:frame...]

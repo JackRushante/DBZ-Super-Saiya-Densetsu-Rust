@@ -3,7 +3,7 @@
 
 use crate::Catalogue;
 use crate::translation::{self, Translation};
-use ssd_menus::{CharacterLabel, CommandLabel, Labels, ObjectLabel, StatusLabels};
+use ssd_menus::{CharacterLabel, CommandLabel, Growth, Labels, ObjectLabel, StatusLabels};
 
 /// The face index of each character, in the order of the catalogue's characters (the second byte of its party
 /// record, which the field menu uses for the corner face). Measured on the field menu: Goku 00, Piccolo 01, Gohan
@@ -60,7 +60,41 @@ pub fn labels(catalogue: &Catalogue) -> Labels {
             ally: catalogue.characters.iter().any(|c| c.name.trimmed() == item.name.trimmed()),
         })
         .collect();
-    Labels { characters, objects, status: status(catalogue) }
+    Labels { characters, objects, status: status(catalogue), growth: growth(catalogue) }
+}
+
+/// Vegeta's character id: the game never builds him below level 17 (`docs/re/data/free-progression.md`, F11).
+const VEGETA: u8 = 7;
+/// The lowest level of Vegeta.
+const VEGETA_FLOOR: u8 = 17;
+
+/// What each level gives each character (the save editor): the sums of the level rows, as `game::stats_at` has them, up to
+/// the character's cap.
+fn growth(catalogue: &Catalogue) -> Vec<Growth> {
+    catalogue
+        .characters
+        .iter()
+        .map(|character| {
+            let rows =
+                &character.levels[..character.levels.len().min(usize::from(character.level_cap))];
+            let (mut bp, mut ki) = (0_u32, 0_u32);
+            let mut out = Growth {
+                cap: character.level_cap,
+                min: if character.id == VEGETA { VEGETA_FLOOR } else { 1 },
+                ..Growth::default()
+            };
+            for row in rows {
+                bp += row.bp_gain;
+                ki += u32::from(row.ki_gain);
+                out.bp.push(bp);
+                out.max_ki.push(u16::try_from(ki).unwrap_or(u16::MAX));
+                out.max_hp.push(row.max_hp);
+                out.exp.push(row.exp_start);
+                out.byte_0e.push(row.unknown_0a);
+            }
+            out
+        })
+        .collect()
 }
 
 /// The tables of the Status screen: the commands' names and KI costs, the techniques each unit's list has, and the EXP
@@ -178,6 +212,7 @@ mod tests {
                 battle: true,
                 ..ObjectLabel::default()
             }],
+            growth: Vec::new(),
         };
         let table = Translation::parse(
             "key\tzh\nstring:0\t甲\nobject:0\t石頭\nhelp:0\t第一行\\n第二行{FC}\n",
@@ -198,6 +233,7 @@ mod tests {
             status: StatusLabels::default(),
             characters: vec![CharacterLabel { name: "Krillin".into(), face: None, class: None }],
             objects: vec![ObjectLabel::default()],
+            growth: Vec::new(),
         };
         assert_eq!(labels.characters[0].face, None);
     }

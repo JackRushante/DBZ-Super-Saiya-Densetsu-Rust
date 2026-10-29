@@ -49,16 +49,46 @@ party's level, and pays the EXP of that strength:
 
 - the party's level is the mean of its three highest fighters, and an enemy's own level is the level of its record;
 - its HP and KI are multiplied by `q`, its BP by `q^3`, the EXP it pays by `q^2`, and its level becomes the party's with the
-  difficulty, where `q = difficulty * (party level + 5) / (enemy level + 5)`;
+  difficulty, where `q = difficulty * (party level + 5) / (enemy level + 5)`; or, with the offsets below, the level the battle's
+  kind asks for in place of the difficulty's, where `q = (party level + offset + 5) / (enemy level + 5)`;
 - with the party at the enemy's own level and the `normal` difficulty every number is the original's, and the numbers rise and
   fall with the party's level, bosses included, with no floor at the original's numbers;
 - the fights the party must lose (the scripted losses of the cheats' list) are left as they are;
 - a BP past 24 bits is kept as the mod state's wide BP (`state.md`);
 - the enemy power cheat, the Options difficulty and the EXP cheat act on the scaled numbers, after it.
 
+The feature has two ways to be set, and a pack gives all the parameters of **one** of them (a manifest with keys of both is
+refused, and so is one that gives only part of a way). The same feature, `enemy_scaling`, takes both, so a pack written for the
+first keeps working as it did.
+
 | Parameter | Values | Meaning |
 |---|---|---|
-| `difficulty` | `easy`, `normal`, `hard` | The factor on the party's level that the enemies are made for: 7/8, 1 or 9/8. Easy is BP x0.67, HP and KI x0.875, EXP x0.77; hard is BP x1.42, HP and KI x1.125, EXP x1.27. |
+| `difficulty` | `easy`, `normal`, `hard` | The factor on the party's level that the enemies are made for: 7/8, 1 or 9/8. Easy is BP x0.67, HP and KI x0.875, EXP x0.77; hard is BP x1.42, HP and KI x1.125, EXP x1.27. Every battle gets the same factor. |
+
+or
+
+| Parameter | Range | Meaning |
+|---|---|---|
+| `random_offset` | -10 to 10 | The levels from the party's that a **random battle** is made for: the enemy is made for level `P + random_offset`, `P` being the party's level. |
+| `boss_offset` | -10 to 10 | The same for every **other battle**: the story's fights, the bosses and the scripted fights. |
+
+The target level is clamped to 1 to 200 (the enemy record's level is that level, and `q` is taken from it, so a party of level 3
+with `-10` meets enemies made for level 1). A few party levels, at the offsets of the example pack (`-3` and `+3`):
+
+| Party level `P` | A random battle is made for | A story or boss battle is made for |
+|---:|---:|---:|
+| 1 | 1 | 4 |
+| 3 | 1 | 6 |
+| 10 | 7 | 13 |
+| 30 | 27 | 33 |
+| 46 | 43 | 49 |
+
+**Which battles are "boss".** The game tells them apart by the road the battle took to start. A random battle is the one the
+roll of the map starts in its normal branch, which picks the group from the map's zone (`02:D34A`); every other battle is a "boss"
+battle: every battle a script starts (Raditz, Nappa, Vegeta, Zarbon, Dodoria, the Ginyu squad, Frieza's forms, the duels), the
+battles that the map's roll starts in its story branches (Frieza's first form and the fights of Ginyu's map), and
+a boss's next form. A story fight that waits for an HP threshold, the transformations and the scripted losses keep the exceptions
+they had (see `free-progression.md`).
 
 The feature is for the Enhanced mode only; the Classic game is not changed. `free-progression.md` is the design with its
 numbers, and the example pack `examples/enemy-scaling` (`pack.toml`, no data files) is the feature alone:
@@ -67,6 +97,15 @@ numbers, and the example pack `examples/enemy-scaling` (`pack.toml`, no data fil
 [[feature]]
 name = "enemy_scaling"
 difficulty = "normal"
+```
+
+and the offsets are, in the pack `free-progression` since its 0.3.0:
+
+```toml
+[[feature]]
+name = "enemy_scaling"
+random_offset = -3
+boss_offset = 3
 ```
 
 ### `free_progression`
@@ -105,3 +144,44 @@ moves the story. `docs/re/data/free-progression.md` lists every place the story 
 The feature is for the Enhanced mode only. The example pack `examples/free-progression` (`pack.toml`) enables it with
 `ginyu_arrival = 3`. It does not change the enemies, their stats or their rewards: a party that reaches a forced fight early meets it
 at the strength it has.
+
+### `party_boosts`
+
+Three objects of the Item screen that act on one fighter act on every fighter of the party. The object is used up once, as in the
+original; for the chosen fighter everything is the original's. For every other fighter of the party (the first `$01BB` records in
+use) the game runs its own code for the effect, with the same refusals, so the caps and rules are the game's:
+
+- **Guru** (BP +50 percent, "Raise BP by 50 percent."): a fighter who is boosted already is skipped; every other gets the boosted BP
+  (his BP plus half of it, at most 9 999 999) and the mark of a boost, and keeps it to the end of the battle, as the chosen one does.
+  King Kai's object, which shares the code, is not changed.
+- **Porunga's level wish** (the second wish of the Porunga object): a fighter who is at his level cap (47, 48 for Gohan, the cap table
+  of the original), who is marked as the original refuses, or who is Goku with the Kaioken on, is skipped; every other gets one level, the BP of
+  the level row and the growth of his maximum HP and KI, as the chosen one does. The wish's points and its mark are paid once.
+
+- **Launch** (the object that makes a fighter's attacks the favourite ones, which hit every enemy): in a battle the Item screen gives
+  Launch its normal effect three times in four; the other one in four it turns into another effect of its own ("attack everyone",
+  object 27), which is left as the original has it. The normal effect marks the fighter (bit 4 of his flags, and the mark beside his
+  name) and is refused for a fighter who is marked already. With `lunch = 1`, when it works, every other fighter who is not marked
+  gets the same mark, by the game's own step. Launch is for a battle only, as in the original: on the map it answers "can't use".
+
+A fighter who is knocked out is not refused by the original for any of the objects, so he is included. The objects are for a battle
+only, as in the original. The maximum HP and KI of the other fighters, and the BP of Guru, are put where the chosen fighter's
+animation ends (it is a picture of the chosen fighter, with a sound for each step); the values are the targets the game's own code
+computed for each fighter. Launch has no animation: the mark is complete for each fighter at once.
+
+| Parameter | Range | Meaning |
+|---|---|---|
+| `guru` | 0 or 1 | `1` makes Guru act on the whole party, `0` leaves it on the one fighter. |
+| `porunga_level` | 0 or 1 | `1` makes Porunga's level wish act on the whole party, `0` leaves it on the one fighter. |
+| `lunch` | 0 or 1 | `1` makes Launch's normal effect (the favourite attacks) act on the whole party, `0` leaves it on the one fighter. |
+
+The feature is for the Enhanced mode only; the Classic game is not changed. The example pack `examples/party-boosts` (`pack.toml`, no
+data files) enables all three.
+
+```toml
+[[feature]]
+name = "party_boosts"
+guru = 1
+porunga_level = 1
+lunch = 1
+```

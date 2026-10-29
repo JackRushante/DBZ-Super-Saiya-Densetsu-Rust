@@ -18,6 +18,21 @@ fn target_nanos(period: Duration) -> i64 {
     nanos(period).max(1)
 }
 
+/// The id of the calling thread for a Performance Hint session (`None` where there is no such API: only Android has
+/// one). The thread that draws the pictures in the background gives its id to [`Session::new`] this way.
+#[must_use]
+pub fn current_thread() -> Option<i32> {
+    #[cfg(target_os = "android")]
+    {
+        // SAFETY: `gettid` takes no argument and cannot fail.
+        Some(unsafe { libc::gettid() })
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        None
+    }
+}
+
 /// The Performance Hint session of the window loop: made when the loop starts, closed when it ends.
 pub struct Session {
     /// The target work duration in nanoseconds that the session has now.
@@ -27,15 +42,19 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session for a window whose frames have the period `period`, on this thread and the threads of rayon's global
-    /// pool (the pool that draws the pictures). Empty when the system has no such API or refuses the session.
+    /// A session for a window whose frames have the period `period`, on this thread, the threads of rayon's global
+    /// pool (the pool that draws the pictures) and `threads`, the ids of the other threads that work for the frame
+    /// (the one that draws the picture in the background: [`current_thread`]). Empty when the system has no such API
+    /// or refuses the session.
     #[must_use]
-    pub fn new(period: Duration) -> Self {
+    pub fn new(period: Duration, threads: &[i32]) -> Self {
         let target_ns = target_nanos(period);
+        #[cfg(not(target_os = "android"))]
+        let _ = threads;
         Self {
             target_ns,
             #[cfg(target_os = "android")]
-            live: android::Live::open(target_ns),
+            live: android::Live::open(target_ns, threads),
         }
     }
 
@@ -128,19 +147,21 @@ mod android {
 
     impl Live {
         /// The session, or `None` when the system has no such API or refuses it.
-        pub fn open(target_ns: i64) -> Option<Self> {
+        pub fn open(target_ns: i64, threads: &[i32]) -> Option<Self> {
             let api = api()?;
             // SAFETY: a call into `libandroid.so` without arguments.
             let manager = unsafe { (api.get_manager)() };
             if manager.is_null() {
                 return None;
             }
-            // This thread runs the window's frames, and the pool draws the pictures. The workers of the global pool live
+            // This thread runs the window's frames, the worker thread draws the picture in the background, and the pool
+            // draws the pictures' lines. The workers of the global pool live
             // as long as the process, as a session needs. `broadcast` makes the pool first when the first picture has
             // not, with the pool's usual size, and returns once every worker has reported its id.
             // SAFETY: `gettid` takes no argument and cannot fail.
             let mut tids = vec![unsafe { libc::gettid() }];
             tids.extend(rayon::broadcast(|_| unsafe { libc::gettid() }));
+            tids.extend_from_slice(threads);
             // SAFETY: `tids` holds `len` thread ids of this process, and it lives across the call.
             let session =
                 unsafe { (api.create_session)(manager, tids.as_ptr(), tids.len(), target_ns) };
@@ -190,7 +211,7 @@ mod tests {
     #[test]
     fn a_session_takes_the_period_of_its_window_as_its_target() {
         let period = Duration::from_micros(16_639);
-        let mut session = Session::new(period);
+        let mut session = Session::new(period, &[]);
         assert_eq!(session.target_ns, 16_639_000);
         session.report_frame(Duration::from_millis(4), period);
         assert_eq!(session.target_ns, 16_639_000);
