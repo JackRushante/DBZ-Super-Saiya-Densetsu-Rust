@@ -378,6 +378,10 @@ pub struct ArtStats {
 pub struct FieldMapArt {
     pub available: Option<u32>,
     pub bound: Option<u32>,
+    /// The tiles of the art the frame read as it was drawn: no read ahead had brought them.
+    pub read: u32,
+    /// The tiles of the art the reading thread brought since the frame before (read ahead).
+    pub read_ahead: u32,
 }
 
 /// The Mode 7 plane a frame shows: the matrix of each line (by scanline; `None` for a line that
@@ -452,7 +456,7 @@ pub(crate) struct ArtState {
     /// The field maps' art: the source of the layer shown, and the tiles of art read at the
     /// picture's scale, by layer and tile.
     field_sources: FxHashMap<u32, Option<Arc<Image>>>,
-    field_tiles: FxHashMap<(u32, u16, u16), Option<Arc<Image>>>,
+    field_tiles: field::FieldTiles,
     /// The Mode 7 plane's art, by the index of the entry.
     plane_arts: FxHashMap<u32, Option<Arc<crate::mode7art::PlaneArt>>>,
     /// The plane the frame shows (see [`ArtState::begin_bg`]): the matrix of each line, by
@@ -533,7 +537,7 @@ impl ArtState {
             conditions: Conditions::default(),
             bg_images: FxHashMap::default(),
             field_sources: FxHashMap::default(),
-            field_tiles: FxHashMap::default(),
+            field_tiles: field::FieldTiles::default(),
             plane_arts: FxHashMap::default(),
             plane: None,
             cgram: Vec::new(),
