@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.15 (2026-11-16)
+
+### Features
+
+- **The touch MENU from a gamepad (Android, Remastered).** Select + Start held for two seconds opens the MENU, the one of the
+  touch MENU button and the back key, with Restart game and Quit on its GAME page, so a player with only a gamepad (a handheld,
+  a phone with a pad) can always reach them. While the two are held together the game sees neither; a press of one alone still
+  reaches the game, 100 ms late. The MENU's windows work with the pad: the d-pad moves a frame between the buttons, A presses
+  (Restart and Quit ask a second press), B goes back. While a gamepad hides the touch controls, a tap on the screen brings them
+  back until a button of the pad is pressed. Classic keeps its own Select + Start (the Mode page). A desktop run has no MENU
+  and is unchanged.
+- **Options > Video > HD art: On or Off.** Off draws the original sprites and tiles in Remastered, so the Look (Crisp, Smooth or
+  Pixel) applies to the whole picture: Off with Pixel is the original picture in square blocks. The art is loaded when the game
+  starts, so the row takes effect at the next start (on Android MENU > Game > Restart game). Saved as `video.hd_art=0` in
+  `ssd.settings`; older files keep the art on. `--no-hd-art` still turns it off for a run.
+
+### Fixes
+
+- The touch MENU opened by the back key while a gamepad (or Hide controls) hid the controls was not drawn: the game paused
+  behind an invisible window. Its windows are now drawn whether the controls show or not.
+
 ## 0.3.14 (2026-11-16)
 
 ### Features

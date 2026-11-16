@@ -70,6 +70,14 @@ pub const ROWS: &[RowDef] = &[
         source: Source::Stored { default: 0 },
     },
     RowDef {
+        key: HD_ART,
+        label: "HD art",
+        group: "Picture",
+        help: "Off draws the original sprites and tiles, in the Look. Applied at the next start (Android: MENU > Game > Restart game).",
+        kind: Kind::Choice(&["Off", "On"]),
+        source: Source::Stored { default: 1 },
+    },
+    RowDef {
         key: "video.aspect",
         label: "Aspect",
         group: "Picture",
@@ -106,6 +114,16 @@ pub const ROWS: &[RowDef] = &[
 /// A line under the rows, if the page has one.
 pub const NOTE: Option<&str> =
     Some("Changes ask for confirmation and revert after 10 s if you do not keep them.");
+
+/// The key of the HD art row: On (1, the default) draws the art of the HD pack, Off (0) the original picture in the look.
+pub const HD_ART: &str = "video.hd_art";
+
+/// Whether the HD art is on in `values` (on when nothing is stored). The art is loaded when the game starts, so a change
+/// takes effect at the next start.
+#[must_use]
+pub fn hd_art_on(values: &Values) -> bool {
+    index(values, HD_ART) == 1
+}
 
 /// The index of the row `key` in `values` (its default when nothing is stored).
 #[must_use]
@@ -201,7 +219,7 @@ mod tests {
     fn the_picture_size_follows_the_scale_and_the_aspect() {
         assert_eq!(picture_size(2, 0), (372 * 4, 224 * 4));
         assert_eq!(picture_size(0, 1), (512, 448));
-        assert_eq!(size_text(&[0, 4, 0, 1, 0, 1, 0, 0, 0]), "1536 x 1344", "6x, 4:3");
+        assert_eq!(size_text(&[0, 4, 0, 1, 0, 1, 1, 0, 0, 0]), "1536 x 1344", "6x, 4:3");
     }
 
     #[test]
@@ -236,6 +254,30 @@ mod tests {
     #[test]
     fn the_rows_have_three_groups_and_one_read_only_line() {
         let infos = ROWS.iter().filter(|row| row.kind == Kind::Info).count();
-        assert_eq!((infos, ROWS.len()), (1, 9));
+        assert_eq!((infos, ROWS.len()), (1, 10));
+    }
+
+    #[test]
+    fn the_hd_art_is_on_unless_the_file_says_off_and_an_old_file_keeps_it_on() {
+        // A file written before the row: no key, the art is on.
+        let old = Values::from_text("ssd-settings 1\nvideo.look=2\nvideo.scale=3\n").unwrap();
+        assert!(hd_art_on(&old));
+        assert!(hd_art_on(&Values::new()));
+        let row = ROWS.iter().find(|row| row.key == HD_ART).unwrap();
+        assert_eq!((row.label, row.group), ("HD art", "Picture"));
+        assert!(matches!(row.kind, Kind::Choice(["Off", "On"])));
+        // Off is saved, read back and kept beside the other keys; On again reads on.
+        let mut values = old.clone();
+        row.set(&mut values, &mut Cheats::neutral(), 0);
+        let text = values.to_text();
+        assert!(text.contains("video.hd_art=0\n"), "{text}");
+        let read = Values::from_text(&text).unwrap();
+        assert!(!hd_art_on(&read));
+        assert_eq!((index(&read, "video.look"), index(&read, "video.scale")), (2, 3));
+        let mut values = read;
+        row.set(&mut values, &mut Cheats::neutral(), 1);
+        assert!(hd_art_on(&Values::from_text(&values.to_text()).unwrap()));
+        // A wild value is clamped to On, the last choice.
+        assert!(hd_art_on(&Values::from_text("ssd-settings 1\nvideo.hd_art=7\n").unwrap()));
     }
 }

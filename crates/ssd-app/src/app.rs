@@ -468,6 +468,22 @@ fn hd_frame(
     (pad, events)
 }
 
+/// The keys of the touch MENU's windows pressed since `previous`: the d-pad, A and B, as the HD menus read them.
+fn touch_keys(previous: Joypad, now: Joypad) -> Vec<touch::PadKey> {
+    hd::keys_pressed(previous, now)
+        .into_iter()
+        .filter_map(|key| match key {
+            ssd_menus::Key::Up => Some(touch::PadKey::Up),
+            ssd_menus::Key::Down => Some(touch::PadKey::Down),
+            ssd_menus::Key::Left => Some(touch::PadKey::Left),
+            ssd_menus::Key::Right => Some(touch::PadKey::Right),
+            ssd_menus::Key::Confirm => Some(touch::PadKey::Confirm),
+            ssd_menus::Key::Cancel => Some(touch::PadKey::Back),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A finger's place in SDL's normalised window coordinates, in egui points.
 fn touch_point(video: &video::Video, x: f32, y: f32) -> egui::Pos2 {
     let screen = video.screen_points();
@@ -1930,6 +1946,8 @@ fn windowed_loop(
     let mut shape_buffer: Vec<u8> = Vec::new();
     let mut ui_input = InputAdapter::default();
     let mut hd_previous = Joypad::default();
+    // The pad as the touch MENU's windows last saw it (their keys are the presses since).
+    let mut touch_previous = Joypad::default();
     let mut actions: Vec<PanelAction> = Vec::new();
     let mut fps = FpsCounter::default();
     let mut audio = audio::Audio::open(&sdl);
@@ -2069,6 +2087,7 @@ fn windowed_loop(
                     state.touch.finger_up(finger_id as i64, true);
                 }
                 Event::GamepadButtonDown { button, .. } => {
+                    state.touch.pad_used();
                     if let Some(device) = state.hd.as_ref().and_then(Hd::listening) {
                         if let (Some(capture), Some(hd)) =
                             (bindings::capture_button(device, button), state.hd.as_mut())
@@ -2179,7 +2198,25 @@ fn windowed_loop(
             input.clear();
         }
         // The game does not see the keys a text field is typing.
-        let pad = if video.text_focus() { Joypad::default() } else { input.joypad() };
+        let mut pad = if video.text_focus() { Joypad::default() } else { input.joypad() };
+        if state.touch.enabled && state.hd.is_some() {
+            // Enhanced: Select + Start held for two seconds opens the touch MENU (the game sees neither while both are held).
+            (pad.select, pad.start) = state.touch.chord(Instant::now(), pad.select, pad.start);
+        }
+        if state.touch.enabled && state.touch.mode != touch::Mode::Play {
+            // A window of the touch MENU is up: the pad moves its cursor, and the game (paused) and the HD menus see nothing.
+            for key in touch_keys(touch_previous, pad) {
+                state.touch.pad_key(key);
+            }
+            touch_previous = pad;
+            if state.touch.mode == touch::Mode::Play {
+                // The press that closed it is let go, so the game does not get it.
+                input.clear();
+            }
+            pad = Joypad::default();
+        } else {
+            touch_previous = pad;
+        }
         // The keys of the host are the HD's navigation while the HD has the curtain; the game only
         // sees them when it has no curtain (the driver ignores them otherwise).
         if let Some(hd) = state.hd.as_mut() {

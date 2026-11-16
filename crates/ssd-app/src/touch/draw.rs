@@ -178,11 +178,21 @@ pub fn paint(p: &Painter, t: &Touch) {
             p.rect_stroke(r, radius(22.0), Stroke::new(2.0, alpha(CREAM, a)), StrokeKind::Inside);
             label(p, r.center(), "...", 18.0, alpha(CREAM, a + 0.2));
         }
-        return;
+    } else if t.visible() {
+        controls(p, t);
     }
-    if !t.visible() {
-        return;
+    // The MENU's windows show whether the controls do or not (the back key or Select + Start opens them from a pad).
+    if let Some(panel) = t.panel() {
+        if t.mode != Mode::Edit {
+            p.rect_filled(geo.screen, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 110));
+        }
+        window(p, t, &panel);
     }
+}
+
+/// The buttons of the controls, and in the edit mode the box of the group selected.
+fn controls(p: &Painter, t: &Touch) {
+    let geo = t.geometry();
     if let Some(zone) = geo.stick_zone {
         // The stick's zone is a hint while idle; in the edit mode it is the group's box.
         stick(p, t, zone);
@@ -208,12 +218,6 @@ pub fn paint(p: &Painter, t: &Touch) {
             p.rect_filled(h, 0.0, ORANGE);
             p.rect_stroke(h, 0.0, Stroke::new(2.0, CREAM), StrokeKind::Inside);
         }
-    }
-    if let Some(panel) = t.panel() {
-        if t.mode != Mode::Edit {
-            p.rect_filled(geo.screen, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 110));
-        }
-        window(p, t, &panel);
     }
 }
 
@@ -246,6 +250,15 @@ fn window(p: &Painter, t: &Touch, panel: &Panel) {
         };
         p.rect_filled(b.rect, 0.0, fill);
         p.rect_stroke(b.rect, 0.0, Stroke::new(2.0, line), StrokeKind::Inside);
+        if t.focus == Some(b.id) {
+            // The gamepad's cursor: a dark frame around the button.
+            p.rect_stroke(
+                b.rect.expand(2.0),
+                0.0,
+                Stroke::new(3.0, TEXT_DARK),
+                StrokeKind::Outside,
+            );
+        }
         let centred = matches!(b.id, PBtn::SizeDown | PBtn::SizeUp | PBtn::OpDown | PBtn::OpUp);
         let mut size = if centred { 22.0 } else { 17.0 };
         // Long labels shrink to fit the button.

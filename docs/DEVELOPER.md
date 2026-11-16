@@ -384,15 +384,19 @@ reads and writes the two files. A headless run (`--headless-frames`), a UI snaps
 replay (`--replay`) read neither and write neither; their settings stay in memory for that run.
 `menu show options` in a UI script checks the screen.
 
-The Video page (this PC, keys `video.display`, `video.scale`, `video.vsync`, `video.latency`, `video.look`, `video.aspect`,
-`video.scanlines`, `video.crt`): Display (window or fullscreen), Scale (2x to 8x), V-Sync, Latency (Smooth, the default: the
+The Video page (this PC, keys `video.display`, `video.scale`, `video.vsync`, `video.latency`, `video.look`, `video.hd_art`,
+`video.aspect`, `video.scanlines`, `video.crt`): Display (window or fullscreen), Scale (2x to 8x), V-Sync, Latency (Smooth, the default: the
 picture of a frame is drawn on its own thread while the next frame runs and shown one frame later, so a frame costs the longer of
 the two and not both; Low draws and shows each frame at once), Look (Crisp, Smooth or Pixel: Pixel has no filter, each pixel of the original
 a square block; the window shows it, as Smooth, with linear filtering, so the blocks keep one size on a screen that is not
 a whole multiple of the picture and only their edges are blended, about one pixel of the screen: a "sharp bilinear"; the HD
-art is the same in the three looks, a look changes only what the art does not cover), Aspect (16:9 shows the extra
+art is the same in the three looks, a look changes only what the art does not cover), HD art (On, the default, or Off: the
+original sprites and tiles, so the look applies to the whole picture; Off with Pixel is the original picture in square blocks;
+`video.hd_art=0`, a file without the key is On; the art is loaded when the game starts, so the row takes effect at the next
+start, and `--no-hd-art` turns it off for one run whatever the row says), Aspect (16:9 shows the extra
 map at the sides, 4:3 shows only the original window), the size of the picture it gives, and two filters, Scanlines (light,
-strong) and CRT filter (soft, full). Every row works while the game runs. A change of display, scale or aspect asks "Apply
+strong) and CRT filter (soft, full). Every row but HD art works while the game runs. The page's ten rows are drawn tight (a row as
+high as its choice boxes, `screens::OPT_ROW_TIGHT`), as is any page whose rows would not fit the window, and its note is left out. A change of display, scale or aspect asks "Apply
 video changes?": Keep writes it to `ssd.settings`, Revert (B) puts the old choice back, and after 10 s without an answer it
 reverts (the cursor starts on Revert). A `--hd-scale` or `--enhanced-look` flag wins for its run until that very row is
 changed on the page; headless runs, snapshots and replays ignore the saved file. Scanlines, the CRT filter and the 4:3 crop
@@ -598,7 +602,13 @@ controls' alone.
 - MENU pauses: Save state and Load state (the current slot; State slot picks it, 1 to 4), Options (the touch options), Edit layout, Hide controls (a chip
   at the top right brings them back), Resume, and a GAME page with Restart game and Quit, each on a second tap (the play
   since the last save is lost; on Android the launch loop starts the game again, `android_setup::Forced::Relaunch`). The
-  Android back key opens it too.
+  Android back key opens it too, and so does Select + Start held for two seconds in Enhanced (`touch/chord.rs`; Classic keeps
+  its own Select + Start, the Mode page): while the two are held together the game sees neither, and a press of one alone
+  reaches it 100 ms late (a shorter tap is given whole once it ends), so the MENU never opens over a stray Start or
+  Select. Its windows work with the pad too: the d-pad moves a dark frame to the nearest button that way, A presses it
+  (the GAME page's buttons then read "Press again"), B backs out as the back key does; the press that closes the MENU is
+  let go before the game runs. Opened by the gesture the cursor starts on Resume; opened by a tap it shows at the first
+  key. The windows are drawn whether the controls show or not.
 - Edit layout: tap a group to select it, drag it, drag a corner handle or use +/- for the size (100 to 180%, so never under
   48 dp), opacity, Reset to default, Done. The layout is kept per device in `saves/ssd.settings` under `controls.touch.*`
   (`style`, `opacity` as a step of five percent, `haptics`, `auto_battle`, `hide_pad`, `picture` (0 Standard, 1 Large, 2 Full
@@ -611,14 +621,16 @@ controls' alone.
   The HD menus read the raw joypad: a held A confirms there once. The ki training and any other scene that wants fast presses of A
   need only a held A.
 - Options > Controls: the Device row has a third page, Touch, with Touch layout (D-pad or Stick), Opacity, Haptics, Switch
-  automatically in battle, Hide with gamepad (on by default; only a pad with a stick and face buttons counts), Picture,
+  automatically in battle, Hide with gamepad (on by default; only a pad with a stick and face buttons counts; a tap on the
+  screen brings the controls back, without pressing anything, until a button of the pad is pressed), Picture,
   Show FPS (off by default: a line at the top with the frame rate, the sound queue in milliseconds and the frames that found
   it dry, drawn even while the controls are hidden) and Reset touch layout (which keeps Picture and Show FPS).
 - Haptics: a light tick on a press, on by default; the native side sends a command to `GameActivity`, which performs the
   system's keyboard-tap feedback (no permission needed).
 
-In a UI snapshot with `--touch-ui`, `touch menu|options|edit|hidden|play|minimal|full|stick|dpad|gamepad|select <group>|press up,a|release`
-lines set the state drawn (README, "UI snapshots"). Tested on the x86_64 emulator: the d-pad and the START and A buttons
+In a UI snapshot with `--touch-ui`, `touch menu|options|edit|hidden|play|minimal|full|stick|dpad|gamepad|select <group>|press up,a|release`,
+`touch pad up|down|left|right|a|b` (a key of the pad in the MENU's windows) and `touch hold select+start <ms>` (the gesture, at sixty
+window frames a second) lines set the state drawn (README, "UI snapshots"). Tested on the x86_64 emulator: the d-pad and the START and A buttons
 played the intro past the title, MENU, Edit layout (a drag, saved in `ssd.settings`), MIN/FULL and portrait.
 
 Next: a gamepad-aware first launch, a check of the touch controls on a phone

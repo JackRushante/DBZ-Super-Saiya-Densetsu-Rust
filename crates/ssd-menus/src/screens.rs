@@ -1509,6 +1509,10 @@ const OPT_CATEGORY_ROW: f32 = 58.0;
 const OPT_CATEGORY_ROW_TIGHT: f32 = 48.0;
 const OPT_ROW: f32 = 44.0;
 const OPT_GAP: f32 = 2.0;
+/// A page whose rows do not fit the window at those sizes (the Video page) is drawn tight: a value row as high as its
+/// choice boxes (40 px) and a group title 22 px high.
+const OPT_ROW_TIGHT: f32 = 40.0;
+const OPT_GROUP_TIGHT: f32 = 22.0;
 /// A button of the category window (Reset this page, Reset all): 44 px high, 6 px apart.
 const OPT_BUTTON: f32 = 44.0;
 /// The width of an option's cycler value and of the Open button.
@@ -1622,9 +1626,14 @@ fn options_rows(list: &mut DrawList, view: &OptionsView) {
     let left = window.x + FRAME + OPT_SIDE;
     let right = window.right() - FRAME - OPT_SIDE;
     let y = window.y + FRAME + OPT_PAD_TOP;
-    let count = view.category.rows().len();
-    let y = option_row_list(list, view, 0..count, left, right, y);
-    if let Some(note) = view.category.note() {
+    let rows = view.category.rows();
+    let bottom = window.bottom() - FRAME;
+    let tight = y + rows_height(rows, false) > bottom;
+    let y = option_row_list(list, view, 0..rows.len(), left, right, y, tight);
+    // The note under the rows, where it still fits in the window.
+    if let Some(note) = view.category.note()
+        && y + OPT_NOTE_ROW <= bottom
+    {
         list.text(
             left + 26.0,
             y + 4.0 + CAPTION_TEXT / 2.0,
@@ -1639,8 +1648,26 @@ fn options_rows(list: &mut DrawList, view: &OptionsView) {
     }
 }
 
+/// The height of `rows` drawn as a list (see [`option_row_list`]), at the design's sizes or `tight`.
+fn rows_height(rows: &[crate::options::RowDef], tight: bool) -> f32 {
+    let (row_height, group_height) =
+        if tight { (OPT_ROW_TIGHT, OPT_GROUP_TIGHT) } else { (OPT_ROW, OPT_GROUP) };
+    let mut group = None;
+    let mut height = 0.0;
+    for row in rows {
+        if group != Some(row.group) {
+            group = Some(row.group);
+            height += group_height + OPT_GAP;
+        }
+        height +=
+            if matches!(row.kind, Kind::Note(_)) { OPT_NOTE_ROW } else { row_height } + OPT_GAP;
+    }
+    height
+}
+
 /// The rows `range` of the category as a list from `y` down (each group's title, each row with its value at the
-/// right end), between `left` and `right`: returns where the next line would start.
+/// right end), between `left` and `right`, at the design's sizes or `tight` (see [`OPT_ROW_TIGHT`]): returns where
+/// the next line would start.
 pub(crate) fn option_row_list(
     list: &mut DrawList,
     view: &OptionsView,
@@ -1648,7 +1675,10 @@ pub(crate) fn option_row_list(
     left: f32,
     right: f32,
     mut y: f32,
+    tight: bool,
 ) -> f32 {
+    let (row_height, group_height) =
+        if tight { (OPT_ROW_TIGHT, OPT_GROUP_TIGHT) } else { (OPT_ROW, OPT_GROUP) };
     let mut group = None;
     for index in range {
         let Some(row) = view.category.rows().get(index) else { break };
@@ -1657,13 +1687,13 @@ pub(crate) fn option_row_list(
             let title = format!("-- {} --", row.group);
             list.text(
                 left + 26.0,
-                y + OPT_GROUP - 9.0,
+                y + group_height - 9.0,
                 &title,
                 GROUP_TEXT,
                 palette::DARK_RED,
                 Align::Left,
             );
-            y += OPT_GROUP + OPT_GAP;
+            y += group_height + OPT_GAP;
         }
         if let Kind::Note(text) = row.kind {
             // A line of small text under its group: no cursor, no value.
@@ -1678,9 +1708,9 @@ pub(crate) fn option_row_list(
             y += OPT_NOTE_ROW + OPT_GAP;
             continue;
         }
-        let middle = y + OPT_ROW / 2.0;
+        let middle = y + row_height / 2.0;
         if index == view.row {
-            list.fill(Rect::new(left, y, right - left, OPT_ROW), OPT_TINT);
+            list.fill(Rect::new(left, y, right - left, row_height), OPT_TINT);
             list.push(Op::Cursor { x: left, y: middle - CURSOR_HEIGHT / 2.0 });
         }
         list.text(left + 26.0, middle, row.label, OPT_LABEL_TEXT, palette::BLACK, Align::Left);
@@ -1756,7 +1786,7 @@ pub(crate) fn option_row_list(
                 );
             }
         }
-        y += OPT_ROW + OPT_GAP;
+        y += row_height + OPT_GAP;
     }
     y
 }
@@ -2456,7 +2486,7 @@ mod tests {
     }
 
     #[test]
-    fn the_video_page_shows_its_groups_the_size_and_the_note_and_the_question_the_countdown() {
+    fn the_video_page_shows_its_groups_and_the_size_in_tight_rows_and_the_question_the_countdown() {
         let mut view = options_view(Category::Video, 4, None);
         view.values[1] = 4;
         let text = texts(&options_screen(&view)).join("|");
@@ -2468,11 +2498,27 @@ mod tests {
             "Picture size",
             "pixels at this scale",
             "2232 x 1344",
+            "HD art",
             "CRT filter",
-            "revert after 10 s",
         ] {
             assert!(text.contains(want), "{want} in {text}");
         }
+        // Ten rows are drawn tight and all inside the rows window; the note under them no longer fits (the help of
+        // Display, Scale and Aspect says that a change asks for confirmation).
+        let list = options_screen(&view);
+        let bottom = OPT_TOP + OPT_HEIGHT - FRAME;
+        let (_, crt, _) = list.texts().find(|(_, _, text)| *text == "CRT filter").unwrap();
+        assert!(
+            crt + OPT_ROW_TIGHT / 2.0 <= bottom,
+            "the last row ends at {crt} + 20, in {bottom}"
+        );
+        assert!(!text.contains("revert after 10 s"));
+        // A page that fits keeps the design's sizes: a row, then the next group's title.
+        let audio = options_screen(&options_view(Category::Audio, 0, None));
+        let (_, first, _) = audio.texts().find(|(_, _, text)| *text == "Volume").unwrap();
+        let (_, second, _) = audio.texts().find(|(_, _, text)| *text == "Sound").unwrap();
+        let pitch = OPT_ROW + OPT_GAP + OPT_GROUP + OPT_GAP;
+        assert!((second - first - pitch).abs() < 0.01, "{} for {pitch}", second - first);
         for (choice, tenths) in [(1, 100), (0, 73), (1, 0)] {
             view.video = Some(video_ask(choice, tenths));
             let list = options_screen(&view);

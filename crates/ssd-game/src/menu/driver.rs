@@ -3189,11 +3189,15 @@ mod tests {
     /// A driver on the Video page with the cursor on the Aspect row.
     fn driver_on_video() -> (Driver, FakeMenu) {
         let (mut driver, menu) = driver_on_options(&saved_slots(&[0]));
-        for key in [Key::Tab, Key::Tab, Key::Down, Key::Down, Key::Down, Key::Down, Key::Down] {
+        for key in [Key::Tab, Key::Tab] {
             driver.key(key, &menu.wram());
         }
+        // Display, Scale, V-Sync, Latency, Look, HD art, Aspect.
+        for _ in 0..6 {
+            driver.key(Key::Down, &menu.wram());
+        }
         assert_eq!(driver.nav().options_category(), Category::Video);
-        assert_eq!(driver.nav().options_row(), 5, "Aspect");
+        assert_eq!(driver.nav().options_row(), 6, "Aspect");
         (driver, menu)
     }
 
@@ -3263,7 +3267,7 @@ mod tests {
         for key in [Key::Down, Key::Right] {
             driver.key(key, &menu.wram());
         }
-        assert_eq!(driver.nav().options_row(), 7, "Scanlines");
+        assert_eq!(driver.nav().options_row(), 8, "Scanlines");
         assert_eq!(
             driver.nav().options_video_confirm(),
             None,

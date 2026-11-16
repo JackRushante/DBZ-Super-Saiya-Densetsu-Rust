@@ -18,6 +18,8 @@
 //! menu press <key>|esc|backspace|pad <button>
 //! menu tab all|allies|tools
 //! touch menu|options|edit|hidden|play|minimal|full|stick|dpad|gamepad|nogamepad|select <group>|press <buttons>|release
+//! touch pad up|down|left|right|a|b
+//! touch hold select+start <ms>
 //! ```
 //!
 //! The `menu` lines are for `--mode enhanced`, and play the HD menu as a player does: `menu open`

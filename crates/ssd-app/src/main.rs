@@ -341,13 +341,6 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
         eprintln!("HD pack: {message}");
         return ExitCode::from(EXIT_HD_PACK);
     }
-    hd_art::configure(hd_art::Config {
-        pack: cli.hd_pack.clone(),
-        off: cli.no_hd_art,
-        font_off: cli.no_hd_font,
-        overlays,
-        image,
-    });
     lang::configure(cli.lang);
     // Only a windowed run writes the player's files (see `persists`): set before the first read.
     paths::set_persistent(persists(&cli));
@@ -363,6 +356,14 @@ pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
         cli.mode == ModeArg::Enhanced && cli.headless_frames.is_none() && cli.bench_app.is_none();
     let saved =
         if saved_video { options::read_settings().unwrap_or_default() } else { Values::new() };
+    // Options > Video > HD art Off turns the art off from the next start, as `--no-hd-art` does for one run.
+    hd_art::configure(hd_art::Config {
+        pack: cli.hd_pack.clone(),
+        off: cli.no_hd_art || !ssd_menus::options::video::hd_art_on(&saved),
+        font_off: cli.no_hd_font,
+        overlays,
+        image,
+    });
     let video_start =
         options::video::start(&saved, cli.hd_scale, cli.enhanced_look.map(Look::from));
     let enhanced = if saved_video {

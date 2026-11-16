@@ -322,7 +322,7 @@ const TOUCH_ROW_DEFS: [RowDef; TOUCH_ROWS] = [
         key: TOUCH_HIDE_PAD,
         label: "Hide with gamepad",
         group: TOUCH_GROUP,
-        help: "On: the touch buttons hide while a gamepad is connected.",
+        help: "On: the touch buttons hide while a gamepad is connected; a tap brings them back. Select + Start held 2 s opens the MENU from the pad.",
         kind: Kind::Choice(ON_OFF),
         source: Source::Stored { default: 1 },
     },

@@ -176,8 +176,8 @@ kept for this PC. *Reset this page* (Y) and *Reset all* (Select, with a Yes/No q
 - **Gameplay** (saved with the game): text speed (the original's five steps, Slowest to Fastest, the same setting as
   the Menu's Text entry), message auto-run after a short, normal or long wait, battle animation speed (x2 to x4: the
   attack animations run faster with the outcome unchanged; the music skips while they do), random encounters.
-- **Video** (this PC): window or fullscreen, scale 2x to 8x, look (crisp, smooth or pixel: no filter), V-sync, 16:9 or the original
-  4:3, scanlines and a CRT filter. A change of display, scale or aspect asks *Keep* or *Revert* and reverts by itself
+- **Video** (this PC): window or fullscreen, scale 2x to 8x, look (crisp, smooth or pixel: no filter), HD art on or off (off
+  keeps the original sprites, from the next start), V-sync, 16:9 or the original 4:3, scanlines and a CRT filter. A change of display, scale or aspect asks *Keep* or *Revert* and reverts by itself
   after 10 seconds.
 - **Audio** (this PC): one volume (the console mixes music and effects together) and stereo or mono.
 - **Controls** (this PC): every SNES button and shortcut on the keyboard and on a gamepad; a key already in use is
@@ -261,7 +261,9 @@ Install `dbz-ssd-recompiled-android.apk` (allow installs from your browser or fi
 ROM and, for Remastered, `hd-pack.zip` to the phone (the Download folder is fine). The first launch asks for the ROM, the
 mode and the HD pack with the system file picker, and installs the pack (a few minutes on a phone). The touch controls are
 drawn over the game; a gamepad works too. The touch MENU has Save state and Load state with their slot, Cheats, Options,
-Restart and Quit.
+Restart and Quit. With a gamepad, hold **Select + Start for two seconds** to open it in Remastered (the d-pad moves, A
+chooses, B goes back; Restart is under *Game*); the touch controls hide while a gamepad is connected, and a tap on the
+screen brings them back.
 
 Performance on phones can still be improved a lot: see [Known bugs](#known-bugs).
 

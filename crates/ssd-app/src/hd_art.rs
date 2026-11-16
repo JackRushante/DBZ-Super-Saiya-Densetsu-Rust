@@ -1,8 +1,8 @@
 //! The HD art of a run: the pack the converter and `hd-import` left for the ROM, found once and
 //! shared by the Enhanced picture and the HD menus. `--hd-pack` names another pack folder and
-//! `--no-hd-art` turns the art off; without art the Enhanced picture is the look alone. The HD text
-//! font (the game's UI text redrawn from Share Tech Mono at the picture's scale) is found here
-//! too; `--no-hd-font` turns it off.
+//! `--no-hd-art` turns the art off for a run, and Options > Video > HD art Off from the next start; without art the
+//! Enhanced picture is the look alone. The HD text font (the game's UI text redrawn from Share Tech Mono at the
+//! picture's scale) is found here too; `--no-hd-font` turns it off.
 
 use ssd_hd::Font;
 use ssd_hd::pack::{Overlay, Pack};

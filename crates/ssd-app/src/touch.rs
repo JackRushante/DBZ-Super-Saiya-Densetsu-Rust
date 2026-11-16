@@ -6,6 +6,7 @@
 //! each finger holds, the MENU, the options and the edit mode (this file), and the drawing (`draw`, with egui).
 //! Nothing here touches the machine: the host takes the [`Out`] events and acts on them.
 
+pub mod chord;
 pub mod draw;
 pub mod layout;
 pub mod settings;
@@ -153,6 +154,24 @@ pub struct Touch {
     out: Vec<Out>,
     /// The GAME page's button tapped once: a second tap does it (the progress since the last save is lost).
     armed: Option<PBtn>,
+    /// The button of the window the gamepad's cursor is on; `None` until the pad is used in the window.
+    pub focus: Option<PBtn>,
+    /// A tap brought the controls back while a gamepad hides them: they stay until the pad is used again.
+    shown_by_touch: bool,
+    /// Select + Start held on any device: the gesture that opens the MENU (Enhanced).
+    chord: chord::Chord,
+}
+
+/// A key of the gamepad (or the keyboard) in the MENU's windows: the d-pad moves the cursor, A presses the button
+/// under it and B backs out, as in the HD menus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadKey {
+    Up,
+    Down,
+    Left,
+    Right,
+    Confirm,
+    Back,
 }
 
 static FORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -225,6 +244,9 @@ impl Touch {
             pressed: [false; 12],
             out: Vec::new(),
             armed: None,
+            focus: None,
+            shown_by_touch: false,
+            chord: chord::Chord::default(),
         }
     }
 
@@ -266,10 +288,103 @@ impl Touch {
         }
     }
 
-    /// Whether the controls are on screen (not hidden by a gamepad).
+    /// Whether the controls are on screen (not hidden by a gamepad; a tap brings them back until the pad is used).
     #[must_use]
     pub fn visible(&self) -> bool {
-        self.enabled && !(self.gamepad && self.settings.hide_pad)
+        self.enabled && !(self.gamepad && self.settings.hide_pad && !self.shown_by_touch)
+    }
+
+    /// A button of a gamepad went down: controls a tap brought back hide again.
+    pub fn pad_used(&mut self) {
+        if self.shown_by_touch && self.mode == Mode::Play {
+            self.shown_by_touch = false;
+            self.fingers.clear();
+            self.recompute();
+        }
+    }
+
+    /// Select and Start as held this window frame (Enhanced): what the game is to see of them, and the MENU opened,
+    /// its cursor on Resume, once they have been held together for two seconds (see [`chord`]).
+    pub fn chord(&mut self, now: std::time::Instant, select: bool, start: bool) -> (bool, bool) {
+        let (select, start, fire) = self.chord.update(now, select, start);
+        if fire && self.mode == Mode::Play {
+            self.open_menu();
+            self.focus = Some(PBtn::Resume);
+        }
+        (select, start)
+    }
+
+    /// A key of the pad while a window is up: the d-pad moves the cursor to the nearest button that way, A presses it,
+    /// B backs out (as the Android back key). The first key of a window that has no cursor yet only shows it.
+    pub fn pad_key(&mut self, key: PadKey) {
+        if !self.enabled || self.mode == Mode::Play {
+            return;
+        }
+        let from = self.mode;
+        if key == PadKey::Back {
+            let had = self.focus.is_some();
+            self.back_key();
+            if had {
+                self.follow_focus(from);
+            }
+            return;
+        }
+        let Some(panel) = self.panel() else { return };
+        let Some(current) =
+            self.focus.and_then(|id| panel.buttons.iter().find(|b| b.id == id)).cloned()
+        else {
+            self.focus = Some(self.default_focus());
+            return;
+        };
+        if key == PadKey::Confirm {
+            self.emit(Out::Haptic);
+            self.panel_press(current.id);
+            self.follow_focus(from);
+            return;
+        }
+        let c = current.rect.center();
+        let ahead = |d: Vec2| match key {
+            PadKey::Up => (-d.y, d.x.abs()),
+            PadKey::Down => (d.y, d.x.abs()),
+            PadKey::Left => (-d.x, d.y.abs()),
+            _ => (d.x, d.y.abs()),
+        };
+        let next = panel
+            .buttons
+            .iter()
+            .filter(|b| b.id != current.id)
+            .filter_map(|b| {
+                let (along, across) = ahead(b.rect.center() - c);
+                (along > 1.0).then_some((along + 2.0 * across, b.id))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, id)) = next {
+            self.focus = Some(id);
+        }
+    }
+
+    /// The pad's cursor after a press that may have changed the window (from `from`): back on the MENU, on the button
+    /// that opened the page; on another window, on its first choice; in play, none.
+    fn follow_focus(&mut self, from: Mode) {
+        if self.mode == from {
+            return;
+        }
+        self.focus = match (from, self.mode) {
+            (_, Mode::Play) => None,
+            (Mode::Options, Mode::Menu) => Some(PBtn::Options),
+            (Mode::Game, Mode::Menu) => Some(PBtn::Game),
+            _ => Some(self.default_focus()),
+        };
+    }
+
+    /// The button the pad's cursor starts on in the window up now: the main or the safe one.
+    fn default_focus(&self) -> PBtn {
+        match self.mode {
+            Mode::Play | Mode::Menu => PBtn::Resume,
+            Mode::Game => PBtn::Restart,
+            Mode::Options => PBtn::OptLayout,
+            Mode::Edit => PBtn::Done,
+        }
     }
 
     /// The SNES buttons the fingers hold.
@@ -366,8 +481,15 @@ impl Touch {
             }
             Mode::Game => {
                 let mut p = make(338.0, "GAME");
+                // With the pad's cursor the second press is of A, not a tap.
                 let armed = |id, idle: &str, again: &str| {
-                    if self.armed == Some(id) { again.to_owned() } else { idle.to_owned() }
+                    if self.armed != Some(id) {
+                        idle.to_owned()
+                    } else if self.focus.is_some() {
+                        again.replace("Tap", "Press")
+                    } else {
+                        again.to_owned()
+                    }
                 };
                 let restart = armed(PBtn::Restart, "Restart game", "Tap again: restart");
                 cell(&mut p, PBtn::Restart, restart, 0.0, 0.0, false);
@@ -588,7 +710,10 @@ impl Touch {
                     if self.show_chip().expand(8.0).contains(pos) {
                         finger.target = Target::Show;
                     }
-                } else if self.visible() {
+                } else if !self.visible() {
+                    // Hidden by a gamepad: a tap brings the controls back (and presses nothing).
+                    self.shown_by_touch = true;
+                } else {
                     finger.target = self.play_target(pos);
                     match finger.target {
                         Target::Tap(btn) => {
@@ -680,6 +805,7 @@ impl Touch {
 
     fn open_menu(&mut self) {
         self.mode = Mode::Menu;
+        self.focus = None;
         self.fingers.clear();
         self.emit(Out::Pause(true));
         self.recompute();
@@ -728,7 +854,10 @@ impl Touch {
             }
             PBtn::Options => self.mode = Mode::Options,
             PBtn::Edit => {
+                // The controls are on screen to be edited, whether the player or a gamepad hid them.
                 self.minimal = false;
+                self.hidden = false;
+                self.shown_by_touch = true;
                 self.mode = Mode::Edit;
                 self.relayout();
             }
@@ -808,6 +937,7 @@ impl Touch {
 
     fn close_menu(&mut self) {
         self.armed = None;
+        self.focus = None;
         self.mode = Mode::Play;
         self.fingers.clear();
         self.emit(Out::Pause(false));
@@ -956,6 +1086,32 @@ impl Touch {
                     .ok_or_else(|| format!("unknown group `{name}`"))?;
             }
             ["release"] => self.cancel_all(),
+            ["pad", key] => {
+                let key = match *key {
+                    "up" => PadKey::Up,
+                    "down" => PadKey::Down,
+                    "left" => PadKey::Left,
+                    "right" => PadKey::Right,
+                    "a" => PadKey::Confirm,
+                    "b" => PadKey::Back,
+                    _ => return Err(format!("unknown pad key `{key}`")),
+                };
+                self.pad_key(key);
+                return Ok(());
+            }
+            ["hold", "select+start", ms] => {
+                // Select and Start held together for `ms`, at sixty window frames a second, then let go.
+                let ms: u64 = ms.parse().map_err(|_| format!("`{ms}` is not milliseconds"))?;
+                let t0 = std::time::Instant::now();
+                let step = std::time::Duration::from_micros(16_667);
+                let mut at = std::time::Duration::ZERO;
+                while at < std::time::Duration::from_millis(ms) {
+                    self.chord(t0 + at, true, true);
+                    at += step;
+                }
+                self.chord(t0 + at, false, false);
+                return Ok(());
+            }
             ["press", names] => {
                 self.mode = Mode::Play;
                 self.relayout();
@@ -1231,5 +1387,66 @@ mod tests {
         assert_eq!(t.pressed(), [false; 12]);
         t.settings.hide_pad = false;
         assert!(t.visible());
+    }
+
+    #[test]
+    fn a_tap_brings_back_the_controls_a_gamepad_hid_until_the_pad_is_used() {
+        let mut t = touch();
+        t.set_status("x1", 1, true, false);
+        let a = centre(&t, Btn::A);
+        t.finger_down(1, a);
+        assert!(t.visible(), "the tap shows them");
+        assert_eq!(t.pressed(), [false; 12], "and presses nothing");
+        t.finger_up(1, false);
+        t.finger_down(2, centre(&t, Btn::A));
+        assert!(t.pressed()[4], "the next touch plays");
+        t.finger_up(2, false);
+        t.set_status("x1", 1, true, false);
+        assert!(t.visible(), "the pad still connected does not hide them again");
+        t.pad_used();
+        assert!(!t.visible(), "a press on the pad does");
+    }
+
+    #[test]
+    fn select_and_start_held_open_the_menu_and_the_pad_reaches_restart() {
+        let mut t = touch();
+        t.set_status("x1", 1, true, false);
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        assert_eq!(t.chord(at(0), true, true), (false, false), "the game does not see them");
+        t.chord(at(1000), true, true);
+        assert_eq!(t.mode, Mode::Play, "not yet");
+        t.chord(at(2000), true, true);
+        assert_eq!(t.mode, Mode::Menu);
+        assert_eq!(t.focus, Some(PBtn::Resume));
+        assert!(t.take_out().contains(&Out::Pause(true)));
+        // Up from Resume is the GAME page's button; A opens it, on Restart.
+        t.pad_key(PadKey::Up);
+        assert_eq!(t.focus, Some(PBtn::Game));
+        t.pad_key(PadKey::Left);
+        assert_eq!(t.focus, Some(PBtn::HideControls));
+        t.pad_key(PadKey::Right);
+        t.pad_key(PadKey::Confirm);
+        assert_eq!((t.mode, t.focus), (Mode::Game, Some(PBtn::Restart)));
+        // B goes back to the MENU, on the button that opened the page.
+        t.pad_key(PadKey::Back);
+        assert_eq!((t.mode, t.focus), (Mode::Menu, Some(PBtn::Game)));
+        t.pad_key(PadKey::Confirm);
+        t.pad_key(PadKey::Confirm);
+        let label = |t: &Touch| {
+            t.panel().unwrap().buttons.into_iter().find(|b| b.id == PBtn::Restart).unwrap().label
+        };
+        assert_eq!(label(&t), "Press again: restart", "the first press arms it");
+        assert!(!t.take_out().contains(&Out::Restart));
+        t.pad_key(PadKey::Confirm);
+        assert!(t.take_out().contains(&Out::Restart));
+        assert_eq!((t.mode, t.focus), (Mode::Play, None));
+        // Opened by touch (or the back key), the window has no cursor until the pad is used.
+        t.back_key();
+        assert_eq!(t.focus, None);
+        t.pad_key(PadKey::Down);
+        assert_eq!((t.mode, t.focus), (Mode::Menu, Some(PBtn::Resume)), "the first key shows it");
+        t.pad_key(PadKey::Confirm);
+        assert_eq!(t.mode, Mode::Play);
     }
 }

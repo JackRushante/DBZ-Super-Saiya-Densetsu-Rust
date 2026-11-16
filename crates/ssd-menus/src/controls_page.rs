@@ -60,7 +60,7 @@ pub(crate) fn rows(list: &mut DrawList, view: &OptionsView) {
     if let Some((first, count)) = controls::list_rows(page) {
         // The touch controls' or the turbo rows: a list under the device row, drawn like any page's rows. The view's
         // cursor is a row of the table, so the generic list tints the row it is on.
-        crate::screens::option_row_list(list, view, first..first + count, left, right, y);
+        crate::screens::option_row_list(list, view, first..first + count, left, right, y, false);
         return;
     }
 
