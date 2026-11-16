@@ -22,8 +22,9 @@ The HD art pack of a release (`hd-pack.zip`, next to the executable) is installe
 release (`tools/windows/`: the launchers, the quickstart, the licences).
 
 Enhanced graphics (M6): `--hd-scale N` (2 to 8) draws the picture again at N times the PPU's resolution, from the state
-the PPU drew it from, in the window and with `--ui-snapshot`. `--enhanced-look crisp|smooth` picks the look: `crisp`
-(the default) is pixel art made bigger with smoothed diagonals, `smooth` a bicubic filter. Without `--hd-scale` the
+the PPU drew it from, in the window and with `--ui-snapshot`. `--enhanced-look crisp|smooth|pixel` picks the look: `crisp`
+(the default) is pixel art made bigger with smoothed diagonals, `smooth` a bicubic filter, `pixel` no filter (each pixel a
+block of whole pixels). Without `--hd-scale` the
 Classic picture (the PPU's own frame) is shown; a verification run always shows the Classic pictures. Mode 7 planes
 are sampled again at the picture's resolution. Use `--ui-size 1170x956` for a snapshot at 4x: the frame's 8:7 pixel
 aspect makes the picture 1170 pixels wide. With `--mode enhanced` the picture is the 16:9 view (372 pixels wide, black
@@ -309,6 +310,14 @@ Gohan at 10 without him) kills the fighters not yet recruited and stops the rand
 level. The deadline of walking into the Saiyans stays. `menu-test cheats deadline` runs the routine with Piccolo at levels
 8, 9 and 30 in Classic and Remastered.
 
+Story fix (Remastered, always on): the Game Over screen (main loop mode `$0D`, `00:A568`) ends in a loop that reads no
+button, so the original needs the console's Reset. A, B, X, Y, Select or Start there now returns from the routine at the head of
+that loop (`00:A7B9`, `story_game_over_exit`; the buttons are read through the serial port `$4016`: on that screen the registers of the
+automatic read, `$4218`, never change): the caller's own code after the call then jumps to the boot (`00:8000`), the title shows, and Continue
+loads a save, as after a Reset. The d-pad and the shoulders leave the screen as it is. Classic is unchanged.
+`cargo test -p ssd-game --release --test game_over_real_rom -- --ignored` (with `SSD_ROM_PATH`) loses the reference battle and
+checks both.
+
 The cheats act in the running game only: Rust wrappers on top of the routines they change (`ssd_game::cheats`) read their
 numbers from a 32-byte block of work RAM at `$7F:FF00` (outside the save image), which the app writes as host events
 (recorded in a format 2 replay, so a replay with cheats plays to the same state). `Ruleset::classic()` installs nothing,
@@ -378,7 +387,10 @@ replay (`--replay`) read neither and write neither; their settings stay in memor
 The Video page (this PC, keys `video.display`, `video.scale`, `video.vsync`, `video.latency`, `video.look`, `video.aspect`,
 `video.scanlines`, `video.crt`): Display (window or fullscreen), Scale (2x to 8x), V-Sync, Latency (Smooth, the default: the
 picture of a frame is drawn on its own thread while the next frame runs and shown one frame later, so a frame costs the longer of
-the two and not both; Low draws and shows each frame at once), Look (crisp or smooth), Aspect (16:9 shows the extra
+the two and not both; Low draws and shows each frame at once), Look (Crisp, Smooth or Pixel: Pixel has no filter, each pixel of the original
+a square block; the window shows it, as Smooth, with linear filtering, so the blocks keep one size on a screen that is not
+a whole multiple of the picture and only their edges are blended, about one pixel of the screen: a "sharp bilinear"; the HD
+art is the same in the three looks, a look changes only what the art does not cover), Aspect (16:9 shows the extra
 map at the sides, 4:3 shows only the original window), the size of the picture it gives, and two filters, Scanlines (light,
 strong) and CRT filter (soft, full). Every row works while the game runs. A change of display, scale or aspect asks "Apply
 video changes?": Keep writes it to `ssd.settings`, Revert (B) puts the old choice back, and after 10 s without an answer it
@@ -1437,7 +1449,7 @@ code that changes a variable. `--sram-out` writes the cartridge's SRAM at the en
 the map menu's Save it is a save the game wrote itself, a consistent start for the next experiment. How the menu, landing and save replays were authored: a timeline file, a state
 at the frame before it, and sheets of the frames in between. A timeline that is good goes into
 `crates/ssd-game/scripts/` and gets an entry in `ssd_game::scripts::REPLAYS`, which `make-replays` records.
-With `--hd-scale N` (and `--pack DIR`, else the cached pack) the frames are drawn as the Enhanced picture (`--enhanced-look crisp|smooth` picks its look, crisp by default), so a moment
+With `--hd-scale N` (and `--pack DIR`, else the cached pack) the frames are drawn as the Enhanced picture (`--enhanced-look crisp|smooth|pixel` picks its look, crisp by default), so a moment
 saved with F12 (`--state-in`) is seen in HD with no window. `--gaps DIR` then prints, per frame, each pose with its art
 and where the art comes from, the background slots and the line registers, writes the poses with no art into `DIR`,
 and for a frame that shows a Mode 7 plane prints the plane's key and writes what `hd-art m7dump` writes into

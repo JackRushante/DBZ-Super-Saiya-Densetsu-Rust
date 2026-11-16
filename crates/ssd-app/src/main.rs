@@ -116,8 +116,8 @@ struct Cli {
     /// Draw no HD text: the game's own letters, made bigger by the look.
     #[arg(long)]
     no_hd_font: bool,
-    /// The look of the Enhanced picture: `crisp` (pixel art made bigger, the diagonals smoothed) or
-    /// `smooth` [default: crisp]. Needs --hd-scale.
+    /// The look of the Enhanced picture: `crisp` (pixel art made bigger, the diagonals smoothed), `smooth`
+    /// (bicubic) or `pixel` (no filter, whole pixels) [default: crisp]. Needs --hd-scale.
     #[arg(long, value_enum, requires = "hd_scale")]
     enhanced_look: Option<LookArg>,
     /// Which routines run in Rust: none (the original game code), all of them (rust), or all of
@@ -584,6 +584,7 @@ fn parse_hd_scale(text: &str) -> Result<u32, String> {
 enum LookArg {
     Crisp,
     Smooth,
+    Pixel,
 }
 
 impl From<LookArg> for Look {
@@ -591,6 +592,7 @@ impl From<LookArg> for Look {
         match look {
             LookArg::Crisp => Self::Crisp,
             LookArg::Smooth => Self::Smooth,
+            LookArg::Pixel => Self::Pixel,
         }
     }
 }

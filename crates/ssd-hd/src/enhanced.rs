@@ -25,6 +25,8 @@ pub enum Look {
     Crisp,
     /// A smooth interpolation: a bicubic (Catmull-Rom) filter over the 1x frame.
     Smooth,
+    /// No filter: every pixel of the 1x frame is a block of whole pixels (nearest neighbour).
+    Pixel,
 }
 
 /// How an Enhanced picture is made.
@@ -346,10 +348,19 @@ pub(crate) fn picture(
     let scale = options.scale as usize;
     let lines = frame.height;
     let wide = frame.width;
-    // A crisp picture of a power of two with no plane to sample again: the Scale2x passes write the
-    // picture's bytes directly
-    if log.is_none() && options.look == Look::Crisp && scale.is_power_of_two() && scale > 1 {
-        let rgba = crisp_rgba(&frame.pixels, wide, lines, scale);
+    // With no plane to sample again, a crisp picture of a power of two (the Scale2x passes) and a pixel picture (the
+    // colours of each line, repeated) write the picture's bytes directly
+    let direct = match options.look {
+        Look::Crisp if scale.is_power_of_two() && scale > 1 => true,
+        Look::Pixel => true,
+        _ => false,
+    };
+    if log.is_none() && direct {
+        let rgba = if options.look == Look::Pixel {
+            pixel_rgba(&frame.pixels, wide, lines, scale)
+        } else {
+            crisp_rgba(&frame.pixels, wide, lines, scale)
+        };
         let (width, height) = ((wide * scale) as u32, (lines * scale) as u32);
         return HdFrame {
             rgba,
@@ -363,6 +374,7 @@ pub(crate) fn picture(
     let filtered = match options.look {
         Look::Crisp => crisp(&source, wide, lines, scale),
         Look::Smooth => smooth(&source, wide, lines, scale),
+        Look::Pixel => whole_pixels(source, wide, lines, scale),
     };
     let width = wide * scale;
     let height = lines * scale;
@@ -437,7 +449,6 @@ fn unpack(packed: u32) -> [u8; 3] {
 /// The crisp look: Scale2x on the power-of-two part of `scale`, then whole pixels for its odd part.
 fn crisp(source: &[u32], width: usize, height: usize, scale: usize) -> Vec<u32> {
     let doublings = scale.trailing_zeros();
-    let whole = scale >> doublings;
     let mut image = source.to_vec();
     let (mut w, mut h) = (width, height);
     for _ in 0..doublings {
@@ -445,15 +456,21 @@ fn crisp(source: &[u32], width: usize, height: usize, scale: usize) -> Vec<u32> 
         w *= 2;
         h *= 2;
     }
-    if whole == 1 {
+    whole_pixels(image, w, h, scale >> doublings)
+}
+
+/// The `width` x `height` `image` made `factor` times bigger with whole pixels: each pixel a `factor` x `factor` block
+/// (the pixel look, and the odd part of the crisp one).
+fn whole_pixels(image: Vec<u32>, width: usize, height: usize, factor: usize) -> Vec<u32> {
+    if factor == 1 {
         return image;
     }
-    let out_w = w * whole;
-    let mut out = vec![0_u32; out_w * h * whole];
+    let out_w = width * factor;
+    let mut out = vec![0_u32; out_w * height * factor];
     out.par_chunks_mut(out_w).enumerate().for_each(|(y, row)| {
-        let source_row = &image[(y / whole) * w..][..w];
+        let source_row = &image[(y / factor) * width..][..width];
         for (x, pixel) in row.iter_mut().enumerate() {
-            *pixel = source_row[x / whole];
+            *pixel = source_row[x / factor];
         }
     });
     out
@@ -641,6 +658,26 @@ fn crisp_rgba(pixels: &[Color], width: usize, height: usize, scale: usize) -> Ve
     rgba
 }
 
+/// The pixel look of `scale` as RGBA bytes (alpha 255): each pixel of the `width` x `height` frame a block of
+/// `scale` x `scale`. The bytes are a buffer of [`crate::pool::BYTES`].
+fn pixel_rgba(pixels: &[Color], width: usize, height: usize, scale: usize) -> Vec<u8> {
+    let row_bytes = 4 * width * scale;
+    let mut rgba = crate::pool::BYTES.take(row_bytes * height * scale);
+    rgba.par_chunks_mut(row_bytes * scale).enumerate().for_each(|(line, block)| {
+        let (first, rest) = block.split_at_mut(row_bytes);
+        let colours = &pixels[line * width..][..width];
+        for (cells, colour) in first.chunks_exact_mut(4 * scale).zip(colours) {
+            for cell in cells.as_chunks_mut::<4>().0 {
+                *cell = [colour.r, colour.g, colour.b, 0xFF];
+            }
+        }
+        for row in rest.chunks_exact_mut(row_bytes) {
+            row.copy_from_slice(first);
+        }
+    });
+    rgba
+}
+
 /// The Catmull-Rom weights of the four taps around a picture pixel, in whole units, and the index
 /// of the first tap. The picture pixel `index` of `scale` centres its source position at
 /// `(2 * index + 1 - scale) / (2 * scale)` source pixels; the weights sum to `2 * d^3` with `d` the
@@ -776,11 +813,11 @@ mod tests {
     }
 
     #[test]
-    fn scale_one_is_the_ppu_frame_for_both_looks_and_for_a_plane() {
+    fn scale_one_is_the_ppu_frame_for_every_look_and_for_a_plane() {
         let log = mode_7_log(plane_regs(0x0080), stripes(), &cgram_identity());
         let mut renderer = Renderer::new();
         let frame = renderer.render(&log).unwrap();
-        for look in [Look::Crisp, Look::Smooth] {
+        for look in [Look::Crisp, Look::Smooth, Look::Pixel] {
             let hd = renderer.render_hd(&log, HdOptions { scale: 1, look }).unwrap();
             assert_eq!((hd.width, hd.height, hd.scale), (256, 224, 1));
             for (pixel, expected) in hd.rgba.as_chunks::<4>().0.iter().zip(&frame.pixels) {
@@ -985,6 +1022,35 @@ mod tests {
     }
 
     #[test]
+    fn the_pixel_look_is_each_pixel_as_a_block_with_or_without_a_plane() {
+        let mut random = Random(5);
+        let (width, height) = (37, 9);
+        let pixels = random_pixels(&mut random, width * height, 40);
+        let frame = Frame { pixels: pixels.clone(), sources: Vec::new(), width, height };
+        for scale in 1..=MAX_SCALE as usize {
+            let options = HdOptions { scale: scale as u32, look: Look::Pixel };
+            // The bytes written directly (no plane) and the picture of a log with no plane pixel are the same blocks
+            let direct = picture(&frame, &Capture::default(), None, options);
+            let capture =
+                Capture { records: vec![Record::NONE; width * height], ..Capture::default() };
+            let log = mode_7_log(LineRegs::default(), vec![0; 32768], &cgram_identity());
+            let general = picture(&frame, &capture, Some(&log), options);
+            assert!(direct.rgba == general.rgba, "scale {scale}");
+            let row = 4 * width * scale;
+            for (y, line) in direct.rgba.chunks_exact(row).enumerate() {
+                for (x, cell) in line.as_chunks::<4>().0.iter().enumerate() {
+                    let colour = pixels[(y / scale) * width + x / scale];
+                    assert_eq!(
+                        *cell,
+                        [colour.r, colour.g, colour.b, 0xFF],
+                        "scale {scale} at {x}, {y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn smooth_keeps_flat_colours_and_the_source_at_scale_one() {
         let flat = vec![pack(10, 200, 30); 6];
         assert!(smooth(&flat, 3, 2, 4).iter().all(|&p| p == pack(10, 200, 30)));
@@ -997,7 +1063,7 @@ mod tests {
         let log = mode_7_log(plane_regs(0x0100), stripes(), &cgram_identity());
         let mut renderer = Renderer::new();
         for scale in 1..=MAX_SCALE {
-            for look in [Look::Crisp, Look::Smooth] {
+            for look in [Look::Crisp, Look::Smooth, Look::Pixel] {
                 let hd = renderer.render_hd(&log, HdOptions { scale, look }).unwrap();
                 let (w, h) = (256 * scale, 224 * scale);
                 assert_eq!((hd.width, hd.height), (w, h));

@@ -12,6 +12,9 @@ pub const SCALES: &[&str] = &["2x", "3x", "4x", "5x", "6x", "7x", "8x"];
 pub const DISPLAYS: &[&str] = &["Window", "Fullscreen"];
 /// The aspects: the 16:9 view with the extra map at the sides, and the original picture shape.
 pub const ASPECTS: &[&str] = &["16:9", "4:3"];
+/// The looks of the picture where no HD art covers it: Scale2x (the default), bicubic, and no filter (whole pixels).
+/// A new look goes at the end, so a stored index keeps its meaning.
+pub const LOOKS: &[&str] = &["Crisp", "Smooth", "Pixel"];
 /// The strengths of the scanlines.
 pub const SCANLINES: &[&str] = &["Off", "Light", "Strong"];
 /// The strengths of the CRT filter.
@@ -62,8 +65,8 @@ pub const ROWS: &[RowDef] = &[
         key: "video.look",
         label: "Look",
         group: "Picture",
-        help: "Crisp is pixel art made bigger with smoothed diagonals. Smooth is a soft bicubic filter.",
-        kind: Kind::Choice(&["Crisp", "Smooth"]),
+        help: "Crisp is pixel art made bigger with smoothed diagonals. Smooth is a soft bicubic filter. Pixel has no filter: square pixels.",
+        kind: Kind::Choice(LOOKS),
         source: Source::Stored { default: 0 },
     },
     RowDef {
@@ -182,6 +185,16 @@ mod tests {
         assert_eq!(index(&values, "video.latency"), 0, "Low");
         let row = ROWS.iter().find(|row| row.key == "video.latency").unwrap();
         assert!(matches!(row.kind, Kind::Choice(["Low", "Smooth"])));
+    }
+
+    #[test]
+    fn the_look_is_crisp_unless_chosen_and_the_old_values_keep_their_meaning() {
+        let mut values = Values::new();
+        assert_eq!(index(&values, "video.look"), 0, "Crisp");
+        for (stored, look) in [(0, "Crisp"), (1, "Smooth"), (2, "Pixel")] {
+            values.set("video.look", stored);
+            assert_eq!(LOOKS[index(&values, "video.look")], look);
+        }
     }
 
     #[test]

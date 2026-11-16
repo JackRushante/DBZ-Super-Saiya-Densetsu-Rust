@@ -252,7 +252,7 @@ fn run_one(
             &machine,
             picture.as_ref(),
             None,
-            matches!(state.video.look, ssd_hd::Look::Smooth),
+            state.video.linear(),
         );
         let scene = state.hd.as_ref().and_then(|hd| hd.scene(machine.wram()));
         let overlay = state.hd.as_ref().and_then(|hd| hd.overlay(machine.wram(), machine.sram()));

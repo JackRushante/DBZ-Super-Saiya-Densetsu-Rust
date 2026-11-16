@@ -671,3 +671,104 @@ fn a_trial_exp_that_carries_past_24_bits_goes_to_the_high_byte() {
     assert_eq!(exp, 0x100_0000 + (0xFF_FF00 + 64_000 - 0x100_0000), "the whole EXP");
     assert!(level > 48 || pack.bytes(PARTY + 2, 1)[0] > 48, "the level-up check saw the whole EXP");
 }
+
+// ---- The Porunga card ----
+
+/// `05:C8BB`: the card's effect from the target scan (`$0D92`: the party offsets divided by two, `$FF` for none), through its cap and
+/// the refusal at `05:C8F3`, to the message at `05:93A9`.
+const CARD: u32 = 0x05_C8BB;
+const CARD_REFUSED: u32 = 0x05_C8F3;
+const CARD_MESSAGE: u32 = 0x05_C8E9;
+const CARD_USED: u32 = 0x05_93A9;
+const CARD_TARGETS: u32 = 0x7E_0D92;
+
+impl Rig {
+    /// Uses the card on party slot `slot`: the number the message is given (the level), or `None` when the card is refused.
+    fn use_card(&mut self, slot: u32) -> Option<u32> {
+        self.write(CARD_TARGETS, &[(0x10 * slot) as u8, 0xFF, 0xFF]);
+        match self.run_from(CARD, false, &[CARD_REFUSED, CARD_MESSAGE]) {
+            CARD_MESSAGE => {
+                let shown = self.bytes(0x7E_0000, 3);
+                let shown =
+                    u32::from(shown[0]) | u32::from(shown[1]) << 8 | u32::from(shown[2]) << 16;
+                assert_eq!(self.run_from(CARD_MESSAGE, false, &[CARD_USED]), CARD_USED);
+                Some(shown)
+            }
+            CARD_REFUSED => None,
+            other => panic!("the card stopped at ${other:06X}"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs the game's ROM (SSD_ROM_PATH)"]
+fn the_porunga_card_goes_past_its_cap_of_47_only_with_the_pack() {
+    let rom = rom();
+    let goku = anchor(&rom, 0);
+    let rows: Vec<_> = (1..=47).map(|l| game_row(&rom, 0, l)).collect();
+    let mut plain = Rig::new(&rom, false);
+    let mut pack = Rig::new(&rom, true);
+
+    // The original: Goku at 47 is refused.
+    plain.reset();
+    plain.member(0, 0, 47, rows[46].1, goku.bp, rows[46].2 as u16, goku.ki as u16);
+    assert_eq!(plain.use_card(0), None, "the original refuses Goku at 47");
+    assert_eq!(plain.bytes(PARTY + 2, 1)[0], 47);
+    plain.member(0, 0, 30, rows[29].1, 0, rows[29].2 as u16, 100);
+    assert_eq!(plain.use_card(0), Some(31), "a level below the cap is given");
+    assert_eq!(plain.bytes(PARTY + 2, 1)[0], 31);
+    assert_eq!(plain.triple(PARTY + 7), 0, "the original card gives the level and its EXP only");
+    let gohan = anchor(&rom, 1);
+    let gohan_rows: Vec<_> = (1..=48).map(|l| game_row(&rom, 1, l)).collect();
+
+    // The pack leaves a level below the cap as it is (the original gives the level and its EXP, no stats).
+    pack.reset();
+    pack.member(0, 0, 30, rows[29].1, 0, rows[29].2 as u16, 100);
+    assert_eq!(pack.use_card(0), Some(31));
+    assert_eq!(pack.bytes(PARTY + 2, 1)[0], 31);
+    assert_eq!(pack.triple(PARTY + 7), 0, "no BP below the cap, as in the original");
+
+    // With the pack: 47 to 48, 48 to 49 and 98 to 99, on the extended rows.
+    for (from, to) in [(47_u8, 48_u16), (48, 49), (98, 99)] {
+        if from == 47 {
+            pack.reset();
+            pack.member(0, 0, 47, rows[46].1, goku.bp, rows[46].2 as u16, goku.ki as u16);
+        } else {
+            goku_at_48(&mut pack, &rom);
+            if from != 48 {
+                pack.write(RAISE_LEVELS, &[from - 49]);
+                pack.call(0x03_C64A, 0);
+            }
+        }
+        assert_eq!(pack.bytes(PARTY + 2, 1)[0], from, "the member is at {from}");
+        assert_eq!(pack.use_card(0), Some(u32::from(to)), "the card is accepted at {from}");
+        let want = goku.at(to);
+        assert_eq!(pack.bytes(PARTY + 2, 1)[0], to as u8, "level {to}");
+        let (exp, bp) = (pack.triple(PARTY + 0x0F), pack.triple(PARTY + 7));
+        assert_eq!((exp, bp), (want.exp, want.bp), "EXP and BP of level {to}");
+        assert_eq!(u64::from(pack.word(PARTY + 0x0A)), u64::from(want.max_hp), "HP of {to}");
+        assert_eq!(u64::from(pack.word(PARTY + 0x0C)), want.ki, "KI of {to}");
+        assert_eq!(pack.word(PARTY + 3), pack.word(PARTY + 0x0A), "HP full");
+        assert_eq!(pack.bytes(GAINED, 1)[0], 0x80, "a level was gained");
+    }
+
+    // Gohan (cap 48 in the game) goes to 49 with the pack; from 99 the byte saturates and the wide level is 100.
+    pack.reset();
+    pack.member(0, 1, 48, gohan_rows[47].1, gohan.bp, gohan_rows[47].2 as u16, 100);
+    assert_eq!(pack.use_card(0), Some(49));
+    assert_eq!(pack.bytes(PARTY + 2, 1)[0], 49);
+    goku_at_48(&mut pack, &rom);
+    pack.write(RAISE_LEVELS, &[99 - 49]);
+    pack.call(0x03_C64A, 0);
+    assert_eq!(pack.bytes(PARTY + 2, 1)[0], 99);
+    assert_eq!(pack.use_card(0), Some(100), "the message shows level 100");
+    let (wide, exp, bp) = pack.wide(0);
+    let want = goku.at(100);
+    assert_eq!((wide, exp, bp), (100, want.exp, want.bp), "level 100");
+    assert_eq!(pack.bytes(PARTY + 2, 1)[0], 99, "the byte saturates");
+
+    // At the level cap the card is refused, as at the cap of the original.
+    pack.write(wide_level_at(0), &999_u16.to_le_bytes());
+    assert_eq!(pack.use_card(0), None, "refused at the cap");
+    assert_eq!(pack.word(wide_level_at(0)), 999);
+}

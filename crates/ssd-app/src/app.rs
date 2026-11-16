@@ -2322,7 +2322,7 @@ fn windowed_loop(
             machine,
             picture.as_ref(),
             env.verify.as_ref(),
-            matches!(state.video.look, ssd_hd::Look::Smooth),
+            state.video.linear(),
         );
         let views = shape_views(views, state.video.shape(), &mut shape_buffer);
         // The HD menu on screen, from this frame's state: nothing on the field, nothing in Classic.
@@ -2548,11 +2548,7 @@ fn draw_snapshot(
     let wide = game_frame(current_view(state.view.as_ref(), machine), machine);
     let mut shape_buffer = Vec::new();
     let views = match shown_picture {
-        Some(picture) => GameView::enhanced(
-            picture,
-            &machine.frame(),
-            matches!(state.video.look, ssd_hd::Look::Smooth),
-        ),
+        Some(picture) => GameView::enhanced(picture, &machine.frame(), state.video.linear()),
         None => GameView::classic(&wide),
     };
     let views = [filter::shape(views, state.video.shape(), &mut shape_buffer)];

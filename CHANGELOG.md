@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.14 (2026-11-16)
+
+### Features
+
+- **Options > Video > Look has a third value, Pixel (#19):** no filter, each pixel of the original picture a square block of whole
+  pixels, beside Crisp (Scale2x, the smoothed diagonals; still the default) and Smooth (bicubic). The window shows it with linear
+  filtering, so on a screen that is not a whole multiple of the picture (a phone, a window of any size) the blocks keep one size
+  and only their edges are blended over about one pixel ("sharp bilinear"). The look applies where the HD art does not draw; the
+  art is the same in the three looks. Saved as `video.look=2` in `ssd.settings`; older files keep their look. `--enhanced-look
+  pixel` picks it for a run.
+
+### Fixes
+
+- **The Game Over screen can be left (#18).** The original's Game Over screen loops forever and reads no button: on the console
+  only Reset left it, so a player without a keyboard (a gamepad or the touch controls on Android) was stuck there. In Remastered
+  A, B, X, Y, Select or Start on that screen now goes back to the title, through the game's own code that follows the screen, and
+  Continue loads the last save, as after a Reset. Run `recompile` for a recompiled build. Classic is unchanged.
+- Free progression, level cap: the Porunga card gives a level past 47 (48 for Gohan) up to the pack's cap. The card has its own cap and
+  copies the EXP of the next table row, which does not exist past the 48th. With the pack it now gives one level from its cap up, with the
+  EXP of the next level on the extended rows and the level-up check (BP, HP and KI follow), shows the real level in its message, and
+  is refused at the level cap. Below its cap, without the pack, or with `level_cap = 48`, nothing changes. Run `recompile` for a
+  recompiled build. Remastered only.
+
 ## 0.3.13 (2026-10-29)
 
 ### Fixes

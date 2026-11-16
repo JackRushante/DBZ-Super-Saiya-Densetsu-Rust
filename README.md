@@ -176,7 +176,7 @@ kept for this PC. *Reset this page* (Y) and *Reset all* (Select, with a Yes/No q
 - **Gameplay** (saved with the game): text speed (the original's five steps, Slowest to Fastest, the same setting as
   the Menu's Text entry), message auto-run after a short, normal or long wait, battle animation speed (x2 to x4: the
   attack animations run faster with the outcome unchanged; the music skips while they do), random encounters.
-- **Video** (this PC): window or fullscreen, scale 2x to 8x, look (crisp or smooth), V-sync, 16:9 or the original
+- **Video** (this PC): window or fullscreen, scale 2x to 8x, look (crisp, smooth or pixel: no filter), V-sync, 16:9 or the original
   4:3, scanlines and a CRT filter. A change of display, scale or aspect asks *Keep* or *Revert* and reverts by itself
   after 10 seconds.
 - **Audio** (this PC): one volume (the console mixes music and effects together) and stereo or mono.

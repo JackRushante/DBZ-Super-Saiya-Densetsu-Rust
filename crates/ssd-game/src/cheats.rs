@@ -159,6 +159,19 @@ const SALE_ENTRY: u32 = 0x03_A790;
 /// returns at once, as the routine does for a lower level, so the recruits wait until the party walks into the Saiyans (the
 /// game's other deadline, which stays).
 pub const LEVEL_DEADLINE_ENTRY: u32 = 0x03_F320;
+/// The last loop of the Game Over screen (main loop mode `$0D`, `00:A568`, called by the mode's init `00:9535`): once
+/// the words are drawn, the stars move and nothing else happens. The original loops there forever and reads no button
+/// (the main loop that reads the pad no longer runs): only the console's Reset leaves it. Its caller's code after the
+/// call clears three bytes and jumps to `00:8000`, the boot, which shows the title, whose Continue loads a save. A
+/// Remastered fix: a button pressed on that screen returns from the routine (`rtl`), so the game takes that path, as
+/// the Reset would.
+pub const GAME_OVER_LOOP: u32 = 0x00_A7B9;
+/// The serial port of joypad 1 (`$4016`): a write of 1 then 0 latches the buttons, and each read gives the next one in
+/// bit 0 (B, Y, Select, Start, Up, Down, Left, Right, A, X, L, R). On the Game Over screen the registers of the automatic
+/// read (`$4218`) never change (seen: no button reaches them there).
+const JOY1_SERIAL: u32 = 0x00_4016;
+/// The buttons that leave the Game Over screen, as the serial read's order (bit 15 first): B, Y, Select, Start, A and X.
+const GAME_OVER_BUTTONS: u16 = 0xF0C0;
 /// Porunga's wishes in a battle (`docs/re/data/menus.md`, "Porunga"): the window lists the three wishes on the tile rows 4, 6
 /// and 8 of the English text, but the original puts the cursor (`01:F2E4`, a word table at `01:F2F6`) and the marks of the
 /// wishes used (`01:B205`) on the rows 4, 8 and 10, the layout of a first wish of two lines: the cursor on the second wish
@@ -244,6 +257,11 @@ pub fn hook_entries() -> Vec<HookEntry> {
                 level_deadline_wrapper,
                 ReturnKind::Rtl,
             )
+        },
+        // The head of the Game Over screen's last loop: returning here is the return of `00:A568` to its caller.
+        HookEntry {
+            mode: HookMode::Patch,
+            ..entry("story_game_over_exit", GAME_OVER_LOOP, game_over_wrapper, ReturnKind::Rtl)
         },
     ]
 }
@@ -538,6 +556,20 @@ fn wish_mark_third_wrapper(ctx: &mut Ctx<'_>) {
 /// [`LEVEL_DEADLINE_ENTRY`]: returns (`rtl`) without the deadline, always (a story fix, not a cheat).
 fn level_deadline_wrapper(ctx: &mut Ctx<'_>) {
     ctx.set_cost(0);
+}
+
+/// [`GAME_OVER_LOOP`]: with A, B, X, Y, Select or Start held the Game Over routine returns (`rtl`) and its caller goes to
+/// the title; otherwise the loop goes on as the original's (a story fix, not a cheat).
+fn game_over_wrapper(ctx: &mut Ctx<'_>) {
+    ctx.write8(JOY1_SERIAL, 1);
+    ctx.write8(JOY1_SERIAL, 0);
+    let buttons =
+        (0..16).fold(0_u16, |buttons, _| buttons << 1 | u16::from(ctx.read8(JOY1_SERIAL) & 1));
+    if buttons & GAME_OVER_BUTTONS != 0 {
+        ctx.set_cost(0);
+    } else {
+        ctx.resume_at(GAME_OVER_LOOP);
+    }
 }
 
 /// `03:A790`, the shop's sale (`rtl`): the original adds the price of the object sold to the zeni and caps it at 999. With the

@@ -36,7 +36,11 @@ impl VideoSettings {
         Self {
             fullscreen: video::index(values, "video.display") == 1,
             scale: 2 + u32::try_from(video::index(values, "video.scale")).unwrap_or(2),
-            look: if video::index(values, "video.look") == 1 { Look::Smooth } else { Look::Crisp },
+            look: match video::index(values, "video.look") {
+                1 => Look::Smooth,
+                2 => Look::Pixel,
+                _ => Look::Crisp,
+            },
             narrow: video::index(values, "video.aspect") == 1,
             vsync: video::index(values, "video.vsync") == 1,
             smooth: video::index(values, "video.latency") == 1,
@@ -48,6 +52,14 @@ impl VideoSettings {
     #[must_use]
     pub const fn hd(&self) -> HdOptions {
         HdOptions { scale: self.scale, look: self.look }
+    }
+
+    /// Whether the window shows the Enhanced picture with linear filtering: the smooth look, and the pixel look, whose
+    /// blocks of whole pixels then keep one size on a screen that is not a whole multiple of them (only their edges are
+    /// blended, over about one pixel of the screen). The crisp look is shown with the nearest pixel.
+    #[must_use]
+    pub const fn linear(&self) -> bool {
+        matches!(self.look, Look::Smooth | Look::Pixel)
     }
 
     /// What the final pass does to the picture.
@@ -136,6 +148,13 @@ mod tests {
         let settings = VideoSettings::from_values(&values);
         assert!(settings.fullscreen && settings.narrow && settings.vsync && !settings.smooth);
         assert_eq!(settings.hd(), HdOptions { scale: 8, look: Look::Smooth });
+        assert!(settings.linear());
+        values.set("video.look", 2);
+        let pixel = VideoSettings::from_values(&values);
+        assert_eq!(pixel.look, Look::Pixel, "the third look");
+        assert!(pixel.linear(), "whole pixels, their edges blended on the screen");
+        values.set("video.look", 0);
+        assert!(!VideoSettings::from_values(&values).linear(), "crisp keeps the nearest pixel");
         assert_eq!(settings.filters, Filters { scanlines: 2, crt: 2 }, "a wild value clamps");
         assert_eq!(settings.shape(), Shape { crop: true, filters: settings.filters });
     }

@@ -16,7 +16,9 @@
 //! - `05:8FDD`, after the 24-bit EXP add of a fight: the carry goes to the EXP's high byte;
 //! - `03:867A`, the end of the Super Saiyan's builder (`03:85F0`): the BP, HP and KI the form is built with follow the level;
 //! - `05:8E3F`, the bonus of a won gravity trial (+2 levels): the level and EXP of the next two levels on the extended rows;
-//! - `03:CD87`, the EXP the gravity trials' last stage pays: its carry past 24 bits goes to the EXP's high byte.
+//! - `03:CD87`, the EXP the gravity trials' last stage pays: its carry past 24 bits goes to the EXP's high byte;
+//! - `05:C8D5`, the Porunga card: its own cap (47, 48 for Gohan) gives way to the level cap, and a level comes with the EXP of the
+//!   next level on the extended rows and the level-up check.
 
 use super::progression::level_cap;
 use super::state::{
@@ -44,6 +46,11 @@ pub(super) const TRIAL_WIN_KEY: u32 = 0x05_8E3F;
 const TRIAL_WIN_DONE: u32 = 0x05_8E55;
 /// `03:CD87`: the `LDY #0` after the 24-bit add of a trial's EXP (effect `$52`) to the first record, in front of its level-up check.
 pub(super) const TRIAL_EXP_KEY: u32 = 0x03_CD87;
+/// `05:C8D5`: the Porunga card, after the target is chosen and its cap is in `$00` (47, 48 for the category 9). The original refuses
+/// a member whose level byte reaches `$00`, else raises it by `05:C93A` (the EXP of the next table row, then the byte plus one).
+pub(super) const CARD_KEY: u32 = 0x05_C8D5;
+/// `05:C8E9`: the card's `JSL $1C8044`, which turns the 24-bit number in `$00` (the new level) into the message's digits.
+const CARD_MESSAGE: u32 = 0x05_C8E9;
 
 /// `03:850E`: the game's cap of each character (47 or 48 for the eight that have a table).
 const GAME_CAPS: u32 = 0x03_850E;
@@ -393,6 +400,30 @@ fn trial_win(ctx: &mut Ctx<'_>) {
     ctx.resume_at(TRIAL_WIN_KEY);
 }
 
+/// `05:C8D5`: the Porunga card is used on the party record at `Y`, with the card's own cap in `$00`. With the cap, for a character
+/// that has a table, from the card's own cap up (the levels the original refuses): a member below the level cap gets one level, on
+/// the extended rows: the EXP is the start of the next level, then the level-up check runs (BP, HP, KI and byte `$0E` follow), and
+/// the message shows the real level (the record's byte stops at 99); a member at the level cap is refused as before. Below the
+/// card's cap, and for any other record, the original runs (a level and its EXP, no stats).
+fn porunga_card(ctx: &mut Ctx<'_>) {
+    if let Some(cap) = level_cap(ctx)
+        && let Some((record, id)) = record_of(ctx, ctx.y())
+    {
+        let level = effective_level(ctx, record);
+        if level >= u16::from(ctx.peek_dp8(0)) && level < cap {
+            set_exp(ctx, record, id, row_at(ctx, id, level + 1).exp_start);
+            level_up_record(ctx, record, id, cap);
+            let shown = effective_level(ctx, record);
+            ctx.write_dp8(0, shown as u8);
+            ctx.write_dp8(1, (shown >> 8) as u8);
+            ctx.write_dp8(2, 0);
+            ctx.resume_at(CARD_MESSAGE);
+            return;
+        }
+    }
+    ctx.resume_at(CARD_KEY);
+}
+
 /// The factor of a level over the form's own level, `((level + 5) / 52)^power`, applied to `value` (rounded, halves up).
 #[must_use]
 pub(super) fn form_scaled(value: u64, level: u16, power: u32) -> u64 {
@@ -461,6 +492,7 @@ pub(super) fn hooks() -> Vec<HookEntry> {
         patch("mod_fp_super_saiyan_form", SUPER_SAIYAN_KEY, super_saiyan),
         patch("mod_fp_trial_win", TRIAL_WIN_KEY, trial_win),
         patch("mod_fp_trial_exp_carry", TRIAL_EXP_KEY, trial_exp_carry),
+        patch("mod_fp_porunga_card", CARD_KEY, porunga_card),
     ]
 }
 
@@ -504,7 +536,10 @@ mod tests {
     fn the_hooks_are_at_their_addresses_and_none_is_another_hooks_key() {
         let entries = hooks();
         let keys: Vec<u32> = entries.iter().map(|entry| entry.key).collect();
-        assert_eq!(keys, [0x03_841E, 0x03_851B, 0x05_8FDD, 0x03_867A, 0x05_8E3F, 0x03_CD87]);
+        assert_eq!(
+            keys,
+            [0x03_841E, 0x03_851B, 0x05_8FDD, 0x03_867A, 0x05_8E3F, 0x03_CD87, 0x05_C8D5]
+        );
         let cheats = crate::cheats::entry_points();
         for entry in &entries {
             assert!(!cheats.contains(&entry.key), "{} is a cheat's key", entry.name);

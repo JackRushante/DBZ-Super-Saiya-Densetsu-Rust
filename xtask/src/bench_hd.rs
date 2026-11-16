@@ -145,6 +145,7 @@ fn label((kind, scale, look): (Kind, u32, Look)) -> (String, &'static str) {
         (Kind::WideArt, _) => "16:9 art",
         (_, Look::Crisp) => "crisp",
         (_, Look::Smooth) => "smooth",
+        (_, Look::Pixel) => "pixel",
     };
     (format!("{scale}x"), look)
 }

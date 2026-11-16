@@ -55,7 +55,7 @@ pub struct Args {
     /// art: the size the game's window shows. `--state-in` with it is how a saved moment is seen in
     /// HD without a window.
     pub hd_scale: Option<u32>,
-    /// The look of the `--hd-scale` picture: `--enhanced-look crisp|smooth` [default: crisp].
+    /// The look of the `--hd-scale` picture: `--enhanced-look crisp|smooth|pixel` [default: crisp].
     pub look: Look,
     /// The HD pack folder of `--hd-scale` [default: the converter's under the cache directory].
     pub hd_pack: Option<PathBuf>,
@@ -72,7 +72,7 @@ pub struct Args {
 
 /// Parses `<script> [--frames a,b,c] [--every N] [--upto N] [--out dir] [--sheet COLS]
 /// [--no-png] [--peek a,b] [--watch a,b] [--watch-from N] [--state-in f] [--state-out f]
-/// [--wram-out f] [--sram f] [--sram-out f] [--hd-scale N] [--enhanced-look crisp|smooth] [--pack DIR]
+/// [--wram-out f] [--sram f] [--sram-out f] [--hd-scale N] [--enhanced-look crisp|smooth|pixel] [--pack DIR]
 /// [--gaps DIR] [--mods PACK]...`.
 ///
 /// # Errors
@@ -164,7 +164,8 @@ pub fn parse_args(args: &[&str]) -> Result<Args, String> {
                 parsed.look = match it.next().copied() {
                     Some("crisp") => Look::Crisp,
                     Some("smooth") => Look::Smooth,
-                    _ => return Err("--enhanced-look takes crisp or smooth".to_owned()),
+                    Some("pixel") => Look::Pixel,
+                    _ => return Err("--enhanced-look takes crisp, smooth or pixel".to_owned()),
                 };
             }
             "--pack" => {

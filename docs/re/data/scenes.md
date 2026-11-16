@@ -179,7 +179,15 @@ Map ids are places, and one chapter uses several. From the set-up routines, the 
 `game_mode` (`$24`; bit 7 is a "just entered" flag) is the main loop's state; 00:8B54 jumps through 19 words.
 Seen: `$00` the map, `$02` and `$04` a battle (2 starts it), `$03` the menus (Continue's slot list, the Status
 screen), `$07` a story transition, `$0A` a minigame (Dende's rescue ends in a flying chase), `$0C` a stage of
-the last fight (Frieza's power-up), `$11` the ending (see below).
+the last fight (Frieza's power-up), `$0D` the Game Over screen (below), `$11` the ending (see below).
+
+### Game Over
+
+A lost battle sets mode `$0D`. Its init (`00:9535`) calls the screen (`00:A568`: the words drawn over a field of moving
+stars), then clears three bytes and jumps to the boot (`00:8000`, the title). The screen never returns: after its drawing
+(about 800 frames) it ends in a loop (`00:A7B9`) with no exit, and the main loop that reads the pad does not run, so no button
+changes anything; on the console only Reset leaves it (seen: the reference battle lost with every button pressed in turn).
+Remastered returns from it on a button (`story_game_over_exit`, README "Cheats (M5)"), so the jump to the boot runs.
 
 ### Story transitions
 
