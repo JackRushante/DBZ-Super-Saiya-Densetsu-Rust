@@ -297,6 +297,10 @@ impl<'a> MenuProbe<'a> {
         if !self.menu_open() && !self.battle_effect() {
             return false;
         }
+        // While the menu is still in its opening transition (`field_state` $0F), it does not accept commands yet.
+        if self.opening() {
+            return false;
+        }
         if self.byte(d::MENU_DRAW_DONE).is_none_or(|done| done & DRAW_QUEUE_EMPTY == 0) {
             return false;
         }
@@ -748,6 +752,8 @@ mod tests {
         assert!(!MenuProbe::new(&ram, &labels).ready(), "busy");
         set(&mut ram, d::MENU_BUSY, 0);
         assert!(MenuProbe::new(&ram, &labels).ready(), "idle");
+        set(&mut ram, d::FIELD_STATE, STATE_OPENING);
+        assert!(!MenuProbe::new(&ram, &labels).ready(), "still opening");
         set(&mut ram, d::FIELD_STATE, 0);
         assert!(MenuProbe::new(&ram, &labels).ready(), "a free field takes a press (to open)");
         assert!(!MenuProbe::new(&ram, &labels).menu_open());
