@@ -330,9 +330,10 @@ fn write24(ctx: &mut Ctx<'_>, at: u32, value: u32) {
     ctx.write8(at + 2, (value >> 16) as u8);
 }
 
-/// The party records, as the fighters the party's level is read from.
+/// The party records, as the fighters the party's level is read from. In the last fight, whose enemy is built before Goku joins
+/// from the roster, he counts at the level he joins at (`levels::arriving_goku`, with the level cap).
 fn fighters(ctx: &Ctx<'_>) -> Vec<Fighter> {
-    (0..PARTY_SLOTS)
+    let mut fighters: Vec<Fighter> = (0..PARTY_SLOTS)
         .map(|slot| {
             let base = party_record(slot);
             Fighter {
@@ -342,7 +343,9 @@ fn fighters(ctx: &Ctx<'_>) -> Vec<Fighter> {
                 character: ctx.peek8(base + CHARACTER),
             }
         })
-        .collect()
+        .collect();
+    fighters.extend(super::levels::arriving_goku(ctx, &fighters));
+    fighters
 }
 
 /// The scaling and the party's level (in sixths) of this fight, or `None` when the scaling does not act: the feature is not in

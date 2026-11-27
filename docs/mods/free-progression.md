@@ -265,7 +265,10 @@ a level to reach in the original (it is the Super Saiyan's), and the extension b
 | `03:841E` (entry) | the level-up check after a fight, replaced for a character with a table: while the EXP reaches the next level's start and the level is below the cap, the level goes up and the row's BP, HP, KI and byte `$0E` are applied, HP and KI refilled, bit 7 of `$1F` set; the original's own rules otherwise |
 | `03:851B` (entry) | the raise by a number of levels (the story's floors and gifts, the Porunga card), with the original's rule: the target plus one, at least one level; the byte saturates, so a floor's target below 99 is one level and a gift of `n` levels is `n + 1` |
 | `05:8FDD` | the carry of a fight's 24-bit EXP add goes to the EXP's high byte |
-| `03:867A` | the end of the Super Saiyan's builder, see "Bosses" below |
+| `03:85F0` (entry) | the builder of a form (Goku's Super Saiyan, Piccolo's fusion with Dende): the character keeps his level, see "The forms and the story's gifts" below |
+| `03:C64A` (entry) | the level routine of the story: the gifts of Piccolo's fusions and of Guru are scaled with the level, and Goku's raise after the medical pod follows the party, see below; the floors are the original's |
+| `03:C845` | the end of the load of the last fight (effect `$3C`): Goku, built from the roster, is raised to the party's level, see below |
+| `01:E3FC` | the commit of Porunga's level wish on the chosen member (the Item effect): a member at the game's cap (47, 48) is given a level up to the level cap, on the extended rows (the party-wide wish of `party_boosts` does the same for the others) |
 | `05:8E3F` | the win of a gravity trial of the spaceship (a fight that ends with `$01D6` bit 7 set), which gives the first record two levels: the original sets its EXP to the start of the level two above by reading the table row of each level (`05:C93A`, twice) and lowers the level byte by two before the check; past the 48th row that is the bytes that follow the table, so the EXP became a few hundred and Goku stayed at 48. The hook sets the EXP to the start of the level two above on the extended rows (at most the cap), runs the level-up check and goes on after it |
 | `03:CD87` | the EXP the gravity trials' last stage pays (effect `$52`, the first record): the carry of its 24-bit add goes to the EXP's high byte |
 | `05:C8D5` | the Porunga card, after its target is chosen and its own cap is set (47, 48 for Gohan): the original refuses a member at that level, and below it gives one level by copying the EXP of the next table row (`05:C93A`, which reads past the 48th row). From the card's cap up, the hook gives one level up to the level cap: the EXP is the start of the next level on the extended rows, then the level-up check runs (BP, HP, KI follow) and the message shows the real level; a member at the level cap is refused. Below the card's cap the original runs (a level and its EXP, no stats) |
@@ -281,8 +284,10 @@ level `P` is read from the wide levels. The forms of one boss and the HP thresho
 - **The Super Saiyan Goku** is built with the fixed BP of the row of level 48 (4 999 999), HP 800 and KI 189. At a party far above
   47 that Goku would be a fraction of the last Frieza, who has scaled with the party. With the level cap the form **follows Goku's
   level `L`**: BP times `((L + 5) / 52)^3`, HP and KI times `(L + 5) / 52` (at most 9 999), so that the form's place on the curve is
-  the one it has at level 47, and the record keeps the level byte it had. A Goku of 47 or less is the original's Goku, exactly.
-  At level 100 the form has 41 million BP, at 300 one billion.
+  the one it has at level 47, and the record keeps the level he had (the builder sets 48, which the hook puts back). It holds for every
+  level from 48 (before 0.4.1 the form followed the level only from 100, because the builder had overwritten the byte of a level
+  between 48 and 99 by then). A Goku of 47 or less is the original's Goku, exactly. At level 100 the form has 41 million BP, at 300
+  one billion.
 - **The transformation's gate** reads a level of 47 or more: with a wide level it is met as ever, and a party below 47 still gets
   the transformation (the first part of the mod).
 - **The scripted loss** (Nail against Frieza, the group `$57`) is not scaled, as before.
@@ -292,6 +297,51 @@ level `P` is read from the wide levels. The forms of one boss and the HP thresho
 - **The EXP of the fights.** The EXP an enemy pays is scaled by `q^2` and the battle's total is 24 bits (16.7 million): a party at
   level 999 against enemies made for level 5 earns about a million an enemy, so a total that wraps needs a dozen of the strongest
   bosses in one fight, which no battle has.
+
+### The forms and the story's gifts
+
+The story gives a character levels in three ways that the level cap would otherwise turn into losses or into nothing at a high
+level. All of them act only with `level_cap`; without it every routine is the original's.
+
+- **Piccolo's fusion with Dende** (scene `$3C`) gives Piccolo 5 levels (3 in the other branch, and then 2 more or 1 when Dende is gone), and then, when Vegeta is in
+  the party, builds the form `$3E` with the same builder as the Super Saiyan (effect `$66`, `03:85F0`), which sets the level to 48 and
+  the BP, HP and KI to the numbers of the row of level 48 of his table (1 900 000 BP, 710 HP, 124 KI). A Piccolo of 80 fell back to 48
+  and to those numbers, and his wide level and the BP's high part kept their old values. The hook runs the builder and then keeps the
+  character's **level** (at least 48) and puts the form on his curve: **BP** times `((L + 5) / 52)^3`, **HP** and **KI** times
+  `(L + 5) / 52` (at most 9 999), none of them below what he had before the builder (the original's 124 KI is below the 178 that his own
+  rows have given him by 47). A character of 47 or less gets the row's own numbers, level 48, as in the original. Piccolo at 80 gets
+  8 298 514 BP (his own was 4 450 768). Goku's Super Saiyan is built by the same code and follows the same rule.
+- **The gifts of levels** are the scene effect `$38` (Nail's fusion `$37`: +5; Dende's `$3C`: +4 or +2, then +1; Gohan's `$04`; the
+  Snake Way's `$4C`) and Guru's unlocking (effect `$5B`, +2 for every member). The routine gives `n + 1` levels for a gift of `n`. At a
+  level far above the one the story expects, those levels are worth very little BP (BP goes with `u^3`, `u = level + 5`: three levels
+  are 28 percent more BP at level 30 and 9 percent at level 100). The hook of `03:C64A` makes the gifts of Nail's fusion, Dende's fusion
+  and Guru's unlocking give the same *relative* rise of `u` as the original gives at the level the story expects the character at
+  (35 for Nail's, 41 for Dende's and 35 for Guru's): the levels given are `n + 1` times `(L + 5) / (reference + 5)`, rounded, and never
+  fewer than `n + 1`. So a gift of 6 levels at Piccolo's 100 is 16 levels (his BP rises 1.52 times, as 6 levels at 35 do), and at the
+  reference level or below it is the original's. The hook tells these calls from the floors by the address that `03:C64A` returns to
+  (the scene engine's dispatch of an effect, in the scene `$37` or `$3C`; the `JSL` of effect `$5B`), so every floor keeps the
+  original's rule (a floor's negative delta wraps in 8 bits). The other gifts (Gohan's `$04`, the Snake Way's `$4C` and the floors
+  that follow it) are the original's: they are early catch-ups.
+- **Goku after the medical pod and in the last fight.** The scene `$3F` raises Goku to 49 at the pod (`03:FA82`), which stopped at his cap
+  47, and the last fight's load (effect `$3C`) builds him from the roster at the level he left it. With the level cap Goku comes to
+  level `T = max(his level, round(1.1 * the mean of the three highest levels of the others))`, with his rows (BP, HP, KI, EXP; HP and
+  KI full): at the pod (`03:FA82`, only if his record is in the party then) and at the end of the load (`03:C845`). The enemy of the
+  last fight is built before he joins (effect `$3C` calls the enemy builder at `03:C7FB`, before the load), so the scaling counts him
+  as a fighter at `T` when it reads the party's level (`levels::arriving_goku`): Frieza of the last fight is made for a party that has
+  Goku in its three highest. His hit points are the ones the previous fight left (`$7E:2B03`), which the scaling does not touch.
+
+### The Porunga wish and the BP objects
+
+- **Porunga's level wish** from the Item menu (the second wish of the object) refused a member at the game's cap (47, 48) through the
+  game's cap check `03:84EE`. With the level cap the hook at `01:E3FC` gives such a member one level on the extended rows, up to the
+  level cap: the level (the byte saturates at 99), the EXP the level begins at, the level's BP (in the record and in the BP snapshot, with
+  the high parts), byte `$0E`, and the targets of the maximum HP and KI that the next step's animation grows to. The refusals of the
+  original that are not the cap stay (flags bits 1 and 5, Goku with the Kaioken on), and a member at the level cap is refused. A member
+  below the game's cap is given his level by the original's own code. With the pack `party-boosts` the other members get the same, each
+  by the rule that fits him.
+- **Guru** (+50 percent BP) and King Kai's object (+25 percent) cut the BP at 9 999 999 and read only its 24 low bits: with a wide BP the
+  original's step *lowered* the member (a BP of 52 million became 9 999 999). With the level cap a member whose BP is above 6 666 666
+  gets the whole rise in 40 bits instead (the chosen member, and the others with the pack `party-boosts`).
 
 ### The displays
 
@@ -411,6 +461,10 @@ HUD digits, take the low 24 bits (`state.md`).
   to 0.4 times his BP at the same level, and two (Piccolo and Vegeta) pass it in the top levels; the law does not see it.
 - The levels the story asks of the party (the forced fight with Raditz, the end of the Saiyans' chapter, the Super Saiyan
   transformation, the flags of map 16) are not touched: that is the other part of the mod.
+- The last fight's Frieza takes his hit points from the previous fight (`$7E:2B03` and `$7E:2B0A`), made for the party without Goku: they
+  are not recomputed for the party with him (the maximum HP of the form comes from the previous fight's scaling).
+- The reference levels of the scaled gifts (35, 41 and 35) are the levels the original's story reaches at those scenes, estimated from the
+  floors and the gifts (`docs/re/data/free-progression.md`, section 3); they are constants of `levels.rs`.
 - A scaled BP past 24 bits meets the routines that `state.md` lists as not yet wide (the form changes `05:A54A` and `05:A622`,
   the power-up `05:A727`): they wrap it at 24 bits. It takes a party above level 50 (a raised level cap) to reach it: 51 at
   hard and 58 at normal for the largest BP of the original's rows. The level cap's own level-up and Super Saiyan hooks write the wide BP

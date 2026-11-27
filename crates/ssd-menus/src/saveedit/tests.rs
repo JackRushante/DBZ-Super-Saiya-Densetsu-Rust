@@ -453,7 +453,7 @@ fn writing_the_slot_projects_the_bag_with_attributes_state_words_count_and_a_goo
     e.key(Key::Up);
     e.key(Key::A);
     let commit = e.take_commit().expect("a write");
-    assert_eq!((commit.slot, commit.edited.clone()), (0, vec![(1, 1)]));
+    assert_eq!((commit.slot, commit.edited.clone()), (0, vec![(Some(1), 1)]));
     let file = SaveFile::from_bytes(&commit.sram).unwrap();
     assert_eq!(file.status(0), Ok(SlotStatus::Good));
     let slot = file.slot(0).unwrap();
@@ -905,4 +905,191 @@ fn the_editor_draws_three_digit_levels_and_a_ten_digit_bp_inside_its_windows() {
         assert!(left >= 0.0 && right <= WIDTH, "{text:?} {left} {right}");
     }
     assert_no_collision(&list);
+}
+
+// ---- Members who are not in the party ----
+
+/// A cartridge whose slot 0 has Goku alone in the party, Krillin (LV 8) who joined and waits outside it (his flags cleared, as the
+/// game does while Piccolo is back), and in Tien's place of the roster what the memory held at power-on (a character byte that is not
+/// his, a level of 200).
+fn cartridge_with_a_bench() -> Vec<u8> {
+    let mut file = SaveFile::blank();
+    let mut slot = Slot::empty();
+    slot.set_record(0, &record(0, 10, 1000)).unwrap();
+    let mut krillin = record(3, 8, 500);
+    krillin.set_flags(0);
+    krillin.set_max_hp(80);
+    krillin.set_hp(80);
+    slot.set_record(3, &krillin).unwrap();
+    let mut noise = Record::blank();
+    noise.set_character_id(0x77);
+    noise.set_level(200);
+    noise.set_max_hp(0x5555);
+    slot.set_record(4, &noise).unwrap();
+    slot.set_party(&[0]).unwrap();
+    file.set_slot(0, &slot).unwrap();
+    file.as_bytes().to_vec()
+}
+
+fn with_a_bench() -> Editor {
+    let mut e =
+        Editor::open(&cartridge_with_a_bench(), &labels(), &Sidecar::empty(), [false; 3]).unwrap();
+    e.key(Key::A);
+    e
+}
+
+#[test]
+fn a_character_who_joined_and_waits_outside_the_party_is_listed_after_the_party() {
+    let e = with_a_bench();
+    let members = &e.session().unwrap().members;
+    assert_eq!(members.iter().map(|m| m.id).collect::<Vec<_>>(), [0, 3], "Goku, then Krillin");
+    assert_eq!(members.iter().map(|m| m.position).collect::<Vec<_>>(), [Some(0), None]);
+    assert!(members[0].in_party() && !members[1].in_party());
+    assert_eq!((members[1].name.as_str(), members[1].level()), ("Krillin", 8));
+    // The noise of a character who never joined is not a member; nor is a blank record (the test cartridge's other records).
+    assert!(!joined(&Record::blank(), 5));
+    let mut noise = Record::blank();
+    noise.set_character_id(4);
+    noise.set_level(30);
+    assert!(!joined(&noise, 4), "no maximum HP");
+    noise.set_max_hp(300);
+    noise.set_hp(301);
+    assert!(!joined(&noise, 4), "HP above its maximum");
+    noise.set_hp(300);
+    assert!(joined(&noise, 4));
+    assert!(!joined(&noise, 5), "the record is another character's");
+    // A party of two with no bench is what it was.
+    let mut plain = editor();
+    plain.key(Key::A);
+    assert_eq!(plain.session().unwrap().members.len(), 2);
+}
+
+#[test]
+fn l_and_r_walk_the_members_outside_the_party_before_the_bag_pages() {
+    let mut e = with_a_bench();
+    assert_eq!(e.session().unwrap().member, 0);
+    e.key(Key::R);
+    let session = e.session().unwrap();
+    assert_eq!((session.page, session.member), (Page::Party, 1), "Krillin, not the bag");
+    e.key(Key::R);
+    assert_eq!(e.session().unwrap().page, Page::All);
+    e.key(Key::L);
+    assert_eq!(
+        (e.session().unwrap().page, e.session().unwrap().member),
+        (Page::Party, 1),
+        "back from the bag to the last member"
+    );
+    assert_eq!(Page::Allies.label(), "Ally cards", "the bag's tab of the cards of the allies");
+}
+
+#[test]
+fn a_member_outside_the_party_is_edited_and_written_back_like_the_others() {
+    let mut e = with_a_bench();
+    e.key(Key::R);
+    for _ in 0..4 {
+        e.key(Key::Right);
+    }
+    let krillin = e.session().unwrap().members[1].clone();
+    assert_eq!(krillin.level(), 12);
+    assert_eq!(krillin.record.exp(), 12 * 12 * 10, "the row's own EXP");
+    e.key(Key::Down);
+    for _ in 0..50 {
+        e.key(Key::Right);
+    }
+    assert_eq!(e.session().unwrap().members[1].bp(), krillin.bp() + 50);
+    assert!(e.changed());
+    assert_eq!(e.change_count(), 1);
+    e.key(Key::Start);
+    assert_eq!(e.stage(), Stage::Write(2));
+    e.key(Key::Up);
+    e.key(Key::Up);
+    e.key(Key::A);
+    let commit = e.take_commit().expect("a write");
+    assert_eq!(commit.edited, [(None, 3)], "no party position");
+    let slot = SaveFile::from_bytes(&commit.sram).unwrap().slot(0).unwrap();
+    let written = slot.record(3).unwrap();
+    assert_eq!(
+        (written.level(), written.bp(), written.max_hp()),
+        (12, krillin.bp() as u32 + 50, 120)
+    );
+    assert_eq!(slot.party(), [0], "the party is as it was");
+    assert_eq!(slot.record(0).unwrap().bp(), 1000, "an unchanged member is untouched");
+    assert_eq!(slot.record(4).unwrap().level(), 200, "the noise is left as it was");
+    // Opened again, he reads back as written, and is not marked as changed.
+    let mut again = Editor::open(&commit.sram, &labels(), &Sidecar::empty(), [false; 3]).unwrap();
+    again.key(Key::A);
+    assert_eq!(again.session().unwrap().members[1].level(), 12);
+    assert!(!again.changed());
+}
+
+#[test]
+fn a_member_outside_the_party_has_no_wide_bp_and_keeps_his_wide_level() {
+    let mut e =
+        Editor::open(&cartridge_with_a_bench(), &labels(), &Sidecar::empty(), [false; 3]).unwrap();
+    e.set_progression(Some(999), &ModsSidecar::empty());
+    e.key(Key::A);
+    e.key(Key::R);
+    assert_eq!(e.session().unwrap().members[1].id, 3);
+    e.change_level(500);
+    let member = e.session().unwrap().members[1].clone();
+    assert_eq!(
+        (member.level(), member.wide.level),
+        (508, 508),
+        "the wide level is kept by character"
+    );
+    assert_eq!(member.bp(), BENCHED_BP_MAX, "the BP stops at the record's 24 bits");
+    assert_eq!(member.wide.bp_high, 0);
+    assert_eq!(e.bp_max_of(&member), BENCHED_BP_MAX);
+    assert_eq!(e.bp_max(), BP_MAX_WIDE, "the party's members go higher");
+    e.key(Key::Down);
+    e.key(Key::Right);
+    assert_eq!(e.notice(), Some("BP stops at 16777215."));
+    // Y puts the BP back at the table's value, cut at the same place.
+    e.key(Key::Y);
+    assert_eq!(e.session().unwrap().members[1].bp(), BENCHED_BP_MAX);
+    // The write drops no party slot's high part and keeps the level by character.
+    e.stage = Stage::Write(0);
+    e.key(Key::A);
+    let commit = e.take_commit().unwrap();
+    assert_eq!(commit.edited, [(None, 3)]);
+    let mut mods = ModsSidecar::empty();
+    let mut high = vec![0_u8; HIGH_BYTES];
+    high[0] = 9; // Goku's part of the party (position 0) stays
+    mods.store(0, commit.old_checksum, ModState { flags: None, high: Some(high), levels: None });
+    rekeyed(&commit, &mut mods);
+    let state = mods.entry_for(0, commit.new_checksum).unwrap();
+    assert_eq!(state.high.as_ref().unwrap()[0], 9, "Goku's high part is untouched");
+    let levels = state.levels.as_ref().unwrap();
+    assert_eq!(u16::from_le_bytes([levels[6], levels[7]]), 508, "Krillin's wide level");
+}
+
+#[test]
+fn the_ally_cards_tab_has_room_and_the_list_scrolls_with_more_members_than_rows() {
+    // The four tabs, laid out one after the other.
+    let positions = super::draw::tab_positions();
+    assert!(positions[3] > positions[2] + crate::layout::text_width("Ally cards", SMALL_TEXT));
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    let list = scene(&with_a_bench());
+    let texts: Vec<&str> = list
+        .ops()
+        .iter()
+        .filter_map(|op| match op {
+            Op::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.contains(&"Ally cards") && !texts.contains(&"Allies"));
+    assert!(texts.contains(&"LV 8  \u{b7}  not in the party"), "the bench is marked in the list");
+    assert!(texts.contains(&"1/9"), "the count is the party's");
+    let mut e = with_a_bench();
+    e.key(Key::R);
+    let texts: Vec<String> = scene(&e)
+        .ops()
+        .iter()
+        .filter_map(|op| match op {
+            Op::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t == "Not in the party"), "the panel says so");
 }

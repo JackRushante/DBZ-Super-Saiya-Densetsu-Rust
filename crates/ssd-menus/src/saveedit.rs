@@ -17,6 +17,15 @@
 //! item list (the entries, their state words, the count and the row count); the result is a [`Commit`], which the host writes to
 //! the machine's cartridge save and whose sidecar entries it re-keys to the new checksum word ([`Commit::rekey`]).
 //!
+//! # Members who are not in the party
+//!
+//! After the party's members (the list at `$0190`, in its order) the editor lists the characters who joined the story and are not in
+//! the party now: the game keeps the record of each character in the slot's roster image, indexed by character id, and the records
+//! of characters who never joined hold whatever the memory held ([`joined`] tells the two apart). Such a member is edited and
+//! written back like the others (`Slot::set_record`), marked "not in the party". The wide BP's high part is kept per party
+//! position, which he has none of, so his BP stops at the 24 bits of the record ([`BENCHED_BP_MAX`]); his wide level and EXP's high
+//! byte, which are kept by character, work as the party's.
+//!
 //! # Levels past 99 (the level cap of `free_progression`)
 //!
 //! With a pack whose `level_cap` is set ([`Editor::set_progression`]) the editor sets the levels the game reaches with it, up to
@@ -45,6 +54,8 @@ pub const BP_MAX: u32 = 9_999_999;
 pub const BP_MAX_WIDE: u64 = 9_999_999_999;
 /// The most a held key multiplies a level step by, with the level cap (the levels run to 999).
 const LEVEL_FAST_MAX: i64 = 100;
+/// The most BP a member who is not in the party has: the 24 bits of the record (his BP's high part would need a party position).
+pub const BENCHED_BP_MAX: u64 = 0xFF_FFFF;
 /// The characters whose levels the level cap extends: those with a level table of the game's (Goku to Vegeta).
 const EXTENDED_IDS: u8 = 8;
 /// The most units a stack holds.
@@ -93,7 +104,7 @@ impl Page {
         match self {
             Self::Party => "Party",
             Self::All => "All",
-            Self::Allies => "Allies",
+            Self::Allies => "Ally cards",
             Self::Tools => "Tools",
         }
     }
@@ -162,11 +173,18 @@ pub struct Member {
     /// What the mod state adds to the record, as it is now and as the slot was opened (all zero without the level cap).
     pub wide: Wide,
     pub opened_wide: Wide,
-    /// The position in the party (the wide BP's high part is kept by it).
-    pub position: usize,
+    /// The position in the party (the wide BP's high part is kept by it); `None` for a character who joined and is not in the party
+    /// now (his record is in the slot's roster only).
+    pub position: Option<usize>,
 }
 
 impl Member {
+    /// Whether the member is in the party (else he is a character who joined and is not in it now).
+    #[must_use]
+    pub fn in_party(&self) -> bool {
+        self.position.is_some()
+    }
+
     /// Whether the level, the BP or the stats changed since the slot was opened.
     #[must_use]
     pub fn changed(&self) -> bool {
@@ -266,9 +284,9 @@ pub struct Commit {
     pub new_checksum: u16,
     /// The bag the slot has now (`ssd.bag`).
     pub bag: Bag,
-    /// The members whose BP or level was edited, as (position in the party, character id): the wide BP's high part of each is
-    /// dropped, since the editor sets a BP of at most [`BP_MAX`].
-    pub edited: Vec<(usize, u8)>,
+    /// The members whose BP or level was edited, as (position in the party or `None`, character id): the wide BP's high part of each
+    /// is dropped, since the editor sets a BP of at most [`BP_MAX`].
+    pub edited: Vec<(Option<usize>, u8)>,
     /// With the level cap, what the mod state keeps for each edited member (see [`Wide`]); empty without it.
     pub wide: Vec<WideEdit>,
 }
@@ -276,8 +294,8 @@ pub struct Commit {
 /// The mod state of an edited member, written by [`Commit::rekey`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WideEdit {
-    /// The position in the party and the character id.
-    pub position: usize,
+    /// The position in the party (`None`: not in the party) and the character id.
+    pub position: Option<usize>,
     pub id: u8,
     pub wide: Wide,
 }
@@ -319,8 +337,12 @@ impl Commit {
     fn rekey_mods(&self, state: &mut ModState) {
         if let Some(high) = state.high.as_mut().filter(|high| high.len() == HIGH_BYTES) {
             for &(position, id) in &self.edited {
-                // The party slot's high part at +2i, the snapshot's at +20 + 2 * id.
-                for at in [2 * position, 0x20 + 2 * usize::from(id)] {
+                // The party slot's high part at +2i (a member who is not in the party has none), the snapshot's at +20 + 2 * id.
+                for at in position
+                    .map(|position| 2 * position)
+                    .into_iter()
+                    .chain([0x20 + 2 * usize::from(id)])
+                {
                     if let Some(part) = high.get_mut(at..at + 2) {
                         part.fill(0);
                     }
@@ -328,9 +350,11 @@ impl Commit {
             }
         }
         for edit in &self.wide {
-            let high = state.high.get_or_insert_with(|| vec![0; HIGH_BYTES]);
-            if let Some(part) = high.get_mut(2 * edit.position..2 * edit.position + 2) {
-                part.copy_from_slice(&edit.wide.bp_high.to_le_bytes());
+            if let Some(position) = edit.position {
+                let high = state.high.get_or_insert_with(|| vec![0; HIGH_BYTES]);
+                if let Some(part) = high.get_mut(2 * position..2 * position + 2) {
+                    part.copy_from_slice(&edit.wide.bp_high.to_le_bytes());
+                }
             }
             let levels = state.levels.get_or_insert_with(|| vec![0; LEVEL_BYTES]);
             let (at, exp_at) = (2 * usize::from(edit.id), 2 * 12 + usize::from(edit.id));
@@ -459,6 +483,13 @@ impl Editor {
         if self.level_cap.is_some() { BP_MAX_WIDE } else { u64::from(BP_MAX) }
     }
 
+    /// The most BP the editor sets for `member`: [`Editor::bp_max`], or the record's 24 bits for one who is not in the party
+    /// ([`BENCHED_BP_MAX`]; his BP has no part in the block), when that is less.
+    #[must_use]
+    pub fn bp_max_of(&self, member: &Member) -> u64 {
+        if member.in_party() { self.bp_max() } else { self.bp_max().min(BENCHED_BP_MAX) }
+    }
+
     /// Whether the level cap extends the levels of character `id` past its game cap.
     #[must_use]
     pub fn extended(&self, id: u8) -> bool {
@@ -478,9 +509,9 @@ impl Editor {
         }
     }
 
-    /// What the mod state of `slot` adds to the record of character `id` at party position `position`, as the slot was written;
-    /// all zero without the level cap.
-    fn wide_of(&self, slot: usize, checksum: u16, position: usize, id: u8) -> Wide {
+    /// What the mod state of `slot` adds to the record of character `id` at party position `position` (`None`: not in the party),
+    /// as the slot was written; all zero without the level cap.
+    fn wide_of(&self, slot: usize, checksum: u16, position: Option<usize>, id: u8) -> Wide {
         if self.level_cap.is_none() {
             return Wide::default();
         }
@@ -499,7 +530,9 @@ impl Editor {
             ),
             _ => (0, 0),
         };
-        let bp_high = state.high.as_deref().map_or(0, |high| pair(high, 2 * position));
+        let bp_high = position
+            .and_then(|position| state.high.as_deref().map(|high| pair(high, 2 * position)))
+            .unwrap_or(0);
         Wide { level, exp_high, bp_high }
     }
 
@@ -531,7 +564,7 @@ impl Editor {
             .and_then(|&leader| slot.record(leader).ok().map(|record| (leader, record)))
             .map_or(0, |(leader, record)| {
                 let checksum = checksum_word(self.file.as_bytes(), index);
-                level_of(&record, &self.wide_of(index, checksum, 0, leader))
+                level_of(&record, &self.wide_of(index, checksum, Some(0), leader))
             });
         let units = self
             .bags
@@ -701,26 +734,33 @@ impl Editor {
             return;
         };
         let checksum = checksum_word(self.file.as_bytes(), index);
-        let members: Vec<Member> = data
-            .party()
-            .into_iter()
+        let party = data.party();
+        let member = |id: u8, record: Record, position: Option<usize>| {
+            let label = self.labels.characters.get(usize::from(id));
+            let wide = self.wide_of(index, checksum, position, id);
+            Member {
+                id,
+                name: label.map_or_else(|| format!("#{id}"), |label| label.name.clone()),
+                face: label.and_then(|label| label.face),
+                record,
+                opened: record,
+                wide,
+                opened_wide: wide,
+                position,
+            }
+        };
+        // The party in its order, then the characters who joined and are not in it, by id.
+        let mut members: Vec<Member> = party
+            .iter()
             .enumerate()
-            .filter_map(|(position, id)| {
-                let record = data.record(id).ok()?;
-                let label = self.labels.characters.get(usize::from(id));
-                let wide = self.wide_of(index, checksum, position, id);
-                Some(Member {
-                    id,
-                    name: label.map_or_else(|| format!("#{id}"), |label| label.name.clone()),
-                    face: label.and_then(|label| label.face),
-                    record,
-                    opened: record,
-                    wide,
-                    opened_wide: wide,
-                    position,
-                })
-            })
+            .filter_map(|(position, &id)| Some(member(id, data.record(id).ok()?, Some(position))))
             .collect();
+        members.extend(
+            (0..ssd_save::ROSTER_LEN as u8).filter(|id| !party.contains(id)).filter_map(|id| {
+                let record = data.record(id).ok().filter(|record| joined(record, id))?;
+                Some(member(id, record, None))
+            }),
+        );
         let bag = self.bag_of(index, checksum, &data);
         self.session = Some(Session {
             slot: index,
@@ -842,7 +882,8 @@ impl Editor {
         }
     }
 
-    /// L and R walk the four pages: the party's members, then All, Allies and Tools, and round again.
+    /// L and R walk the four pages: the members (the party's, then the characters who joined and are not in it), then All, Ally cards
+    /// and Tools, and round again.
     fn walk(&mut self, direction: i32) {
         let Some(session) = self.session.as_mut() else { return };
         let members = session.members.len();
@@ -935,7 +976,9 @@ impl Editor {
     /// Puts the member under the cursor at `level`, keeping its delta over the table.
     fn set_member_level(&mut self, growth: &Growth, extended: bool, level: i32) {
         let wide_mode = self.level_cap.is_some();
-        let bp_max = self.bp_max();
+        let Some(session) = self.session.as_ref() else { return };
+        let bp_max =
+            session.members.get(session.member).map_or(self.bp_max(), |m| self.bp_max_of(m));
         let Some(session) = self.session.as_mut() else { return };
         let member = &mut session.members[session.member];
         let delta = delta_wide(growth, extended, member.level(), member.bp());
@@ -946,7 +989,10 @@ impl Editor {
 
     /// Moves the BP by `by` (never past 0 and [`Editor::bp_max`]).
     fn change_bp(&mut self, by: i64) {
-        let max = self.bp_max();
+        let Some(session) = self.session.as_ref() else { return };
+        let Some(max) = session.members.get(session.member).map(|m| self.bp_max_of(m)) else {
+            return;
+        };
         let Some(session) = self.session.as_mut() else { return };
         let Some(member) = session.members.get_mut(session.member) else { return };
         let now = i64::try_from(member.bp()).unwrap_or(i64::MAX);
@@ -1014,7 +1060,7 @@ impl Editor {
                 self.say("No table value for this level.");
                 return;
             };
-            let max = self.bp_max();
+            let max = self.bp_max_of(member);
             if let Some(session) = self.session.as_mut() {
                 let at = session.member;
                 session.members[at].set_bp(table.bp.min(max));
@@ -1218,6 +1264,22 @@ impl Editor {
         self.written = Some(index);
         self.stage = Stage::Slots;
     }
+}
+
+/// Whether the record of character `id` in a slot's roster is a character who joined the story, and not what the memory held when
+/// the game started (the roster's records of characters who never joined are noise, which no save clears). A real record has its
+/// own character id, a level of 1 to 99 (a wide level keeps the byte at 99), and HP and KI that are sane: the maxima fit four
+/// digits, the current values do not pass them, and a character who fights has at least 1 maximum HP. The flags are not read:
+/// the game clears them for a character who waits outside the party (Krillin and the others while Piccolo is back), and the
+/// save of a character who was in the party at some save has them at `$C0`.
+#[must_use]
+pub fn joined(record: &Record, id: u8) -> bool {
+    record.character_id() == id
+        && (1..=RECORD_LEVEL_MAX).contains(&record.level())
+        && (1..=9_999).contains(&record.max_hp())
+        && record.max_ki() <= 9_999
+        && record.hp() <= record.max_hp()
+        && record.ki() <= record.max_ki()
 }
 
 /// The BP a member has over the table's value for its level (0 when the table has no row for the level).

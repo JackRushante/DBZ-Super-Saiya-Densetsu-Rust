@@ -3,7 +3,7 @@
 [pack]
 id = "party.boosts"
 name = "Party-wide boosts"
-version = "1.1.0"
+version = "1.1.1"
 game = "A8CF4F2A"
 description = "The objects Guru (BP +50 percent), Porunga's second wish (+1 level) and Launch (the favourite attacks) act on the whole party in a battle. The object is used up once, and every fighter gets the same effect, by the game's own rules."
 

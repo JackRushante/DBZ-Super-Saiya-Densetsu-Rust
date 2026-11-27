@@ -431,3 +431,71 @@ fn with_the_pack_a_slot_edited_to_level_150_loads_with_its_wide_level_exp_and_bp
         "BP = curve(level) + delta, after a level-up"
     );
 }
+
+#[test]
+#[ignore = "needs the ROM (SSD_ROM_PATH) and a save (SSD_SAVE_PATH)"]
+fn a_member_outside_the_party_is_listed_edited_and_loads_in_the_roster() {
+    const KRILLIN: u8 = 3;
+    /// The roster image of the loaded game: twelve records from `$7E:2800`.
+    const ROSTER: u32 = 0x7E_2800;
+    let rom = rom();
+    let catalogue = Catalogue::from_rom(&rom).unwrap();
+    let labels = ssd_catalogue::menu_labels(&catalogue);
+    let krillin = &catalogue.characters[usize::from(KRILLIN)];
+
+    // The slot: a copy of the save's slot 1 with Krillin joined at level 20 and waiting outside the party (flags cleared).
+    let path = std::env::var("SSD_SAVE_PATH").expect("SSD_SAVE_PATH");
+    let mut file = SaveFile::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+    let mut slot = file.slot(0).unwrap();
+    let mut record = game::new_record(krillin, 20, 4).unwrap();
+    record.set_flags(0);
+    slot.set_record(KRILLIN, &record).unwrap();
+    let party = slot.party();
+    assert!(!party.contains(&KRILLIN));
+    file.set_slot(0, &slot).unwrap();
+    let before = file.as_bytes().to_vec();
+
+    // The editor lists the party, then him, and no character who never joined (the roster's other records are the memory's).
+    let mut editor = Editor::open(&before, &labels, &Sidecar::empty(), [false; 3]).unwrap();
+    editor.key(Key::A);
+    let listed: Vec<(u8, bool)> =
+        editor.session().unwrap().members.iter().map(|m| (m.id, m.in_party())).collect();
+    println!("members listed: {listed:?}");
+    assert_eq!(
+        listed.iter().filter(|(_, in_party)| *in_party).map(|(id, _)| *id).collect::<Vec<_>>(),
+        party
+    );
+    assert_eq!(listed.last(), Some(&(KRILLIN, false)), "Krillin is listed after the party");
+    assert_eq!(
+        listed.iter().filter(|(_, in_party)| !in_party).count(),
+        1,
+        "the other records of the roster are not characters who joined"
+    );
+
+    // Krillin to level 30, with a BP delta: the record is written, the party and the other records are not touched.
+    while editor.session().unwrap().members[editor.session().unwrap().member].id != KRILLIN {
+        editor.key(Key::R);
+    }
+    for _ in 0..10 {
+        editor.key(Key::Right);
+    }
+    let edited = editor.session().unwrap().members[editor.session().unwrap().member].clone();
+    assert_eq!((edited.id, edited.level()), (KRILLIN, 30));
+    editor.key(Key::Start);
+    editor.key(Key::Up);
+    editor.key(Key::Up);
+    editor.key(Key::A);
+    let commit = editor.take_commit().expect("a write");
+    assert_eq!(commit.edited, [(None, KRILLIN)]);
+    let written = SaveFile::from_bytes(&commit.sram).unwrap().slot(0).unwrap();
+    assert_eq!(written.record(KRILLIN).unwrap(), edited.record);
+    assert_eq!(written.party(), party, "the party is as it was");
+
+    // The game's own Continue loads it: the roster image has Krillin as edited, and he is not in the party.
+    let machine = continue_machine(&rom, &commit.sram);
+    assert_eq!(record_of(&machine, KRILLIN), None, "he is not in the loaded party");
+    let at = ROSTER + 0x20 * u32::from(KRILLIN);
+    assert_eq!(byte(&machine, at + 2), 30, "the level in the roster");
+    assert_eq!(bp_of(&machine, at), edited.record.bp(), "the BP in the roster");
+    assert_eq!(word(&machine, at + 10), edited.record.max_hp());
+}

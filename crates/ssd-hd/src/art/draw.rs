@@ -66,6 +66,18 @@ pub(crate) fn draw_pictures(
     pixels: &[ArtPixel],
     images: &FxHashMap<(u32, u8), Arc<Image>>,
 ) -> u64 {
+    draw_pictures_where(rgba, scale, frame_width, pixels, images, |_| true)
+}
+
+/// [`draw_pictures`] for the pixels `keep` accepts only.
+pub(crate) fn draw_pictures_where(
+    rgba: &mut [u8],
+    scale: usize,
+    frame_width: usize,
+    pixels: &[ArtPixel],
+    images: &FxHashMap<(u32, u8), Arc<Image>>,
+    keep: impl Fn(&ArtPixel) -> bool + Sync,
+) -> u64 {
     let row_bytes = frame_width * scale * 4;
     let lines = pixels.len() / frame_width.max(1);
     rgba.par_chunks_mut(row_bytes * scale)
@@ -74,7 +86,7 @@ pub(crate) fn draw_pictures(
         .map(|(line, block)| {
             let mut drawn = 0_u64;
             for (x, pixel) in pixels[line * frame_width..][..frame_width].iter().enumerate() {
-                if pixel.picture == NO_PICTURE {
+                if pixel.picture == NO_PICTURE || !keep(pixel) {
                     continue;
                 }
                 let Some(image) = images.get(&(pixel.picture, pixel.row)) else { continue };

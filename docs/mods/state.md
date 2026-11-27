@@ -100,5 +100,7 @@ set it sets a BP of up to 9 999 999 999, and writes the member's wide BP high pa
   to zero, and its damage then rounds to the limit of the damage word (`0xFFFFFF`).
 - The wide BP is set only through the state in this part of the work. A pack row field for a wide BP is not defined.
 - The save editor reads and writes the wide levels only with a pack whose `level_cap` is set (`free-progression.md`, "The displays").
+- A character who joined and is not in the party has no party slot, so the editor keeps his BP at the 24 bits of his record (his wide level and
+  EXP's high byte are kept by character, as for the party). The game's own hooks keep the BP's high part of a character only while he is in the party.
 - Work RAM outside the marked ranges is not touched: the reference replays never write `$7F:FAFC` to `$7F:FBFF` or
   `$7F:FCFC` to `$7F:FDFF`, which the replay-write scan checks.

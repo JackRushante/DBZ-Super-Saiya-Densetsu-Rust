@@ -772,3 +772,576 @@ fn the_porunga_card_goes_past_its_cap_of_47_only_with_the_pack() {
     assert_eq!(pack.use_card(0), None, "refused at the cap");
     assert_eq!(pack.word(wide_level_at(0)), 999);
 }
+
+// ---- The forms and the story's gifts at a high level ----
+
+/// What a character has at `level` in the game's own growth: the BP and KI as the sums of the rows (the extension past the cap), the
+/// maximum HP and the EXP the level begins at.
+fn curve(rom: &[u8], id: usize, level: u16) -> (u64, u64, u64, u64) {
+    let cap = u16::from(rom[(3 << 15) + (0x850E - 0x8000) + id]);
+    if level <= cap {
+        let (mut bp, mut ki) = (0, 0);
+        for l in 1..=level {
+            let row = game_row(rom, id, usize::from(l));
+            bp += row.0;
+            ki += row.3;
+        }
+        let row = game_row(rom, id, usize::from(level));
+        return (bp, ki, row.2, row.1);
+    }
+    let point = anchor(rom, id).at(level);
+    (point.bp, point.ki, u64::from(point.max_hp), point.exp)
+}
+
+impl Rig {
+    /// Party slot `slot` is character `id` at `level` on its curve (past 99 the byte saturates and the wide level is kept).
+    fn at_level(&mut self, rom: &[u8], slot: u32, id: u8, level: u16) {
+        let (bp, ki, hp, exp) = curve(rom, usize::from(id), level);
+        self.member(
+            slot,
+            id,
+            level.min(99) as u8,
+            exp & 0xFF_FFFF,
+            bp & 0xFF_FFFF,
+            hp as u16,
+            ki as u16,
+        );
+        if bp >> 24 != 0 {
+            self.write(MARKER_AT, &MARKER);
+            self.write(BLOCK + PARTY_HIGH as u32 + 2 * slot, &((bp >> 24) as u16).to_le_bytes());
+        }
+        if level > 99 {
+            self.write(LEVELS_MARKER_AT, b"SSDl");
+            self.write(wide_level_at(id), &level.to_le_bytes());
+            self.write(exp_high_at(id), &[(exp >> 24) as u8]);
+        }
+    }
+
+    /// The level of party slot `slot`, as the game reads it (the wide level while the byte agrees with it).
+    fn level_of(&self, slot: u32, id: u8) -> u16 {
+        let byte = u16::from(self.bytes(PARTY + 0x20 * slot + 2, 1)[0]);
+        let wide = if self.bytes(LEVELS_MARKER_AT, 4) == b"SSDl" {
+            self.word(wide_level_at(id))
+        } else {
+            0
+        };
+        if wide > 99 && wide.min(99) == byte { wide } else { byte }
+    }
+
+    /// The 40-bit BP of party slot `slot`.
+    fn bp_of(&self, slot: u32) -> u64 {
+        let live = ssd_game::mods::state::block_live(self.machine.wram());
+        let high =
+            if live { u64::from(self.word(BLOCK + PARTY_HIGH as u32 + 2 * slot)) } else { 0 };
+        self.triple(PARTY + 0x20 * slot + 7) | high << 24
+    }
+
+    /// Runs the code at `entry` as a `JSL` at `ret - 3` would (the 24-bit address of its last byte, `ret`, is on the stack), until it
+    /// returns to the instruction after it, with `a` in the accumulator. A short stub in work RAM pushes the address and jumps, so that
+    /// the routine is entered as the game enters it.
+    fn call_from(&mut self, entry: u32, ret: u32, a: u16) {
+        let stub = [
+            0xA9,
+            (ret >> 16) as u8,
+            0x48,
+            0xF4,
+            ret as u8,
+            (ret >> 8) as u8,
+            0xA9,
+            a as u8,
+            0x5C,
+            entry as u8,
+            (entry >> 8) as u8,
+            (entry >> 16) as u8,
+        ];
+        self.write(CALL, &stub);
+        let mut registers = self.machine.cpu_registers();
+        registers.pbr = (CALL >> 16) as u8;
+        registers.pc = (CALL & 0xFFFF) as u16;
+        registers.dbr = 0;
+        registers.d = 0;
+        registers.p = StatusRegister::from(0x24);
+        self.machine.set_cpu_registers(registers);
+        for stale in self.machine.breakpoints().clone() {
+            self.machine.clear_breakpoint(stale);
+        }
+        self.machine.set_breakpoint(ret + 1);
+        let stops = Stops { frame_end: true, breakpoint: true, ..Stops::default() };
+        for _ in 0..12 {
+            let stopped =
+                self.machine.run(&stops, &mut |_| Joypad::default(), &mut NullAudio, 1).unwrap();
+            if matches!(stopped, Stopped::Breakpoint { .. }) {
+                return;
+            }
+        }
+        panic!("${entry:06X} did not return to ${ret:06X}");
+    }
+
+    /// The builder of a form for character `id`, as `03:D1B4` and `03:8683` call it.
+    fn build_form(&mut self, id: u8) {
+        self.call_from(0x03_85F0, 0x7F_FE03, u16::from(id));
+    }
+
+    /// The level routine of the story run as the scene engine runs the effect `$38` in `scene` (`$164D` levels for character `id`).
+    fn gift(&mut self, scene: u8, ret: u32, id: u8, levels: u8) {
+        self.write(0x7E_01D8, &[scene]);
+        self.write(RAISE_CHARACTER, &[id]);
+        self.write(RAISE_LEVELS, &[levels]);
+        self.call_from(0x03_C64A, ret, 0);
+    }
+}
+
+/// `(L + 5) / 52` to the power `power` of `value`, rounded (halves up): the form's rule.
+fn form_scaled(value: u64, level: u16, power: u32) -> u64 {
+    let (u, u0) = (u128::from(level.max(47)) + 5, 52_u128);
+    ((u128::from(value) * u.pow(power) + u0.pow(power) / 2) / u0.pow(power)) as u64
+}
+
+#[test]
+#[ignore = "needs the game's ROM (SSD_ROM_PATH)"]
+fn a_form_keeps_the_level_of_the_character_and_scales_with_it() {
+    let rom = rom();
+    let mut plain = Rig::new(&rom, false);
+    let mut pack = Rig::new(&rom, true);
+
+    // Piccolo's fusion with Dende (effect `$66` builds the form of character 2) at level 40: the original's form, level 48, BP 1 900 000.
+    for rig in [&mut plain, &mut pack] {
+        rig.reset();
+        rig.at_level(&rom, 0, 2, 40);
+        rig.build_form(2);
+        assert_eq!(rig.bytes(PARTY + 2, 1)[0], 48, "the builder sets 48");
+        assert_eq!(rig.triple(PARTY + 7), 1_900_000, "the row's BP");
+        assert_eq!(rig.bytes(PARTY + 1, 1)[0], 0x3E, "unit $3E");
+    }
+    assert_eq!(
+        plain.bytes(PARTY + 0x0A, 2),
+        pack.bytes(PARTY + 0x0A, 2),
+        "the same maximum HP below 48"
+    );
+    assert!(
+        pack.word(PARTY + 0x0C) >= plain.word(PARTY + 0x0C),
+        "the KI is not lowered by the form"
+    );
+
+    // At 80: the original falls back to 48; the pack keeps 80 and the form follows the level, none of it below what he had.
+    plain.reset();
+    plain.at_level(&rom, 0, 2, 80);
+    plain.build_form(2);
+    assert_eq!(plain.bytes(PARTY + 2, 1)[0], 48, "without the pack he falls back to 48");
+    pack.reset();
+    pack.at_level(&rom, 0, 2, 80);
+    let (own_bp, own_ki, own_hp, _) = curve(&rom, 2, 80);
+    pack.build_form(2);
+    assert_eq!(pack.level_of(0, 2), 80, "the level is kept");
+    assert_eq!(pack.bytes(PARTY + 1, 1)[0], 0x3E);
+    let bp = pack.bp_of(0);
+    assert_eq!(bp, form_scaled(1_900_000, 80, 3).max(own_bp), "BP of the form at 80");
+    assert!(bp > own_bp);
+    assert_eq!(u64::from(pack.word(PARTY + 0x0A)), form_scaled(710, 80, 1).max(own_hp));
+    assert_eq!(
+        u64::from(pack.word(PARTY + 0x0C)),
+        form_scaled(124, 80, 1).max(own_ki),
+        "KI is not lowered"
+    );
+    assert_eq!(pack.word(PARTY + 3), pack.word(PARTY + 0x0A), "HP full");
+    println!("Piccolo's form at 80: BP {bp} (his own {own_bp})");
+
+    // Above 99 the byte saturates, the wide level is kept and the BP's high part is the form's.
+    pack.reset();
+    pack.at_level(&rom, 0, 2, 150);
+    pack.build_form(2);
+    assert_eq!(pack.level_of(0, 2), 150);
+    assert_eq!(pack.bytes(PARTY + 2, 1)[0], 99);
+    assert_eq!(pack.bp_of(0), form_scaled(1_900_000, 150, 3).max(curve(&rom, 2, 150).0));
+
+    // Goku's Super Saiyan at 70 (between 48 and 99): the form follows his level (before, it was the fixed 4 999 999 at 48).
+    for (rig, scaled) in [(&mut plain, false), (&mut pack, true)] {
+        rig.reset();
+        rig.at_level(&rom, 0, 0, 70);
+        rig.build_form(0);
+        let level = rig.level_of(0, 0);
+        if scaled {
+            assert_eq!(level, 70);
+            assert_eq!(rig.bp_of(0), form_scaled(4_999_999, 70, 3));
+            assert_eq!(u64::from(rig.word(PARTY + 0x0A)), form_scaled(800, 70, 1));
+            assert_eq!(u64::from(rig.word(PARTY + 0x0C)), form_scaled(189, 70, 1));
+        } else {
+            assert_eq!((level, rig.bp_of(0)), (48, 4_999_999), "the original's form");
+        }
+    }
+
+    // Vegeta and the other characters have no form here: the builder is the original's.
+    plain.reset();
+    pack.reset();
+    for rig in [&mut plain, &mut pack] {
+        rig.at_level(&rom, 0, 7, 60);
+        rig.build_form(7);
+    }
+    assert_eq!(plain.bytes(PARTY, 0x20), pack.bytes(PARTY, 0x20));
+}
+
+#[test]
+#[ignore = "needs the game's ROM (SSD_ROM_PATH)"]
+fn the_gifts_of_the_story_are_worth_the_same_at_every_level() {
+    const EFFECT: u32 = 0x03_B1C9;
+    const GURU: u32 = 0x03_CFE4;
+    const FLOOR: u32 = 0x03_EAFB;
+    let rom = rom();
+    let mut pack = Rig::new(&rom, true);
+
+    // Nail's fusion (scene $37, +5: six levels in the original) at Piccolo's 35: six levels, the original's.
+    pack.reset();
+    pack.at_level(&rom, 0, 2, 35);
+    pack.gift(0x37, EFFECT, 2, 5);
+    assert_eq!(pack.level_of(0, 2), 41);
+    let (bp, ..) = curve(&rom, 2, 41);
+    assert_eq!(pack.bp_of(0), bp, "the game's own rows");
+
+    // At 100 the gift is 16 levels (6 * 105 / 40 = 15.75), on the extended rows.
+    pack.reset();
+    pack.at_level(&rom, 0, 2, 100);
+    pack.gift(0x37, EFFECT, 2, 5);
+    assert_eq!(pack.level_of(0, 2), 116, "six levels at 35 are sixteen at 100");
+    assert_eq!(pack.bp_of(0), curve(&rom, 2, 116).0);
+    // The BP rose by the same ratio as the original's gift at 35: (46 / 40)^3 = 1.52.
+    let ratio = pack.bp_of(0) as f64 / curve(&rom, 2, 100).0 as f64;
+    let story = (46.0_f64 / 40.0).powi(3);
+    assert!((ratio - story).abs() / story < 0.02, "{ratio} against {story}");
+
+    // The gift of the scene $3C (Dende, +4 then +1) and the other scenes' effect $38 (Gohan's +3 in scene 4, the Snake Way's +20
+    // in scene $4C) and any floor are the original's rule.
+    pack.reset();
+    pack.at_level(&rom, 0, 2, 100);
+    pack.gift(0x04, EFFECT, 2, 3);
+    assert_eq!(pack.level_of(0, 2), 104, "scene 4 is the original's +3");
+    pack.reset();
+    pack.at_level(&rom, 0, 2, 100);
+    pack.gift(0x37, FLOOR, 2, 5);
+    assert_eq!(pack.level_of(0, 2), 106, "a floor's call is the original's");
+    pack.reset();
+    pack.at_level(&rom, 0, 2, 100);
+    pack.gift(0x3C, EFFECT, 2, 4);
+    assert_eq!(pack.level_of(0, 2), 111, "Dende's +4 is 5 levels at 41: 5 * 105 / 46 = 11.4");
+
+    // Guru's unlocking (effect $5B, +2: three levels) at Gohan's 100 is 8 levels; at 30 it is three.
+    pack.reset();
+    pack.at_level(&rom, 0, 1, 100);
+    pack.gift(0x2D, GURU, 1, 2);
+    assert_eq!(pack.level_of(0, 1), 108);
+    pack.reset();
+    pack.at_level(&rom, 0, 1, 30);
+    pack.gift(0x2D, GURU, 1, 2);
+    assert_eq!(pack.level_of(0, 1), 33);
+
+    // At the level cap nothing more is given, and a character with no record is left as the original leaves him.
+    pack.reset();
+    pack.at_level(&rom, 0, 2, 999);
+    pack.gift(0x37, EFFECT, 2, 5);
+    assert_eq!(pack.level_of(0, 2), 999);
+    pack.gift(0x37, EFFECT, 5, 5);
+}
+
+#[test]
+#[ignore = "needs the game's ROM (SSD_ROM_PATH)"]
+fn goku_after_the_pod_and_in_the_last_fight_joins_the_party_at_its_level() {
+    const POD: u32 = 0x03_FA85;
+    let rom = rom();
+    let mut plain = Rig::new(&rom, false);
+    let mut pack = Rig::new(&rom, true);
+
+    // The party: Gohan 80, Krillin 70, Piccolo 60; Goku 40. The mean of the three highest is 70, Goku arrives at 77.
+    let party = |rig: &mut Rig, goku: u16| {
+        rig.reset();
+        rig.at_level(&rom, 0, 0, goku);
+        rig.at_level(&rom, 1, 1, 80);
+        rig.at_level(&rom, 2, 3, 70);
+        rig.at_level(&rom, 3, 2, 60);
+        rig.write(RAISE_CHARACTER, &[0]);
+    };
+    party(&mut plain, 40);
+    plain.write(0x7E_01D8, &[0x3F]);
+    plain.write(RAISE_LEVELS, &[49 - 40]);
+    plain.call_from(0x03_C64A, POD, 0);
+    assert_eq!(plain.level_of(0, 0), 47, "the original raises him to 49, which stops at his cap");
+
+    party(&mut pack, 40);
+    pack.write(0x7E_01D8, &[0x3F]);
+    pack.write(RAISE_LEVELS, &[49 - 40]);
+    pack.call_from(0x03_C64A, POD, 0);
+    assert_eq!(pack.level_of(0, 0), 77, "1.1 * 70");
+    assert_eq!(pack.bp_of(0), curve(&rom, 0, 77).0, "his rows");
+    assert_eq!(u64::from(pack.word(PARTY + 0x0A)), curve(&rom, 0, 77).2);
+    assert_eq!(pack.word(PARTY + 3), pack.word(PARTY + 0x0A), "HP full");
+
+    // Never lowered: a Goku of 90 stays at 90.
+    party(&mut pack, 90);
+    pack.write(0x7E_01D8, &[0x3F]);
+    pack.write(RAISE_LEVELS, &[49_u8.wrapping_sub(90)]);
+    pack.call_from(0x03_C64A, POD, 0);
+    assert_eq!(pack.level_of(0, 0), 90);
+
+    // Goku is not in the party at the pod: nothing happens (the original finds no record either).
+    party(&mut pack, 40);
+    pack.write(PARTY, &[0; 0x20]);
+    pack.write(0x7E_01D8, &[0x3F]);
+    pack.write(RAISE_LEVELS, &[9]);
+    pack.call_from(0x03_C64A, POD, 0);
+    assert_eq!(pack.bytes(PARTY, 0x20), [0; 0x20]);
+
+    // The last fight's load (effect $3C, to `03:C845`): Goku was built from the roster at his old level and joins at 77.
+    party(&mut pack, 40);
+    pack.call(0x03_C845, 0);
+    assert_eq!(pack.level_of(0, 0), 77);
+    party(&mut plain, 40);
+    plain.call(0x03_C845, 0);
+    assert_eq!(plain.level_of(0, 0), 40, "without the pack the load leaves him as he was");
+}
+
+#[test]
+#[ignore = "needs the game's ROM (SSD_ROM_PATH)"]
+fn the_last_enemy_is_made_for_the_party_that_goku_joins() {
+    let rom = rom();
+    let mut pack = Rig::new(&rom, true);
+    // The enemy of the last fight is built before Goku joins, from the roster: party Gohan, Krillin and Piccolo at 60, roster
+    // Goku at 30. The offsets of the pack's scaling give the story's enemies P + 3: P is the mean of 66 (Goku), 60 and 60.
+    let level_of_enemy = |pack: &mut Rig, goku_in_roster: bool| -> u8 {
+        pack.reset();
+        pack.at_level(&rom, 0, 1, 60);
+        pack.at_level(&rom, 1, 3, 60);
+        pack.at_level(&rom, 2, 2, 60);
+        if goku_in_roster {
+            let (bp, ki, hp, exp) = curve(&rom, 0, 30);
+            let mut record = [0_u8; 0x20];
+            record[0] = 0xC0;
+            record[1] = 0;
+            record[2] = 30;
+            record[0x1C] = 0;
+            record[0x0A..0x0C].copy_from_slice(&(hp as u16).to_le_bytes());
+            record[0x0C..0x0E].copy_from_slice(&(ki as u16).to_le_bytes());
+            record[7..10].copy_from_slice(&(bp as u32).to_le_bytes()[..3]);
+            record[0x0F..0x12].copy_from_slice(&(exp as u32).to_le_bytes()[..3]);
+            pack.write(0x7E_2800, &record);
+        } else {
+            pack.write(0x7E_2800, &[0; 0x20]);
+        }
+        pack.write(GROUP_INDEX, &[0x56]);
+        pack.call(0x01_F692, 0);
+        pack.call(0x01_F719, 0);
+        let slot = (0..5_u32)
+            .find(|&slot| pack.bytes(ENEMIES + 0x20 * slot, 1)[0] != 0)
+            .expect("an enemy of the last fight");
+        pack.bytes(ENEMIES + 0x20 * slot + 2, 1)[0]
+    };
+    let with_goku = level_of_enemy(&mut pack, true);
+    let without = level_of_enemy(&mut pack, false);
+    println!("last fight's enemy: {with_goku} with Goku in the roster, {without} without");
+    assert_eq!(without, 63, "the party's 60 and 3 above");
+    assert_eq!(with_goku, 65, "Goku arrives at 66: the mean of 66, 60 and 60 is 62");
+}
+
+// ---- Porunga's level wish and Guru's boost from the Item screen, with the level cap ----
+
+impl Rig {
+    /// A machine on the image of both example packs, the level cap's and the party-wide boosts'.
+    fn both(rom: &[u8]) -> Self {
+        let saves = Box::new(MemorySaveStore::default());
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let packs = [
+            ssd_mod::Pack::open(&root.join("free-progression")).unwrap(),
+            ssd_mod::Pack::open(&root.join("party-boosts")).unwrap(),
+        ];
+        let options = ssd_mod::CheckOptions { allow_rom_bytes: false };
+        ssd_mod::check_set(rom, &packs, options).expect("the packs are accepted");
+        let image = ssd_mod::build(rom, &packs).unwrap().bytes;
+        let mut machine =
+            Machine::with_image(image, ssd_rom::crc32(rom), saves, DEFAULT_WRAM_SEED).unwrap();
+        let mut table = HookTable::new();
+        ssd_game::mods::install(&mut table);
+        machine.set_hook_table(Some(table));
+        while machine.frame_count() < BOOT_FRAMES {
+            machine.run_frame(Joypad::default(), &mut NullAudio).unwrap();
+        }
+        let stops = Stops { instructions: Some(1), ..Stops::default() };
+        let stopped = machine.run(&stops, &mut |_| Joypad::default(), &mut NullAudio, 4).unwrap();
+        assert!(matches!(stopped, Stopped::Instructions), "{stopped:?}");
+        let state = machine.save_state();
+        Self { machine, state }
+    }
+
+    /// The commit of Porunga's level wish on the member at party offset `offset` (step 7 of the Item effect, after the A button).
+    fn wish(&mut self, offset: u16) {
+        self.write(0x7E_0748, &offset.to_le_bytes());
+        self.write(0x7E_073C, &[7]);
+        self.write(0x7E_073B, &[0xFF]);
+        self.write(0x7E_0C36, &[0]);
+        self.call_from(0x01_E3FC, 0x7F_FE03, 0);
+    }
+
+    /// The first step of the BP objects (`item` 5 or 6) on the member at party offset `offset`.
+    fn boost(&mut self, item: u8, offset: u16) {
+        self.write(0x7E_0748, &offset.to_le_bytes());
+        self.write(0x7E_0D7C, &[item]);
+        self.write(0x7E_0D62, &[0]);
+        self.write(0x7E_073C, &[0]);
+        self.call_from(0x01_DF13, 0x7F_FE03, 0);
+    }
+}
+
+#[test]
+#[ignore = "needs the game's ROM (SSD_ROM_PATH)"]
+fn porunga_wish_goes_past_the_games_cap_with_the_level_cap() {
+    let rom = rom();
+    let mut plain = Rig::new(&rom, false);
+    let mut pack = Rig::new(&rom, true);
+
+    // The original refuses Goku at 47 (his cap): the level and the step stay.
+    plain.reset();
+    plain.at_level(&rom, 0, 0, 47);
+    plain.wish(0);
+    assert_eq!(plain.level_of(0, 0), 47, "the original refuses");
+    assert_eq!(plain.bytes(0x7E_073C, 1)[0], 7, "the step stays");
+
+    // With the cap the wish gives level 48 on the extended rows: level, EXP, BP; the targets of the growth animation.
+    pack.reset();
+    pack.at_level(&rom, 0, 0, 47);
+    pack.write(0x7E_4C00, &[0; 3]);
+    pack.wish(0);
+    let (bp48, ki48, hp48, exp48) = curve(&rom, 0, 48);
+    assert_eq!(pack.level_of(0, 0), 48);
+    assert_eq!(pack.triple(PARTY + 0x0F), exp48, "the EXP the level begins at");
+    assert_eq!(pack.bp_of(0), bp48, "the level's BP");
+    assert_eq!(u64::from(pack.word(0x7E_0740)), hp48, "the maximum HP the animation grows to");
+    assert_eq!(u64::from(pack.word(0x7E_0742)), ki48, "the maximum KI the animation grows to");
+    assert_eq!(pack.bytes(0x7E_073C, 1)[0], 8, "the step goes on to the animation");
+    assert_eq!(pack.bytes(0x7E_073B, 1)[0], 0xBF, "the pending bit is cleared");
+    let (hp47, ki47) = (curve(&rom, 0, 47).2, curve(&rom, 0, 47).1);
+    assert_eq!(
+        (u64::from(pack.word(PARTY + 0x0A)), u64::from(pack.word(PARTY + 0x0C))),
+        (hp47, ki47),
+        "the maxima are left to the animation"
+    );
+    // The BP snapshot (which a battle's end restores the record from) has the level's BP too.
+    assert_eq!(
+        pack.triple(0x7E_4C00),
+        bp48 - curve(&rom, 0, 47).0,
+        "the snapshot got the level's BP"
+    );
+
+    // Past 99, and from level 98 to 99, the wide level; and a member of the original's range goes by the original's own code.
+    pack.reset();
+    pack.at_level(&rom, 0, 0, 99);
+    pack.wish(0);
+    assert_eq!(pack.level_of(0, 0), 100);
+    assert_eq!(pack.bp_of(0), curve(&rom, 0, 100).0);
+    pack.reset();
+    pack.at_level(&rom, 0, 0, 30);
+    plain.reset();
+    plain.at_level(&rom, 0, 0, 30);
+    pack.wish(0);
+    plain.wish(0);
+    assert_eq!(
+        pack.bytes(PARTY, 0x20),
+        plain.bytes(PARTY, 0x20),
+        "below the cap the original runs"
+    );
+    assert_eq!(pack.level_of(0, 0), 31);
+
+    // The original's other tests stay: Goku with the Kaioken on, a member who has his flags' bit 5, and the level cap.
+    pack.reset();
+    pack.at_level(&rom, 0, 0, 47);
+    pack.write(0x7E_0748, &0_u16.to_le_bytes());
+    pack.write(0x7E_0C36, &[0x80]);
+    pack.write(0x7E_073C, &[7]);
+    pack.call_from(0x01_E3FC, 0x7F_FE03, 0);
+    assert_eq!(pack.level_of(0, 0), 47, "Goku with the Kaioken on is refused");
+    pack.at_level(&rom, 0, 0, 47);
+    pack.write(PARTY, &[0xE0]);
+    pack.wish(0);
+    assert_eq!(pack.level_of(0, 0), 47, "a member with flags bit 5 is refused");
+    pack.reset();
+    pack.at_level(&rom, 0, 0, 999);
+    pack.wish(0);
+    assert_eq!(pack.level_of(0, 0), 999, "refused at the level cap");
+    assert_eq!(pack.bytes(0x7E_073C, 1)[0], 7);
+}
+
+#[test]
+#[ignore = "needs the game's ROM (SSD_ROM_PATH)"]
+fn the_party_wide_wish_and_guru_know_the_level_cap() {
+    let rom = rom();
+    let mut both = Rig::both(&rom);
+
+    // The wish for a party: Goku (47, the chosen one), Gohan (48) and Krillin (60) each go up one level.
+    both.reset();
+    both.at_level(&rom, 0, 0, 47);
+    both.at_level(&rom, 1, 1, 48);
+    both.at_level(&rom, 2, 3, 60);
+    both.write(0x7E_01BB, &[3]);
+    both.wish(0);
+    assert_eq!(
+        [both.level_of(0, 0), both.level_of(1, 1), both.level_of(2, 3)],
+        [48, 49, 61],
+        "the whole party"
+    );
+    for (slot, id, level) in [(0_u32, 0_u8, 48_u16), (1, 1, 49), (2, 3, 61)] {
+        let (bp, ki, hp, exp) = curve(&rom, usize::from(id), level);
+        assert_eq!(both.bp_of(slot), bp, "BP of {id}");
+        assert_eq!(both.triple(PARTY + 0x20 * slot + 0x0F), exp & 0xFF_FFFF, "EXP of {id}");
+        if slot != 0 {
+            assert_eq!(u64::from(both.word(PARTY + 0x20 * slot + 0x0A)), hp, "max HP of {id}");
+            assert_eq!(u64::from(both.word(PARTY + 0x20 * slot + 0x0C)), ki, "max KI of {id}");
+        }
+    }
+    assert_eq!(both.bytes(0x7E_073C, 1)[0], 8);
+
+    // The wish for a party whose chosen member is below his cap: the original's code for him, the extension for the others.
+    both.reset();
+    both.at_level(&rom, 0, 0, 30);
+    both.at_level(&rom, 1, 1, 48);
+    both.write(0x7E_01BB, &[2]);
+    both.wish(0);
+    assert_eq!([both.level_of(0, 0), both.level_of(1, 1)], [31, 49]);
+
+    // Guru's boost (+50 percent) on a member whose BP is wide: the whole BP, in 40 bits (the original's step cuts it at 9 999 999).
+    both.reset();
+    both.at_level(&rom, 0, 0, 300);
+    both.at_level(&rom, 1, 1, 200);
+    both.at_level(&rom, 2, 2, 100);
+    both.write(0x7E_01BB, &[3]);
+    let before: Vec<u64> = (0..3).map(|slot| both.bp_of(slot)).collect();
+    assert!(before[0] > 50_000_000, "Goku's BP at 300 is wide: {}", before[0]);
+    both.boost(6, 0);
+    assert_eq!(
+        both.bp_of(0),
+        before[0] + before[0] / 2,
+        "the chosen member's BP: +50 percent whole"
+    );
+    assert_eq!(
+        both.bytes(0x7E_0744, 3)[..],
+        both.bp_of(0).to_le_bytes()[..3],
+        "the animation has nothing left to do"
+    );
+    for slot in 1..3 {
+        assert_eq!(
+            both.bp_of(slot),
+            before[slot as usize] + before[slot as usize] / 2,
+            "member {slot}"
+        );
+    }
+    // King Kai's object adds a quarter.
+    both.reset();
+    both.at_level(&rom, 0, 0, 300);
+    both.boost(5, 0);
+    assert_eq!(both.bp_of(0), before[0] + before[0] / 4);
+    // Below it, the original's own rule (the animation ends at BP + BP / 2; the cut at 9 999 999 is the original's).
+    both.reset();
+    both.at_level(&rom, 0, 0, 100);
+    both.boost(6, 0);
+    let own = curve(&rom, 0, 100).0;
+    assert_eq!(
+        both.bytes(0x7E_0744, 3)[..],
+        (own + own / 2).to_le_bytes()[..3],
+        "the original's target"
+    );
+    assert_eq!(both.bp_of(0), own, "the record is moved by the count-up of the animation");
+}

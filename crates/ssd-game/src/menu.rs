@@ -287,7 +287,8 @@ impl<'a> MenuProbe<'a> {
     /// Whether the open menu takes the next press: the field is free (a press on it opens the
     /// menu), or the menu is drawn and idle. A press before the windows are drawn is lost: the
     /// draw queue is empty when its bit is set (`$0D67`). On the Item list the step says idle, since
-    /// the list stays busy while it is shown.
+    /// the list stays busy while it is shown. While the menu is still opening (`field_state` `$0F`, about 18 frames) it
+    /// takes no command yet, so the press waits for the transition to end.
     #[must_use]
     pub fn ready(&self) -> bool {
         if self.field_free() {
@@ -295,6 +296,10 @@ impl<'a> MenuProbe<'a> {
         }
         // A battle's item effect waits on its action screen (idle, with its own press), as an open menu does.
         if !self.menu_open() && !self.battle_effect() {
+            return false;
+        }
+        // While the menu is still in its opening transition (`field_state` $0F), it does not accept commands yet.
+        if self.opening() {
             return false;
         }
         if self.byte(d::MENU_DRAW_DONE).is_none_or(|done| done & DRAW_QUEUE_EMPTY == 0) {
@@ -748,6 +753,8 @@ mod tests {
         assert!(!MenuProbe::new(&ram, &labels).ready(), "busy");
         set(&mut ram, d::MENU_BUSY, 0);
         assert!(MenuProbe::new(&ram, &labels).ready(), "idle");
+        set(&mut ram, d::FIELD_STATE, STATE_OPENING);
+        assert!(!MenuProbe::new(&ram, &labels).ready(), "still opening");
         set(&mut ram, d::FIELD_STATE, 0);
         assert!(MenuProbe::new(&ram, &labels).ready(), "a free field takes a press (to open)");
         assert!(!MenuProbe::new(&ram, &labels).menu_open());

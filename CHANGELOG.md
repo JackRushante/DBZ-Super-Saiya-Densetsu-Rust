@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.3.16 (2026-11-27)
+
+### Fixes
+
+- **Free progression 0.4.1 (level cap): the story no longer lowers a character or gives him nothing at a high level.**
+  - Piccolo's fusion with Dende and Goku's Super Saiyan (the game's form builder) keep the character's level and build the form on his
+    curve: BP times `((L + 5) / 52)^3`, HP and KI times `(L + 5) / 52`, none of them below what he had. A Piccolo of level 80 fell back to
+    48 with the form's numbers and a stale wide level and BP; the Super Saiyan followed the level only above 99, and now from 48.
+  - The gifts of levels of Nail's fusion, Dende's fusion and Guru's unlocking are worth the same relative rise as in the original at the
+    level the story gives them (6 levels at Piccolo's 100 are 16), so they are not nothing at level 100 and above. The floors and the
+    other gifts are the original's.
+  - Goku joins the last fight (and, if he is in the party, leaves the medical pod) at 11/10 of the mean of the party's three highest
+    levels, never lower than he is, with his rows' stats; the last Frieza is made for the party with him in its three highest.
+  - Porunga's level wish from the Item menu is no longer refused at level 47 or 48 with the level cap: it gives a level on the extended
+    rows up to the cap, for the chosen member and for the party.
+  Run `recompile` for a recompiled build. Remastered only; the pack without `level_cap` and Classic are unchanged.
+- **Party-wide boosts 1.1.1**: Porunga's level wish for the party goes past 47 and 48 with the level cap (see above), and Guru's +50 percent
+  no longer cuts a wide BP at 9 999 999 (with the level cap a member above 6 666 666 BP gets the whole rise; before it was lowered).
+- **Save editor: members who are not in the party.** After the party's members the editor lists the characters who joined and wait outside
+  the party (Krillin, Tien and the others while Piccolo is back, Dende, Nail...), marked "not in the party", edits and writes them back
+  like the others. Their BP stops at 16 777 215 (the record's 24 bits: the BP's high part is kept by party position); their level may go
+  to the cap. The bag's tab "Allies" is called "Ally cards", as it lists the cards of the allies.
+- **Cards kept after a Game Over (#20).** Leaving the Game Over screen with a button and choosing Continue took one card from every
+  stack of the bag (a story card such as Gohan's could be lost); New Game after a Game Over could carry the lost run's bag. The bag now
+  lets go of the run at the Game Over screen, and Continue or New Game start from the save or the new list. Analysis and fix design by
+  lming888.
+- **Goku's portrait in the opening scene (#21).** In HD his face changed every 12 frames, drawn from the speed lines' pictures that share
+  his palette; a portrait that shares its palette with other sprites is now drawn from its own picture. Analysis and fix design by
+  lming888.
+- **Talk and Look pressed fast (#22).** Opening the HD menu and choosing Talk or Look at once could drop the command and close the menu,
+  or send a held A into the dialogue that opens; retries no longer burst frames and starve the audio. A held A or B stays masked until it
+  is released. Contributed by denlai-mshk.
+- **Super Saiyan Vegeta in the ending.** After the credits his HD sprite was the normal Vegeta's, with black hair, while the game draws
+  him golden: his poses are now drawn from his Super Saiyan art, told apart by the palette. Three close-ups still have only the normal
+  art.
+
 ## 0.3.15 (2026-11-16)
 
 ### Features

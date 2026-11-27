@@ -401,6 +401,11 @@ const PARTY_SLOTS: usize = 9;
 const SUPER_SAIYAN_GOKU: u8 = 0x3B;
 /// The mark of a unit of Goku's art in the index (`battle-goku-NNN`, `gallery-party-goku-u00-NNN`, see [`ArtState::unit_of`]).
 const GOKU_MARK: &str = "goku";
+/// The mark of the units of Vegeta's art in the index (`battle-vegeta-NNN`, `gallery-enemy-vegeta-u15-NNN`).
+const VEGETA_MARK: &str = "vegeta";
+/// The marks of the units of Super Saiyan Vegeta's art: the battle poses (`battle-super-vegeta-NNN`) and the close-ups
+/// of the special attacks, of the game's unit `$4B` (`gallery-enemy-vegeta-u75-NNN`, `gallery-party-vegeta-u75-NNN`).
+const SUPER_VEGETA_MARKS: [&str; 2] = ["super-vegeta", "vegeta-u75"];
 /// The mark of a unit of Super Saiyan Goku's art (`battle-goku-ssj-NNN`, `gallery-party-goku-ssj-NNN`).
 const SUPER_SAIYAN_GOKU_MARK: &str = "goku-ssj";
 
@@ -1057,7 +1062,7 @@ impl ArtState {
             if pose.shadow || !free(pose, taken) {
                 continue;
             }
-            let unit = self.unit_for(pose);
+            let unit = self.unit_for(pose, &rows[n]);
             let (best, mirrored) = self.exact_art(pose, &rows[n], unit.as_ref());
             if let Some(at) = best {
                 taken |= pose.sprites & !pose.excluded;
@@ -1306,6 +1311,19 @@ impl ArtState {
             clip,
             measure,
         );
+        // A portrait that shares its palette with other sprites is drawn from its picture, not from the
+        // art of the cluster the exact pass matched
+        let portraits = self.portraits_in_clusters(&placed);
+        if portraits != 0 {
+            draw::draw_pictures_where(
+                &mut hd.rgba,
+                scale,
+                self.width,
+                &self.pixels,
+                &images,
+                |p| p.oam != crate::NO_OBJECT && portraits >> (p.oam & 127) & 1 != 0,
+            );
+        }
         for (pose, image, margin) in &replaced {
             let x_offset = if pose.bg { 0 } else { x_offset };
             let origin = (pose.org.0 + x_offset - margin, pose.org.1 + ROW_OF_CAPTURE - margin);
@@ -1325,6 +1343,48 @@ impl ArtState {
                 })
                 .collect();
         }
+    }
+
+    /// The sprites of the portraits that a cluster of the poses `placed` took with it: a cluster drawn from the art
+    /// made for its exact pixels (or for their mirror image) in which the pixels of a picture are more than half of
+    /// what its sprites show, and not all of it (the rest is another sprite of the same palette, such as a speed line
+    /// beside a portrait). The cluster's art draws a face of its own over the portrait, one for each phase of the
+    /// effect, so the portrait is drawn again from its picture, as it is in every other frame. A cluster that is all
+    /// portrait is a figure of the field drawn whole from its art, and is left as it is.
+    fn portraits_in_clusters(&self, placed: &[Placed<'_>]) -> u128 {
+        let exact = |sprites: u128, org: (i32, i32)| {
+            self.stats.poses.iter().any(|stat| {
+                stat.matched
+                    && matches!(stat.source, ArtSource::Exact | ArtSource::Mirror)
+                    && stat.sprites == sprites
+                    && stat.org == org
+            })
+        };
+        let clusters: Vec<u128> = placed
+            .iter()
+            .map(|(pose, ..)| (pose.sprites & !pose.excluded, pose.org))
+            .filter(|&(sprites, org)| sprites != 0 && exact(sprites, org))
+            .map(|(sprites, _)| sprites)
+            .collect();
+        if clusters.is_empty() || self.pixels.iter().all(|p| p.picture == NO_PICTURE) {
+            return 0;
+        }
+        let (mut shown, mut pictured) = ([0_u32; 128], [0_u32; 128]);
+        for pixel in self.pixels.iter().filter(|p| p.oam != crate::NO_OBJECT) {
+            let at = usize::from(pixel.oam) & 127;
+            shown[at] += 1;
+            pictured[at] += u32::from(pixel.picture != NO_PICTURE);
+        }
+        let count = |counts: &[u32; 128], sprites: u128| -> u32 {
+            (0..128).filter(|&at| sprites >> at & 1 != 0).map(|at| counts[at]).sum()
+        };
+        clusters
+            .into_iter()
+            .filter(|&sprites| {
+                let (all, own) = (count(&shown, sprites), count(&pictured, sprites));
+                own * 2 > all && own < all
+            })
+            .fold(0, |all, sprites| all | sprites)
     }
 
     /// Draws the art of the background layers over `hd`, where the original showed a layer, the
@@ -1786,8 +1846,11 @@ impl ArtState {
     /// animation. While Super Saiyan Goku is in the party, a pose that both his normal and his Super
     /// Saiyan art have is drawn from the Super Saiyan art: the normal art has the same pixels, in the
     /// normal palette, where his hair is black; without him, from the normal art, however many poses
-    /// the Super Saiyan set has. `None` when one unit (or none) has art for the pose.
-    fn unit_for(&self, pose: &Pose) -> Option<String> {
+    /// the Super Saiyan set has. Super Saiyan Vegeta is not in the party record: his units (see
+    /// [`SUPER_VEGETA_MARKS`]) are told from the normal Vegeta's by the colours, the pose being drawn from the units
+    /// whose art was made in the palette nearest to the one the game draws it in ([`ArtState::retain_by_palette`]).
+    /// `None` when one unit (or none) has art for the pose.
+    fn unit_for(&self, pose: &Pose, row: &[[u8; 3]; 16]) -> Option<String> {
         let mut units: Vec<String> =
             self.candidates(pose).into_iter().map(|(at, _)| self.unit_of(at)).collect();
         units.sort();
@@ -1805,10 +1868,44 @@ impl ArtState {
             }
             units.retain(|unit| !super_saiyan(unit));
         }
+        self.retain_by_palette(pose, row, &mut units);
         let sizes = self.unit_sizes();
         units.into_iter().max_by_key(|unit| {
             (sizes.get(unit).copied().unwrap_or(0), std::cmp::Reverse(unit.clone()))
         })
+    }
+
+    /// Of the units of Super Saiyan Vegeta and the units of the normal Vegeta in `units`, all with art for the pose,
+    /// keeps those whose art was made in the colours nearest to `row`, those of the pose in the frame (a tie keeps the
+    /// normal ones). `units` is left as it is when it holds no such pair, or when the art of either side has no
+    /// palette to compare.
+    fn retain_by_palette(&self, pose: &Pose, row: &[[u8; 3]; 16], units: &mut Vec<String>) {
+        let super_saiyan =
+            |unit: &String| SUPER_VEGETA_MARKS.iter().any(|mark| unit.contains(mark));
+        let normal = |unit: &String| unit.contains(VEGETA_MARK) && !super_saiyan(unit);
+        let candidates = self.candidates(pose);
+        let nearest = |side: &dyn Fn(&String) -> bool| {
+            candidates
+                .iter()
+                .filter(|&&(at, _)| side(&self.unit_of(at)))
+                .map(|&(at, _)| &self.pack.art.objects()[at as usize].palette)
+                .filter(|palette| palette.mask != 0)
+                .map(|palette| palette.distance(row))
+                .min()
+        };
+        if !units.iter().any(super_saiyan) || !units.iter().any(normal) {
+            return;
+        }
+        let (Some(normal_distance), Some(super_distance)) =
+            (nearest(&normal), nearest(&super_saiyan))
+        else {
+            return;
+        };
+        if super_distance < normal_distance {
+            units.retain(|unit| super_saiyan(unit) || !normal(unit));
+        } else {
+            units.retain(|unit| !super_saiyan(unit));
+        }
     }
 
     /// The number of poses of each unit of the index.

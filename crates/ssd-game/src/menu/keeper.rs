@@ -31,6 +31,8 @@ const IMAGE_EXTRA: usize = (EXTRA - 0x7E_2800) as usize;
 const LIST_BYTES: usize = 2 * LIST_FULL;
 /// Objects of the game (ids 0 to 39).
 const OBJECTS: usize = 40;
+/// `game_mode` of the Game Over screen (`$24`, main loop mode `$0D`; bit 7 is the mode's init flag).
+const GAME_OVER_MODE: u8 = 0x0D;
 
 /// One entry of the list as the keeper last wrote it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,13 +62,23 @@ pub struct Keeper {
     front: Option<u32>,
     /// A sale of the shop was under way at the last frame ([`Keeper::sync_shop`]).
     sale: bool,
+    /// The Game Over screen was up at the last frame: the run is over, and the frame after it is the boot.
+    over: bool,
 }
 
 impl Keeper {
     /// A keeper with no bag yet: it binds when the game has a save or a list to keep.
     #[must_use]
     pub fn new(rules: Rules) -> Self {
-        Self { rules, bag: None, save: None, shown: Vec::new(), front: None, sale: false }
+        Self {
+            rules,
+            bag: None,
+            save: None,
+            shown: Vec::new(),
+            front: None,
+            sale: false,
+            over: false,
+        }
     }
 
     /// Whether the bag is bound.
@@ -166,9 +178,28 @@ impl Keeper {
         self.bag = Some(bag);
         self.save = save.map(|(slot, checksum)| Save { slot, checksum });
         self.front = None;
+        self.over = false;
         let mut events = vec![HostEvent::App { tag: BIND_TAG, payload }];
         events.extend(self.project(wram, labels, None));
         events
+    }
+
+    /// The Game Over screen ends the run. While it is up the keeper leaves the list alone, and on the first frame after
+    /// it, the boot (which clears the list and shows the title), the bag is let go: the next Continue binds the bag of
+    /// the save it loads, and a New Game one of its own list, as at the first bind. Without this, the list the boot
+    /// empties would read as every card used, and a Continue of the save the run was bound to would write the reduced
+    /// bag over the list the game has just read from it. Returns whether the frame is part of that end.
+    fn run_over(&mut self, wram: &[u8]) -> bool {
+        let mode = wram.get(d::GAME_MODE as usize - 0x7E_0000).copied().unwrap_or(0);
+        if mode & 0x7F == GAME_OVER_MODE {
+            self.over = true;
+            return true;
+        }
+        if !self.over {
+            return false;
+        }
+        *self = Self::new(self.rules);
+        true
     }
 
     /// The bag as the list's entries of the original: each stack as the list shows it.
@@ -181,7 +212,7 @@ impl Keeper {
         sram: Option<&[u8]>,
         sidecar: &Sidecar,
     ) -> Vec<HostEvent> {
-        if self.bag.is_none() {
+        if self.bag.is_none() || self.run_over(wram) {
             return Vec::new();
         }
         // The game clears or loads the list in steps (a save being loaded, for one, passes through
@@ -889,5 +920,118 @@ mod tests {
         let writes = keeper.bind_recorded(&bag.to_bytes(), &ram, &labels).unwrap();
         assert_eq!(keeper.bag(), Some(&bag));
         assert_eq!(writes.len(), 3, "the list of the one Dragon Ball is written");
+    }
+
+    /// A battery save whose slot 0 is a good save of the list `objects` (state words zero) and `zeni`.
+    fn sram_with_slot(objects: &[u8], zeni: u16) -> Vec<u8> {
+        let mut sram = vec![0_u8; ssd_save::SRAM_SIZE];
+        let base = SLOT_BASES[0];
+        let page = base + IMAGE_LEN;
+        sram[page + PAGE_COUNT] = objects.len() as u8;
+        for (index, &object) in objects.iter().enumerate() {
+            sram[page + 2 * index] = object;
+        }
+        sram[page + PAGE_ZENI..][..2].copy_from_slice(&zeni.to_le_bytes());
+        sram[base + ssd_save::MARK_OFFSET..][..ssd_save::MARK.len()]
+            .copy_from_slice(&ssd_save::MARK);
+        let bytes: [u8; ssd_save::SLOT_LEN] =
+            sram[base..base + ssd_save::SLOT_LEN].try_into().expect("a slot");
+        let at = base + CHECKSUM_OFFSET;
+        sram[at..at + 2].copy_from_slice(&ssd_save::checksum(&bytes).to_le_bytes());
+        sram
+    }
+
+    /// One frame of the driver's keeping: a bind while there is no bag (`fresh` as the driver computes it), else a
+    /// sync; the writes go into work RAM.
+    fn keep(
+        keeper: &mut Keeper,
+        ram: &mut [u8],
+        sram: Option<&[u8]>,
+        sidecar: &Sidecar,
+        fresh: bool,
+    ) {
+        let labels = Labels::default();
+        let events = if keeper.bound() {
+            keeper.sync(ram, &labels, sram, sidecar)
+        } else {
+            keeper.bind(ram, &labels, sram, sidecar, fresh)
+        };
+        apply(ram, &events);
+    }
+
+    fn set_mode(ram: &mut [u8], mode: u8) {
+        ram[d::GAME_MODE as usize - 0x7E_0000] = mode;
+    }
+
+    /// The units of the bag for `objects`, in the same order.
+    fn units(keeper: &Keeper, objects: &[u8]) -> Vec<u32> {
+        let bag = keeper.bag().expect("a bag");
+        objects.iter().map(|&object| bag.units_of(object)).collect()
+    }
+
+    #[test]
+    fn game_over_then_the_boot_then_continue_keeps_the_bag_of_the_save() {
+        // Gohan (one card) and two of another stack, a save the run is bound to.
+        let sram = sram_with_slot(&[26, 2, 2], 40);
+        let sidecar = Sidecar::empty();
+        let mut ram = wram_with(&[26, 2, 2], 40);
+        let mut keeper = Keeper::new(Rules::default());
+        keep(&mut keeper, &mut ram, Some(&sram), &sidecar, false);
+        assert_eq!(units(&keeper, &[26, 2]), [1, 2], "the run is bound to the save");
+        // The battle is lost: the Game Over screen is up with the list as it was.
+        set_mode(&mut ram, GAME_OVER_MODE);
+        keep(&mut keeper, &mut ram, Some(&sram), &sidecar, false);
+        assert_eq!(units(&keeper, &[26, 2]), [1, 2], "the screen changes nothing");
+        // A button: the boot clears the list and the money and shows the title.
+        ram[d::ITEM_COUNT as usize - 0x7E_0000] = 0;
+        set_mode(&mut ram, 0);
+        keep(&mut keeper, &mut ram, Some(&sram), &sidecar, false);
+        assert!(!keeper.bound(), "the run is over: the bag is let go");
+        keep(&mut keeper, &mut ram, Some(&sram), &sidecar, false);
+        assert!(!keeper.bound(), "the title has no list to bind");
+        // Continue of the same slot: the game copies the save into work RAM.
+        ram = wram_with(&[26, 2, 2], 40);
+        keep(&mut keeper, &mut ram, Some(&sram), &sidecar, false);
+        assert_eq!(units(&keeper, &[26, 2]), [1, 2], "the bag is what the save holds");
+        assert_eq!(read_list(&ram), [(26, 0), (2, 0)], "and so is the list");
+        assert_eq!(keeper.bound_save().map(|(slot, _)| slot), Some(0));
+    }
+
+    #[test]
+    fn game_over_then_the_boot_then_a_new_game_starts_with_its_own_bag() {
+        // A run on the save (Gohan, two Bulmas), then lost.
+        let sram = sram_with_slot(&[26, 2, 2], 0);
+        let sidecar = Sidecar::empty();
+        let mut ram = wram_with(&[26, 2, 2], 0);
+        let mut keeper = Keeper::new(Rules::default());
+        keep(&mut keeper, &mut ram, Some(&sram), &sidecar, false);
+        set_mode(&mut ram, GAME_OVER_MODE);
+        keep(&mut keeper, &mut ram, Some(&sram), &sidecar, false);
+        ram[d::ITEM_COUNT as usize - 0x7E_0000] = 0;
+        set_mode(&mut ram, 0);
+        keep(&mut keeper, &mut ram, Some(&sram), &sidecar, false);
+        // New Game: the field with the new game's list (a Scouter), not the old run's cards.
+        ram = wram_with(&[16], 0);
+        keep(&mut keeper, &mut ram, Some(&sram), &sidecar, true);
+        assert_eq!(
+            units(&keeper, &[16, 26, 2]),
+            [1, 0, 0],
+            "no card of the lost run is carried over"
+        );
+        assert_eq!(keeper.bound_save(), None, "the new game is bound to no save yet");
+    }
+
+    #[test]
+    fn a_game_over_of_a_run_without_a_bag_leaves_the_next_bind_alone() {
+        let sidecar = Sidecar::empty();
+        let mut ram = wram_with(&[], 0);
+        let mut keeper = Keeper::new(Rules::default());
+        set_mode(&mut ram, GAME_OVER_MODE);
+        keep(&mut keeper, &mut ram, None, &sidecar, false);
+        set_mode(&mut ram, 0);
+        keep(&mut keeper, &mut ram, None, &sidecar, false);
+        ram = wram_with(&[16], 0);
+        keep(&mut keeper, &mut ram, None, &sidecar, true);
+        assert_eq!(units(&keeper, &[16]), [1]);
     }
 }

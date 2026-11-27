@@ -155,10 +155,13 @@ use) the game runs its own code for the effect, with the same refusals, so the c
 
 - **Guru** (BP +50 percent, "Raise BP by 50 percent."): a fighter who is boosted already is skipped; every other gets the boosted BP
   (his BP plus half of it, at most 9 999 999) and the mark of a boost, and keeps it to the end of the battle, as the chosen one does.
-  King Kai's object, which shares the code, is not changed.
+  King Kai's object, which shares the code, is not changed. With the level cap of `free_progression` a fighter whose BP is above
+  6 666 666 gets the whole rise in 40 bits (no cut at 9 999 999, which would lower a wide BP), the chosen one too.
 - **Porunga's level wish** (the second wish of the Porunga object): a fighter who is at his level cap (47, 48 for Gohan, the cap table
   of the original), who is marked as the original refuses, or who is Goku with the Kaioken on, is skipped; every other gets one level, the BP of
-  the level row and the growth of his maximum HP and KI, as the chosen one does. The wish's points and its mark are paid once.
+  the level row and the growth of his maximum HP and KI, as the chosen one does. The wish's points and its mark are paid once. With the
+  level cap of `free_progression` the game's cap is not the limit: a fighter at 47 or 48 gets his level on the extended rows, up to the pack's cap,
+  and is refused only there.
 
 - **Launch** (the object that makes a fighter's attacks the favourite ones, which hit every enemy): in a battle the Item screen gives
   Launch its normal effect three times in four; the other one in four it turns into another effect of its own ("attack everyone",

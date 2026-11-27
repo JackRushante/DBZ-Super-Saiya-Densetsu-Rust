@@ -8,8 +8,10 @@
 //! `SSD_ROM_PATH=... cargo test -p ssd-game --release --test game_over_real_rom -- --ignored --nocapture`.
 
 use ssd_game::cheats::{self, GAME_OVER_LOOP};
+use ssd_game::menu::driver::Driver;
 use ssd_game::scripts::battle_input;
-use ssd_oracle::{HookTable, Joypad, Machine, MemorySaveStore, NullAudio};
+use ssd_menus::Labels;
+use ssd_oracle::{HookTable, HostEvent, Joypad, Machine, MemorySaveStore, NullAudio};
 
 /// The main loop's state (`game_mode`, `$24`): `$0D` is the Game Over screen, `$87` the title as the boot enters it.
 const GAME_MODE: usize = 0x24;
@@ -170,4 +172,83 @@ fn a_button_on_the_game_over_screen_goes_back_to_the_title() {
     }
     println!("the title led on at frame {} (mode {:#04x})", machine.frame_count(), mode(&machine));
     assert!(started, "Start on the title starts the game");
+}
+
+/// One frame of the game with the HD layer's bag kept: the driver reads work RAM and its writes go in. The game is
+/// played with `pad` as it is (the script is the original's, not the HD menus').
+fn kept_step(machine: &mut Machine, driver: &mut Driver, pad: Joypad) {
+    let frame = driver.frame(machine.wram(), None, pad);
+    for event in &frame.events {
+        if let HostEvent::Wram { address, bytes } = event {
+            machine.write_wram(*address, bytes).unwrap();
+        }
+    }
+    step(machine, pad);
+}
+
+/// The bag of a lost run is let go when the Game Over screen is left (the boot empties the list, which is not a use of
+/// every card), and a new game binds the bag of its own list.
+#[test]
+#[ignore = "needs the ROM (SSD_ROM_PATH)"]
+fn the_bag_of_a_lost_run_is_let_go_at_the_title_and_a_new_game_binds_its_own() {
+    let mut machine = game(true);
+    let mut driver = Driver::new(Labels::default());
+    let mut first = None;
+    while machine.frame_count() < LOSE_AT {
+        let pad = battle_input(machine.frame_count());
+        kept_step(&mut machine, &mut driver, pad);
+        if first.is_none() {
+            first = driver.bag().map(ssd_menus::bag::Bag::units);
+        }
+    }
+    let first = first.expect("the bag binds on the field of the new game");
+    // The lost run holds three cards the new game does not: two of one stack and one of another
+    machine.write_wram(ssd_game::data::ITEM_LIST, &[2, 0xC0, 2, 0xC0, 16, 0x40]).unwrap();
+    machine.write_wram(ssd_game::data::ITEM_COUNT, &[3]).unwrap();
+    for _ in 0..4 {
+        let pad = battle_input(machine.frame_count());
+        kept_step(&mut machine, &mut driver, pad);
+    }
+    assert_eq!(
+        driver.bag().map(ssd_menus::bag::Bag::units),
+        Some(first + 3),
+        "the lost run's cards"
+    );
+    for record in 0..4 {
+        machine.write_wram(PARTY_RECORDS + record * 0x20 + 3, &[1, 0]).unwrap();
+    }
+    for slot in 0..5 {
+        machine.write_wram(ENEMY_SLOTS + slot * 0x20 + 7, &[0x40, 0x42, 0x0F]).unwrap();
+    }
+    while mode(&machine) != GAME_OVER {
+        assert!(machine.frame_count() < 8_000, "the battle is lost by frame 8000");
+        let pad = battle_input(machine.frame_count());
+        kept_step(&mut machine, &mut driver, pad);
+    }
+    let shown_at = machine.frame_count();
+    while machine.hook_stat(GAME_OVER_LOOP).calls == 0 {
+        assert!(machine.frame_count() - shown_at < 1_200, "the last loop runs");
+        kept_step(&mut machine, &mut driver, Joypad::default());
+    }
+    assert!(driver.bag().is_some(), "the bag stays while the screen is up");
+    // A leaves the screen: the boot empties the list and shows the title
+    kept_step(&mut machine, &mut driver, Joypad { a: true, ..Joypad::default() });
+    let mut seen_title = false;
+    for _ in 0..600 {
+        kept_step(&mut machine, &mut driver, Joypad::default());
+        seen_title |= mode(&machine) == TITLE;
+    }
+    assert!(seen_title, "the boot enters the title");
+    assert!(driver.bag().is_none(), "the lost run's bag is let go");
+    // The title starts a new game, and its list is bound to a bag of its own
+    let left = machine.frame_count();
+    let mut bound = None;
+    while machine.frame_count() < left + 6_000 && bound.is_none() {
+        let since = machine.frame_count() - left;
+        let pad = Joypad { start: since % 64 < 4, a: since % 16 < 4, ..Joypad::default() };
+        kept_step(&mut machine, &mut driver, pad);
+        bound = driver.bag().map(ssd_menus::bag::Bag::units);
+    }
+    println!("the second bag: {bound:?} units at frame {}", machine.frame_count());
+    assert_eq!(bound, Some(first), "the new game's bag is its own list, not the lost run's");
 }

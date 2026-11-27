@@ -21,6 +21,8 @@ const VEIL: Color = Color([0, 0, 0, 150]);
 const CHANGED: Color = Color::rgb(0xE8, 0x4A, 0x00);
 const SLOT_WINDOW: Rect = Rect::new(176.0, 30.0, 928.0, 580.0);
 const SLOT_HELP: Rect = Rect::new(176.0, 626.0, 928.0, 84.0);
+/// The rows of members the left window shows at once (the party's nine).
+const VISIBLE_ROWS: usize = 9;
 const LEFT_WINDOW: Rect = Rect::new(176.0, 28.0, 500.0, 626.0);
 pub(super) const RIGHT_WINDOW: Rect = Rect::new(696.0, 28.0, 408.0, 626.0);
 
@@ -64,10 +66,16 @@ fn number(slot: usize) -> String {
     format!("{:02}", slot + 1)
 }
 
+/// The x of each tab of the row, from the left of the window: the first three were set by hand for the labels "Party", "All" and
+/// "Allies"; the last follows the width of the label before it.
+pub(super) fn tab_positions() -> [f32; 4] {
+    let tools = 146.0 + text_width(Page::Allies.label(), SMALL_TEXT) + 27.0;
+    [0.0, 78.0, 146.0, tools]
+}
+
 fn tab_row(list: &mut DrawList, page: Page, left: f32, y: f32) {
-    for (tab, x) in [Page::Party, Page::All, Page::Allies, Page::Tools]
-        .into_iter()
-        .zip([0.0, 78.0, 146.0, 235.0])
+    for (tab, x) in
+        [Page::Party, Page::All, Page::Allies, Page::Tools].into_iter().zip(tab_positions())
     {
         let current = tab == page;
         let color = if current { palette::DARK_RED } else { palette::GREY };
@@ -194,7 +202,8 @@ fn party(list: &mut DrawList, editor: &Editor, session: &Session) {
         palette::BLACK,
         Align::Left,
     );
-    let count = format!("{}/9", session.members.len());
+    let in_party = session.members.iter().filter(|member| member.in_party()).count();
+    let count = format!("{in_party}/9");
     list.text(
         LEFT_WINDOW.right() - 30.0,
         69.0,
@@ -205,8 +214,11 @@ fn party(list: &mut DrawList, editor: &Editor, session: &Session) {
     );
     tab_row(list, session.page, left, 105.0);
     list.fill(Rect::new(left, 125.0, LEFT_WINDOW.w - 60.0, LINE), palette::DARK_RED);
-    for (index, member) in session.members.iter().enumerate() {
-        let mid = 159.0 + 50.0 * index as f32;
+    // Nine rows fit the window; with more members (the characters who are not in the party come after the party's) the rows
+    // scroll to keep the cursor in view.
+    let first = (session.member + 1).saturating_sub(VISIBLE_ROWS);
+    for (index, member) in session.members.iter().enumerate().skip(first).take(VISIBLE_ROWS) {
+        let mid = 159.0 + 50.0 * (index - first) as f32;
         let on = index == session.member;
         if on {
             list.fill(Rect::new(left - 16.0, mid - 25.0, LEFT_WINDOW.w - 28.0, 50.0), ROW_TINT);
@@ -222,7 +234,11 @@ fn party(list: &mut DrawList, editor: &Editor, session: &Session) {
         list.text(
             left + 64.0,
             mid + 14.0,
-            &format!("LV {}", member.level()),
+            &if member.in_party() {
+                format!("LV {}", member.level())
+            } else {
+                format!("LV {}  \u{b7}  not in the party", member.level())
+            },
             SMALL_TEXT,
             lv_color,
             Align::Left,
@@ -256,7 +272,13 @@ fn member_panel(list: &mut DrawList, editor: &Editor, session: &Session, member:
         picture: member.face.map(Picture::Face),
     });
     list.text(x + 162.0, 84.0, &member.name, LARGE_TEXT, palette::BLACK, Align::Left);
-    let place = format!("Party member {} of {}", session.member + 1, session.members.len());
+    let place = match member.position {
+        Some(position) => {
+            let in_party = session.members.iter().filter(|member| member.in_party()).count();
+            format!("Party member {} of {in_party}", position + 1)
+        }
+        None => "Not in the party".to_owned(),
+    };
     list.text(x + 162.0, 118.0, &place, SMALL_TEXT, palette::DARK_RED, Align::Left);
     list.text(x, 220.0, "-- Edit --", SMALL_TEXT, palette::DARK_RED, Align::Left);
     let growth = editor.labels().growth.get(usize::from(member.id)).cloned().unwrap_or_default();

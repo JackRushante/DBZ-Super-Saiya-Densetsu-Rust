@@ -182,6 +182,13 @@ first, by an ignored test that compares the game's memory with the edited slot
   `BP - table[level]`. SEEN: `crates/ssd-catalogue/tests/save_editor_real_rom.rs` runs `03:C64A` on an edited Gohan (+3000 and -1000 over
   the table) and reads the table's BP for the new level plus the delta. Routines that *set* BP from a table (Piccolo's return,
   `03:C58D`; the Super Saiyan builder, `03:85F0`) do not keep it.
+- **Members outside the party.** The editor lists, after the party's list (`$0190`), the characters whose roster record (the image's twelve
+  records, by character id) is a record of a character who joined: its character byte (`+1C`) is its own id, the level is 1 to 99,
+  the maximum HP is 1 to 9 999, the maximum KI at most 9 999 and HP and KI do not pass their maxima (`ssd_menus::saveedit::joined`). The
+  flags are not read (the game clears them for a character who waits outside the party). The records of characters who never joined are the
+  power-on noise and fail that test. SEEN on a real save (Goku and Piccolo in the party, a record of Krillin added by the test
+  `a_member_outside_the_party_is_listed_edited_and_loads_in_the_roster`): the nine other records of the roster, which are the power-on noise, fail
+  the test, and the Continue of the game loads the edited record of Krillin into its roster.
 - **A level in the editor** is `ssd_catalogue::game::set_level`: level, max HP and KI from the rows, HP and KI full, EXP at the start of
   the level, byte `+0E` from the row; the BP is the table's value plus the delta (at most 9 999 999).
 - **The item list** is written as the bag projects it (`Bag::project`: at most 21 entries, 24 when the bag is full, key items first):

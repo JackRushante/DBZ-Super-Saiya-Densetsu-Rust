@@ -2262,3 +2262,153 @@ fn the_packs_own_variant_of_super_saiyan_goku_is_drawn_for_the_pixels_he_shares_
     assert_eq!(pixel(&ssj, 41 * 4 + 1, 51 * 4 + 1), [255, 255, 0], "Super Saiyan Goku: bigger art");
     assert_eq!(pixel(&ssj, 38 * 4, 48 * 4), [255, 255, 0], "and its margin");
 }
+
+/// The face of `banded_log` (four characters, palette 4) with a speed line of the same palette beside it: a small
+/// sprite of one colour. Both are one cluster.
+fn portrait_and_speed_line_log(x: u8, y: u8) -> (FrameLog, Pose) {
+    let (mut log, _) = banded_log(x, y, [0x03FF, 0x7FE0, 0x7C1F]);
+    log.oam_low[4] = x + 18;
+    log.oam_low[5] = y + 4;
+    log.oam_low[6] = 32;
+    log.oam_low[7] = 4 << 1;
+    for row in 0..8 {
+        log.vram[32 * 16 + row] = 0x00FF;
+    }
+    let sprites = poses::sprites(&log);
+    let poses: Vec<Pose> =
+        poses::poses(&log, &sprites).into_iter().filter(|pose| !pose.field).collect();
+    assert_eq!(poses.len(), 1, "the face and the line are one cluster");
+    assert_eq!(poses[0].sprites.count_ones(), 2);
+    (log, poses.into_iter().next().unwrap())
+}
+
+/// A pack whose picture is the face of `frame` (its first four characters, green) and whose art for `pose` is red.
+fn face_and_cluster_pack(dir: &std::path::Path, frame: &FrameLog, pose: &Pose) -> Arc<Pack> {
+    write_png(&dir.join("art/c.png"), pose.w as u32 * 4, pose.h as u32 * 4, |_, _| {
+        [200, 40, 40, 255]
+    });
+    write_png(&dir.join("art/p.png"), 128, 128, |_, _| [20, 200, 20, 255]);
+    let chars: Vec<[u16; 16]> = [0_usize, 1, 16, 17]
+        .iter()
+        .map(|&tile| std::array::from_fn(|word| frame.vram[tile * 16 + word]))
+        .collect();
+    let asset = Asset {
+        id: "portrait/16:8000/4bpp".to_owned(),
+        bpp: 4,
+        mode: Mode::Indexed,
+        columns: 16,
+        keys: chars.iter().map(|c| word_key(c)).collect(),
+        art: String::new(),
+    };
+    let picture = Picture {
+        name: "face".to_owned(),
+        asset: asset.id.clone(),
+        tiles: std::array::from_fn(|n| n as u16),
+        palette: Palette::default(),
+        art: "art/p.png".to_owned(),
+    };
+    pack_of(dir, vec![asset], ArtIndex::new(vec![picture], vec![object(pose, "art/c.png", false)]))
+}
+
+#[test]
+fn a_portrait_beside_a_sprite_of_its_palette_is_drawn_from_its_picture_not_from_the_clusters_art() {
+    let dir = tempfile::tempdir().unwrap();
+    let (frame, pose) = portrait_and_speed_line_log(40, 50);
+    let pack = face_and_cluster_pack(dir.path(), &frame, &pose);
+    let mut renderer = Renderer::new();
+    renderer.set_art(Some(pack));
+    let drawn = renderer.render_hd(&frame, options(4)).unwrap();
+    let stat = &renderer.art_stats().poses[0];
+    assert!(stat.matched && stat.source == crate::ArtSource::Exact, "the cluster has exact art");
+    // The face's pixels are the picture's (green), the speed line's the cluster's art (red)
+    let face = pixel(&drawn, 41 * 4 + 1, 59 * 4 + 1);
+    assert_eq!(face, [20, 200, 20], "the portrait: {face:?}");
+    let line = pixel(&drawn, 60 * 4 + 1, 57 * 4 + 1);
+    assert_eq!(line, [200, 40, 40], "the speed line: {line:?}");
+}
+
+#[test]
+fn a_cluster_that_is_all_portrait_keeps_the_art_of_its_exact_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let (frame, pose) = banded_log(40, 50, [0x03FF, 0x7FE0, 0x7C1F]);
+    let pack = face_and_cluster_pack(dir.path(), &frame, &pose);
+    let mut renderer = Renderer::new();
+    renderer.set_art(Some(pack));
+    let drawn = renderer.render_hd(&frame, options(4)).unwrap();
+    assert!(renderer.art_stats().poses[0].matched, "the cluster has exact art");
+    assert_eq!(pixel(&drawn, 41 * 4 + 1, 59 * 4 + 1), [200, 40, 40], "drawn as it was");
+}
+
+#[test]
+fn a_super_saiyan_unit_is_drawn_when_its_art_was_made_in_the_colours_the_game_draws_the_pose_in() {
+    let dir = tempfile::tempdir().unwrap();
+    // The 16 x 16 fighter of `fighter_log` has green for its colour 2. The normal unit's art for its pixels was made
+    // with that colour red (blue art), the Super Saiyan unit's with it green (red art). The normal unit has a second
+    // pose, so it is the unit with the most poses: the one the pose was drawn from whatever its colours.
+    let (frame, pose) = fighter_log(40, 50);
+    write_png(&dir.path().join("art/normal.png"), 64, 64, |_, _| [0, 0, 255, 255]);
+    write_png(&dir.path().join("art/super.png"), 64, 64, |_, _| [255, 0, 0, 255]);
+    write_png(&dir.path().join("art/other.png"), 64, 64, |_, _| [0, 255, 0, 255]);
+    let made_in = |colour: [u8; 3]| {
+        let mut palette = Palette { mask: 0b100, ..Palette::default() };
+        palette.colors[2] = colour;
+        palette
+    };
+    let green = poses::rgb555(0x03E0);
+    let unit = |id: &str, key: u64, art: &str, palette: Palette| Object {
+        id: id.to_owned(),
+        key,
+        palette,
+        ..object(&pose, art, false)
+    };
+    let (x, y) = (41 * 4 + 1, 51 * 4 + 1);
+    let drawn = |objects: Vec<Object>| {
+        let pack = pack_of(dir.path(), Vec::new(), ArtIndex::new(Vec::new(), objects));
+        let mut renderer = Renderer::new();
+        renderer.set_art(Some(pack));
+        pixel(&renderer.render_hd(&frame, options(4)).unwrap(), x, y)
+    };
+    let objects = |normal: [u8; 3], super_saiyan: [u8; 3]| {
+        vec![
+            unit("battle-vegeta-000", pose.key, "art/normal.png", made_in(normal)),
+            unit("battle-vegeta-001", pose.key ^ 1, "art/other.png", made_in(normal)),
+            unit("battle-super-vegeta-000", pose.key, "art/super.png", made_in(super_saiyan)),
+        ]
+    };
+    assert_eq!(
+        drawn(objects([200, 10, 10], green)),
+        [255, 0, 0],
+        "the colours of the Super Saiyan art"
+    );
+    assert_eq!(drawn(objects(green, [200, 10, 10])), [0, 0, 255], "the colours of the normal art");
+    assert_eq!(drawn(objects(green, green)), [0, 0, 255], "a tie goes to the normal unit");
+    // The close-ups of the special attacks: the enemy Vegeta's units, `u15` normal and `u75` (the game's unit `$4B`) Super Saiyan
+    let close_up = |normal: [u8; 3], super_saiyan: [u8; 3]| {
+        vec![
+            unit("gallery-enemy-vegeta-u15-000", pose.key, "art/normal.png", made_in(normal)),
+            unit("gallery-enemy-vegeta-u15-001", pose.key ^ 1, "art/other.png", made_in(normal)),
+            unit("gallery-enemy-vegeta-u75-000", pose.key, "art/super.png", made_in(super_saiyan)),
+        ]
+    };
+    assert_eq!(drawn(close_up([200, 10, 10], green)), [255, 0, 0], "the Super Saiyan close-up");
+    assert_eq!(drawn(close_up(green, [200, 10, 10])), [0, 0, 255], "the normal close-up");
+    // Units that are not Vegeta's are left to the unit with the most poses, whatever their colours (the art of the
+    // Goku unit is drawn recoloured here, in the colours of the pose: it is not the other unit's red)
+    let others = vec![
+        unit("battle-goku-000", pose.key, "art/normal.png", made_in([200, 10, 10])),
+        unit("battle-goku-001", pose.key ^ 1, "art/other.png", made_in([200, 10, 10])),
+        unit("battle-saibaman-000", pose.key, "art/super.png", made_in(green)),
+    ];
+    assert_ne!(drawn(others), [255, 0, 0], "only Vegeta's units are told by their colours");
+    // Art with no palette to compare keeps the unit with the most poses
+    let blind = vec![
+        unit("battle-vegeta-000", pose.key, "art/normal.png", Palette::default()),
+        unit("battle-vegeta-001", pose.key ^ 1, "art/other.png", Palette::default()),
+        unit("battle-super-vegeta-000", pose.key, "art/super.png", made_in(green)),
+    ];
+    assert_eq!(
+        drawn(blind),
+        [0, 0, 255],
+        "no palette on the normal art: the unit with the most poses"
+    );
+}

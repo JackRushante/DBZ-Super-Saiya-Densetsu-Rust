@@ -27,7 +27,9 @@
 //!   `01:E4C1`, the `RTL` after the success. The extra members get the same test, then the same code. The animation of the maximum
 //!   HP and KI runs per frame on the chosen member's picture (it draws and takes the wish's points), so for the others the hook
 //!   puts the two maxima where the animation ends, the targets the original computed for that member. The wish's points and its
-//!   mark are paid once, when the chosen member's animation ends, as in the original.
+//!   mark are paid once, when the chosen member's animation ends, as in the original. With the level cap (`free_progression`) a member
+//!   at the game's cap (47, 48) is not refused any more: `levels::wish_past_cap` gives him the level on the extended rows, up to the
+//!   pack's cap, for the chosen member (the hook `01:E3FC` of `levels`, which then runs [`wish_others`]) and for the others alike.
 //! - **Launch** (object 9; `01:E066`, the effect that marks a member's attacks as the favourite ones, and its step 0 at `01:E074`).
 //!   In a battle the Item screen (`01:8C63`) lets Launch take this normal effect three times in four; the other one in four
 //!   (`rng_seed_a` & 3 is 0) it becomes object 27, an effect of its own (`01:ECAA`, "attack everyone"), which never reaches the
@@ -255,9 +257,52 @@ fn serve(
     ctx.set_cost(0);
 }
 
+/// The objects of the BP step `01:DF13`: King Kai's (adds a quarter of the BP) and Guru's (adds half of it).
+const KING_KAI: u8 = 5;
+/// The BP above which the original's step (BP plus half of it, at most `$98967F` = 9 999 999) reaches its cut.
+const GURU_FROM: u64 = 6_666_666;
+
+/// The BP that a BP object gives a member with `bp` (40 bits), when the pack has the level cap and the original's step would
+/// garble it: the step reads the 24 low bits of the BP, adds a half (a quarter for King Kai's object) and cuts the result at
+/// 9 999 999, which a member whose BP is wide (levels above 100: millions, then billions) would lose (the cut BP is below his own,
+/// and the high part of the BP is not read). With the level cap such a member gets the whole rise, in 40 bits. `None` for any
+/// other member and without the level cap: the original's.
+#[must_use]
+fn wide_boost(ctx: &Ctx<'_>, record: u32, item: u8) -> Option<u64> {
+    if super::progression::level_cap(ctx).is_none() || (item != GURU && item != KING_KAI) {
+        return None;
+    }
+    let bp = super::levels::wide_bp(ctx, record);
+    (bp > GURU_FROM).then(|| boosted_bp(bp, item))
+}
+
+/// The BP after the object: the BP plus its half (Guru) or quarter (King Kai), at most 40 bits.
+#[must_use]
+fn boosted_bp(bp: u64, item: u8) -> u64 {
+    let add = if item == KING_KAI { bp >> 2 } else { bp >> 1 };
+    (bp + add).min((1 << 40) - 1)
+}
+
+/// Gives a member a boost `wide_boost` found: the whole BP is written at once (24 bits in the record, the high part in the block),
+/// and the animation's target is its low 24 bits so that the count-up of the chosen member has nothing left to do.
+fn give_wide_boost(ctx: &mut Ctx<'_>, record: u32, bp: u64) {
+    super::levels::set_wide_bp(ctx, record, bp);
+    ctx.write16(BP_TARGET, bp as u16);
+    ctx.write8(BP_TARGET_HIGH, (bp >> 16) as u8);
+}
+
 /// `01:DF8A`: Guru's boost is applied to the chosen member; the same step is run for every other member who is not boosted, and
-/// his BP is put at the target the step computed (where the count-up of the chosen member will end).
+/// his BP is put at the target the step computed (where the count-up of the chosen member will end). A member whose BP is wide gets
+/// the whole boost in 40 bits instead ([`wide_boost`]), the chosen member of King Kai's object too.
 fn guru_wrapper(ctx: &mut Ctx<'_>) {
+    ctx.mark_gated();
+    let chosen = ctx.peek16(TARGET);
+    if u32::from(chosen) < 0x20 * PARTY_SLOTS && chosen.is_multiple_of(0x20) {
+        let record = party_record(0) + u32::from(chosen);
+        if let Some(bp) = wide_boost(ctx, record, ctx.peek8(ITEM_ID)) {
+            give_wide_boost(ctx, record, bp);
+        }
+    }
     serve(
         ctx,
         GURU_KEY,
@@ -267,6 +312,10 @@ fn guru_wrapper(ctx: &mut Ctx<'_>) {
         |ctx, offset| {
             if run_for(ctx, GURU_STEP, offset) {
                 let record = party_record(0) + u32::from(offset);
+                if let Some(bp) = wide_boost(ctx, record, GURU) {
+                    give_wide_boost(ctx, record, bp);
+                    return;
+                }
                 let (low, high) = (ctx.peek16(BP_TARGET), ctx.peek8(BP_TARGET_HIGH));
                 ctx.write16(record + BP, low);
                 ctx.write8(record + BP + 2, high);
@@ -296,37 +345,52 @@ fn below_cap(ctx: &mut Ctx<'_>, offset: u16) -> bool {
     ctx.call_original(CAP_CHECK, ReturnKind::Rtl).is_ok() && ctx.c()
 }
 
-/// `01:E4C1`: Porunga's level wish is applied to the chosen member; the other members get the same tests and then the same code.
-fn porunga_wrapper(ctx: &mut Ctx<'_>) {
+/// The party-wide level wish: the members other than the chosen one get the same tests and then the same code. A member at his
+/// game's cap (47, 48) whom the level cap lets rise ([`super::levels::wish_past_cap`]) gets the wish on the extended rows, with his
+/// maximum HP and KI put at the targets at once, as the original's animation ends with them. Returns whether the wish ran (the
+/// chosen member's variables are then put back and the routine's cost is declared); `false` when the switch is off or no other
+/// member takes the wish, and nothing was done.
+pub(super) fn wish_others(ctx: &mut Ctx<'_>) -> bool {
     ctx.mark_gated();
     if !on(ctx, Boost::Porunga) {
-        ctx.resume_at(PORUNGA_KEY);
-        return;
+        return false;
     }
     let list = members(ctx, |ctx, offset, flags| {
         let character = ctx.peek8(party_record(0) + u32::from(offset) + CHARACTER);
         wish_fits(flags, character, ctx.peek8(KAIOKEN) & 0x80 != 0)
     });
     if list.is_empty() {
-        ctx.resume_at(PORUNGA_KEY);
-        return;
+        return false;
     }
     let saved = Saved::take(ctx);
     for offset in list {
+        let record = party_record(0) + u32::from(offset);
+        if let Some(wish) = super::levels::wish_past_cap(ctx, record) {
+            ctx.write16(record + MAX_HP, wish.max_hp);
+            ctx.write16(record + MAX_KI, wish.max_ki);
+            continue;
+        }
         if !below_cap(ctx, offset) {
             continue;
         }
         if !run_for(ctx, PORUNGA_COMMIT, offset) {
-            return;
+            return true;
         }
         // The animation of the chosen member ends with the maxima at the targets; the extra members get them now.
-        let record = party_record(0) + u32::from(offset);
         let (hp, ki) = (ctx.peek16(HP_TARGET), ctx.peek16(KI_TARGET));
         ctx.write16(record + MAX_HP, hp);
         ctx.write16(record + MAX_KI, ki);
     }
     saved.put_back(ctx);
     ctx.set_cost(0);
+    true
+}
+
+/// `01:E4C1`: Porunga's level wish is applied to the chosen member; the other members get the same tests and then the same code.
+fn porunga_wrapper(ctx: &mut Ctx<'_>) {
+    if !wish_others(ctx) {
+        ctx.resume_at(PORUNGA_KEY);
+    }
 }
 
 /// The object of Porunga.
@@ -365,10 +429,10 @@ fn first_row(ctx: &Ctx<'_>, boost: Boost) -> u8 {
                 let character = ctx.peek8(record + CHARACTER);
                 // The same test as the cap check `03:84EE`, read here without running it (a pick runs every frame of the effect).
                 wish_fits(flags, character, kaioken_on)
-                    && cap_allows(
+                    && (cap_allows(
                         ctx.peek8(CAP_TABLE + u32::from(character)),
                         ctx.peek8(record + LEVEL),
-                    )
+                    ) || super::levels::wish_past_cap_ok(ctx, record))
             }
         };
         if fits {
@@ -516,6 +580,21 @@ mod tests {
         const {
             assert!(GURU_STEP < GURU_KEY && PORUNGA_COMMIT < PORUNGA_KEY && LUNCH_STEP < LUNCH_KEY);
         };
+    }
+
+    #[test]
+    fn a_wide_bp_gets_the_whole_boost_and_never_less_than_it_had() {
+        // Guru adds half, King Kai's object a quarter; the result is not cut at 9 999 999 and fits 40 bits.
+        assert_eq!(boosted_bp(52_000_000, GURU), 78_000_000);
+        assert_eq!(boosted_bp(52_000_000, KING_KAI), 65_000_000);
+        assert_eq!(boosted_bp((1 << 40) - 1, GURU), (1 << 40) - 1);
+        // The original's step cuts a boosted BP at 9 999 999: a BP of 7 000 000 would be given 10 500 000 and gets the cut.
+        assert!(
+            boosted_bp(GURU_FROM, GURU) <= 9_999_999 && boosted_bp(GURU_FROM + 3, GURU) > 9_999_999
+        );
+        for bp in [GURU_FROM + 1, 20_000_000, 1 << 36] {
+            assert!(boosted_bp(bp, GURU) > bp);
+        }
     }
 
     #[test]

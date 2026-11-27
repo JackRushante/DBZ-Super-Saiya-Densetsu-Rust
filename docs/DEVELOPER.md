@@ -258,8 +258,8 @@ check names each gap).
 
 On the title screen (Enhanced mode, not while a replay plays or records) a small strip at the foot says "Select  Edit saves". Select
 opens the three save slots as the Save screen shows them; A opens a slot that holds a game (an empty slot has nothing to edit, a damaged
-one is refused), B goes back to the title. A slot opens on its pages, walked with L and R: **Party**, then the bag's **All**, **Allies**
-and **Tools**.
+one is refused), B goes back to the title. A slot opens on its pages, walked with L and R: **Party** (the party's members, then the characters who joined and are not in the party,
+marked "not in the party", whose BP stops at 16 777 215), then the bag's **All**, **Ally cards** and **Tools**.
 
 - **Party.** Up and Down choose LV or BP, Left and Right change it (hold to repeat; a held BP speeds up to x10, x100 and x1000), L and R
   change the member, Y gives the BP back to the game's own value for the level. The level goes from the character's first row to its cap

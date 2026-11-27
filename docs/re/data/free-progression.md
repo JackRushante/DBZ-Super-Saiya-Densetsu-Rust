@@ -113,7 +113,7 @@ delta is `target - level` modulo 256, a target below the level wraps and still g
 | F2 | `03:EBB1` (map 5 set-up `03:EB54`) | Piccolo, from the roster image (`$7E:2842`) | floor 7 |
 | F3 | `03:EC47`, `03:EC55` (map 7 set-up `03:EC25`) | Goku | floor 7 if his level is below 4, else 8 (the routine ends at the target plus one, see above) |
 | F4 | `03:EE5F` (maps 18 to 20, `03:EE2A`) | Goku alone | floor 13, then scene `$50` (if `$0180` is non-zero it sets `$0170` bit 1 instead) |
-| F5 | `03:FA79` (scene `$3F`'s hook `03:FA3F`) | Goku | to 49, which stops at his cap 47: what made S5 reachable |
+| F5 | `03:FA79` (scene `$3F`'s hook `03:FA3F`) | Goku | to 49, which stops at his cap 47: what made S5 reachable. INFERRED from the code, not run (no replay passes the scene): Goku is not in the party records then (he joins from the roster in the last fight, effect `$3C`, `03:C7D1`, which builds the enemy at `03:C7FB` *before* the load of the party and Goku), and `03:C64A` finds no record and does nothing |
 | F6 | `03:D211` (effect `$67`) | every party member | to Piccolo's roster level; sets each unit id from `03:D249` |
 | F7 | `03:CFC5..CFE1` (effect `$5B`, with the change of school: the unit ids from `03:CFFC`) | the party members of ids 0 to 7 and 9, 10 | +2 each |
 | F8 | scenes `$04` (+3, +2 with Piccolo present: Gohan), `$37` (+5, Piccolo), `$3C` (+4 or +2, then +1: Piccolo), `$4C` (+20: Piccolo) | effect `$38` = `03:C64A` | gifts |
