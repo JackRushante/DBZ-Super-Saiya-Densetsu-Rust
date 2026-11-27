@@ -19,7 +19,7 @@
 //! The decoding of the sprites follows the capture, not the PPU: whole sprites (all their pixels,
 //! the ones off the screen too), as the sprite sizes of the frame say.
 
-use sha1_smol::Sha1;
+use super::resolve::digest;
 use ssd_oracle::FrameLog;
 
 /// One decoded sprite of the object layer.
@@ -349,13 +349,6 @@ pub(crate) fn region_digest(sprites: &[Sprite], org: (i32, i32), w: usize, h: us
         total = total.wrapping_add(hash);
     }
     total
-}
-
-fn digest(data: &[u8], tail: [u8; 2]) -> u64 {
-    let mut hash = Sha1::new();
-    hash.update(data);
-    hash.update(&tail);
-    u64::from_be_bytes(hash.digest().bytes()[..8].try_into().expect("eight bytes"))
 }
 
 /// The CGRAM as it stands at each entry of the log, to colour the sprites' rows.
@@ -1070,7 +1063,7 @@ mod tests {
         assert_eq!(pose.arr, [5, 0, 0, 0, 0, 0, 0, 0, 6]);
         // The origin is the capture's: one row below the sprite's y, plus the trimmed rows
         assert_eq!(pose.org, (12, 20 + 1 + 1));
-        let mut hash = Sha1::new();
+        let mut hash = sha1_smol::Sha1::new();
         hash.update(&pose.arr);
         hash.update(&[3, 3]);
         assert_eq!(pose.key, u64::from_be_bytes(hash.digest().bytes()[..8].try_into().unwrap()));

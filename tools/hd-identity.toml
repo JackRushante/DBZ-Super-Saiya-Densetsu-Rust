@@ -1,0 +1,302 @@
+# Who each unit and portrait of the game is, for `xtask hd-catalogue verify`: the check that a picture
+# of the HD art shows the character the game draws there.
+#
+# Written in our own words; nothing here is copied from the ROM. A slug is the identity of one
+# look of one character: `vegeta` and `vegeta-ssj` are two looks that must never share art. A slug
+# of the form `<name>-u<N>` is a unit that shares its name with others and whose look has not been
+# told apart yet (it is compared by family, the name, not as a separate look).
+#
+# Unit numbers are decimal, as the art's file names have them (`gallery-enemy-vegeta-u75-005` is
+# made for unit 75, $4B; Super Saiyan Goku is unit 59, $3B).
+
+# Unit id -> identity slug. The name is the one of the game's unit name table, except where noted.
+[units]
+0 = "goku"
+1 = "piccolo"
+2 = "raditz"
+3 = "j-saibaman"
+4 = "saibaman"
+5 = "imite"
+6 = "saimen"
+7 = "baimen"
+8 = "grimen"
+9 = "gohan"
+10 = "krillin"
+11 = "tien"
+12 = "yamcha"
+13 = "chiaotzu"
+14 = "nappa"
+15 = "vegeta"
+16 = "gohan-u16"
+17 = "vegeta-u17"
+18 = "appule"
+19 = "vug"
+20 = "bugy"
+21 = "banan"
+22 = "bundt"
+23 = "bun"
+24 = "cui"
+25 = "cid"
+26 = "zoak"
+27 = "dodoria"
+28 = "dren"
+29 = "bobo"
+30 = "zarbon"
+31 = "zarbon-u31"
+32 = "red"
+33 = "regor"
+# The name table calls unit 34 Chiaotzu; its face set and its art are the Namekian fighter Nail's.
+34 = "nail-u34"
+35 = "tsumuri"
+36 = "maima"
+37 = "guldo"
+38 = "oggers"
+39 = "hirra"
+40 = "recoome"
+41 = "strock"
+42 = "snuel"
+43 = "burter"
+44 = "strong"
+45 = "cap"
+46 = "jeice"
+47 = "goose"
+48 = "strock-u48"
+49 = "ginyu"
+50 = "gur"
+51 = "guy"
+52 = "k-kai"
+53 = "frieza"
+54 = "frieza-u54"
+55 = "frieza-u55"
+56 = "frieza-u56"
+57 = "goku-u57"
+58 = "goku-u58"
+59 = "goku-ssj"
+60 = "goku-u60"
+61 = "piccolo-u61"
+62 = "piccolo-u62"
+63 = "gohan-u63"
+64 = "krillin-u64"
+65 = "krillin-u65"
+66 = "gohan-u66"
+67 = "krillin-u67"
+68 = "tien-u68"
+69 = "yamcha-u69"
+70 = "chiaotzu-u70"
+71 = "tien-u71"
+72 = "yamcha-u72"
+73 = "chiaotzu-u73"
+74 = "vegeta-u74"
+75 = "vegeta-ssj"
+76 = "gohan-u76"
+77 = "gohan-u77"
+78 = "frieza-u78"
+79 = "vegeta-u79"
+80 = "vegeta-u80"
+81 = "raditz-u81"
+83 = "yajirobe"
+84 = "tsumuri-u84"
+96 = "raditz-u96"
+97 = "dende"
+# Ginyu in Goku's body: either name describes the picture.
+98 = "ginyu-u98"
+99 = "frieza-u99"
+100 = "frieza-u100"
+101 = "piccolo-u101"
+102 = "gohan-u102"
+103 = "nail"
+104 = "frieza-u104"
+
+# Looks of one character that are told apart: art made for one must never draw the other.
+# Each list is a family whose members are distinct looks.
+[forms]
+vegeta = ["vegeta", "vegeta-ssj"]
+goku = ["goku", "goku-ssj"]
+
+# What the label of the art (its description, its fighter, its id, the subject of its prompt) must
+# say for it to show the identity: any of `words` (default: the slug and its family), and for a
+# look told apart any of `form_words`; none of `not_words`. Lower case, matched as text.
+[identities.j-saibaman]
+words = ["saibaman", "j-sai"]
+[identities.saibaman]
+words = ["saibaman", "saibai"]
+[identities.saimen]
+words = ["saimen", "saibaman"]
+[identities.baimen]
+words = ["baimen", "saibaman"]
+[identities.imite]
+words = ["imite", "saibaman"]
+[identities.grimen]
+words = ["grimen", "saibaman"]
+[identities.k-kai]
+words = ["king kai", "k-kai", "kaio"]
+[identities.vegeta]
+describe = "Vegeta: black flame-shaped upright hair with a widow's peak, dark eyes, a stern face, blue bodysuit, white gloves and boots, white Saiyan armour with yellow shoulder pads."
+words = ["vegeta"]
+not_words = ["super saiyan"]
+[identities.vegeta-ssj]
+describe = "Super Saiyan Vegeta: golden upright hair with a widow's peak, teal eyes, a stern face, blue bodysuit, white gloves and boots, white Saiyan armour with yellow shoulder pads."
+words = ["vegeta"]
+form_words = ["super saiyan", "golden"]
+[identities.goku]
+describe = "Son Goku: spiky black hair, dark eyes, orange gi with a blue undershirt, blue belt and wristbands, blue boots."
+words = ["goku"]
+not_words = ["super saiyan"]
+[identities.goku-ssj]
+describe = "Super Saiyan Son Goku: spiky golden upright hair, teal eyes, orange gi with a blue undershirt, blue belt and wristbands, blue boots."
+words = ["goku"]
+form_words = ["super saiyan", "golden"]
+[identities.ginyu-u98]
+words = ["ginyu", "goku"]
+[identities.dende]
+describe = "Dende, a Namekian child: small body with a child's proportions, green skin, bald head with two short antennae, long pointed ears, big round eyes and a young round face, plain light clothes. Not an adult warrior: no turban, cape or muscles."
+words = ["dende"]
+[identities.nail-u34]
+words = ["nail"]
+[identities.kami]
+words = ["kami"]
+[identities.roshi]
+words = ["roshi"]
+[identities.bulma]
+words = ["bulma"]
+[identities.mr-popo]
+words = ["popo"]
+[identities.puar]
+words = ["puar"]
+[identities.king-kai-portrait]
+words = ["kaio", "king kai"]
+[identities.guru]
+words = ["guru"]
+[identities.korin]
+words = ["korin"]
+[identities.launch]
+words = ["launch"]
+[identities.yemma]
+words = ["yemma"]
+[identities.baba]
+describe = "The native picture shows a stern face under a black hat with a red band; the name table calls the object Baba but the picture does not look like her, so check the identity before redrawing."
+words = ["baba"]
+[identities.chichi]
+words = ["chi-chi", "chichi"]
+[identities.oolong]
+words = ["oolong"]
+[identities.shenron]
+words = ["shenron"]
+[identities.porunga]
+words = ["porunga"]
+[identities.yajirobe]
+describe = "Yajirobe: a stout young swordsman with a black topknot, a round face and a katana, in an orange-yellow gi."
+words = ["yajirobe"]
+[identities.saibaman-portrait]
+describe = "A Saibaman: a small green plant-like alien with a ridged head, narrow red eyes and a wide grin."
+words = ["saibaman"]
+[identities.dragon-radar]
+words = ["radar"]
+[identities.dragon-ball-1]
+words = ["one-star", "1 red star", "one star"]
+[identities.dragon-ball-2]
+words = ["two-star", "2 red stars", "two star"]
+[identities.dragon-ball-3]
+words = ["three-star", "3 red stars", "three star"]
+[identities.dragon-ball-4]
+words = ["four-star", "4 red stars", "four star"]
+[identities.dragon-ball-5]
+words = ["five-star", "5 red stars", "five star"]
+[identities.dragon-ball-6]
+words = ["six-star", "6 red stars", "six star"]
+[identities.dragon-ball-7]
+words = ["seven-star", "7 red stars", "seven star"]
+
+[identities.goku-u60]
+describe = "Son Goku with golden Super Saiyan hair (this unit's palette gives him golden spiky hair, as the native sprite shows): orange gi with a blue undershirt, blue belt and wristbands, blue boots."
+[identities.goose]
+describe = "A Frieza Force fighter in the same sprite as Jeice, in other colours: bright green hair, pale skin, white and red battle armour with orange shoulder pads, pale blue legs."
+[identities.strock-u48]
+describe = "A Frieza Force fighter in the same sprite as Jeice, in other colours: blue-violet hair, tan skin, a green armoured top with a white shoulder cape, tan legs."
+[identities.zoak]
+describe = "A soldier of Frieza's army in the standard shoulder-pad battle armour: green skin, purple and blue armour with orange shoulder pads."
+[identities.bugy]
+describe = "A soldier of Frieza's army in the standard shoulder-pad battle armour: orange head, dark blue armour with white and orange shoulder pads."
+[identities.bundt]
+describe = "A soldier of Frieza's army in the standard shoulder-pad battle armour: green hair, grey-blue armour, red trousers, orange shoulder pads."
+# Art made for a look that its file names do not number (a `battle-*` set, or a close-up set): the
+# art's stem, the id without the pose number, to the slugs it is made for. A stem with `-u<N>` in
+# it is made for unit N and needs no line.
+[art]
+battle-goku = ["goku"]
+battle-goku-ssj = ["goku-ssj"]
+gallery-party-goku-ssj = ["goku-ssj"]
+battle-gohan = ["gohan"]
+battle-krillin = ["krillin"]
+battle-piccolo = ["piccolo"]
+battle-yamcha = ["yamcha"]
+battle-chiaotzu = ["chiaotzu"]
+battle-vegeta = ["vegeta"]
+battle-super-vegeta = ["vegeta-ssj"]
+battle-nail = ["nail", "nail-u34"]
+battle-raditz = ["raditz"]
+battle-nappa = ["nappa"]
+battle-saibaman = ["saibaman"]
+battle-saimen = ["saimen"]
+battle-jsaibaman = ["j-saibaman"]
+battle-burter = ["burter"]
+battle-cui = ["cui"]
+battle-dodoria = ["dodoria"]
+battle-ginyu = ["ginyu"]
+battle-jeice = ["jeice"]
+battle-gur = ["gur"]
+battle-zarbon = ["zarbon"]
+battle-frieza-early = ["frieza"]
+battle-frieza3 = ["frieza"]
+battle-frieza4 = ["frieza"]
+
+# Portrait sets: `<set address>/<half>` to the identity slugs that half shows. Only the halves the
+# game's own tables or the faces measured on screen pin down are listed (docs/re/data/menus.md,
+# "Corner faces"; the object name table).
+[portraits]
+"16:8000/0" = ["goku"]
+"16:8000/1" = ["gohan"]
+"16:8367/0" = ["piccolo"]
+"16:8367/1" = ["krillin"]
+"16:872A/0" = ["tien"]
+"16:872A/1" = ["yamcha"]
+"16:8A9B/0" = ["chiaotzu"]
+"16:8A9B/1" = ["vegeta"]
+"16:91D4/1" = ["dende"]
+"16:99C5/0" = ["vegeta-ssj"]
+"16:9590/0" = ["goku-ssj"]
+"16:9C00/1" = ["saibaman-portrait"]
+
+# Object portraits: object id to identity slug (the object name table).
+[objects]
+0 = "kami"
+1 = "roshi"
+2 = "bulma"
+3 = "mr-popo"
+# The object name table lists these two the other way round (4 Puar, 8 Korin); the pictures decide: 4 is the cream
+# cat with the wide grin, 8 the blue flying cat.
+4 = "korin"
+5 = "king-kai-portrait"
+6 = "guru"
+8 = "puar"
+9 = "launch"
+10 = "yemma"
+11 = "baba"
+12 = "chichi"
+13 = "oolong"
+14 = "shenron"
+15 = "porunga"
+18 = "yajirobe"
+19 = "vegeta"
+23 = "dragon-radar"
+26 = "gohan"
+28 = "goku"
+29 = "piccolo"
+30 = "saibaman-portrait"
+33 = "dragon-ball-1"
+34 = "dragon-ball-2"
+35 = "dragon-ball-3"
+36 = "dragon-ball-4"
+37 = "dragon-ball-5"
+38 = "dragon-ball-6"
+39 = "dragon-ball-7"

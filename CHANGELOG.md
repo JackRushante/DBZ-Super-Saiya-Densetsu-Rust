@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.17 (2026-11-27)
+
+### HD art
+
+- **New `hd-pack.zip`: about 270 battle poses redrawn or drawn for the first time.**
+  - Every battle pose of the original game now has HD art: 144 poses that were drawn small (with the original pixels) have their own
+    drawing, among them knock-downs, guards and hits of the Ginyu Force, Frieza's soldiers, Appule, Bundt and Banan.
+  - Super Saiyan Vegeta is golden-haired in every pose, guard and command screen included; the normal Vegeta keeps his black hair.
+  - Poses that showed another character or the wrong colours are drawn again for the right fighter in his own palette.
+  - Dende's portrait was an adult Namekian warrior; it is now Dende, a Namekian child.
+  **Download it again**; the game installs it on the next Remastered launch. It works with 0.3.9 and later.
+- **`xtask hd-catalogue`** (developers): extracts every battle pose and portrait the original game can draw straight from the ROM and
+  checks the HD art against them (missing art, wrong character, wrong colours, wrong shape). See the README, "Developer commands".
+
+The game itself is unchanged from 0.3.16.
+
 ## 0.3.16 (2026-11-27)
 
 ### Fixes

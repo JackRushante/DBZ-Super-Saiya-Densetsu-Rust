@@ -46,6 +46,9 @@ cargo xtask publish-check
   `standalone-diff`. Changes to the Enhanced mode only (menus, cheats, HD drawing, art) and to docs
   and tools need no replay run.
 - A change to `crates/ssd-hd` is checked with `cargo run --release -p xtask -- hd-parity`.
+- A change to the HD art (an art store, `index.json`) is checked with `cargo run --release -p xtask -- hd-catalogue extract`
+  and `hd-catalogue verify --art <art store> --check` (README, "Developer commands"): a flag on a used entry that
+  `tools/hd-catalogue-accept.toml` does not accept fails it; list only false alarms you looked at, with a reason.
 
 ## Adding story content
 

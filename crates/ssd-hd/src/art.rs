@@ -23,6 +23,7 @@ mod portrait_check;
 pub(crate) mod poses;
 mod recolour;
 mod resample;
+pub mod resolve;
 #[cfg(test)]
 mod tests;
 
@@ -98,9 +99,6 @@ pub enum ArtSource {
     /// A piece of the art of a bigger pose of the index (a fade-in's stripes, a cut sprite).
     Held,
 }
-
-/// The fewest opaque pixels of a pose found by its shape.
-const SHAPE_MIN_OPAQUE: usize = 150;
 
 /// The share (per mille) of a pose's opaque pixels with no neighbour left or right from which a pose
 /// is a stripy fade-in, which the capture left out and may be part of a pose of the index.
@@ -399,16 +397,6 @@ const RECORD_STRIDE: usize = 0x20;
 const PARTY_SLOTS: usize = 9;
 /// The unit of Super Saiyan Goku.
 const SUPER_SAIYAN_GOKU: u8 = 0x3B;
-/// The mark of a unit of Goku's art in the index (`battle-goku-NNN`, `gallery-party-goku-u00-NNN`, see [`ArtState::unit_of`]).
-const GOKU_MARK: &str = "goku";
-/// The mark of the units of Vegeta's art in the index (`battle-vegeta-NNN`, `gallery-enemy-vegeta-u15-NNN`).
-const VEGETA_MARK: &str = "vegeta";
-/// The marks of the units of Super Saiyan Vegeta's art: the battle poses (`battle-super-vegeta-NNN`) and the close-ups
-/// of the special attacks, of the game's unit `$4B` (`gallery-enemy-vegeta-u75-NNN`, `gallery-party-vegeta-u75-NNN`).
-const SUPER_VEGETA_MARKS: [&str; 2] = ["super-vegeta", "vegeta-u75"];
-/// The mark of a unit of Super Saiyan Goku's art (`battle-goku-ssj-NNN`, `gallery-party-goku-ssj-NNN`).
-const SUPER_SAIYAN_GOKU_MARK: &str = "goku-ssj";
-
 /// The conditions a pack's pose variants name (`[[pose_variant]]`, `ssd_mod::pose::Condition`), as the game's work RAM of a
 /// frame shows them. The Enhanced picture draws a variant only while its condition holds. `super_saiyan_goku` is the party
 /// record of Super Saiyan Goku (see [`ArtState::unit_for`]).
@@ -1762,34 +1750,21 @@ impl ArtState {
         if let Some(found) = self.shapes.get(&memo) {
             return *found;
         }
-        let opaque = pose.arr.iter().filter(|&&c| c != 0).count();
-        let mut seen = 0_u16;
-        for &c in pose.arr.iter().filter(|&&c| c != 0) {
-            seen |= 1 << (c & 15);
-        }
-        let found = if opaque >= SHAPE_MIN_OPAQUE
-            && opaque < pose.arr.len()
-            && seen.count_ones() >= 3
-            && u16::try_from(pose.w).is_ok()
-            && u16::try_from(pose.h).is_ok()
-        {
-            let art = &self.pack.art;
-            art.objects_shaped(pose.w as u16, pose.h as u16, opaque as u32).iter().copied().find(
-                |&at| {
-                    let object = &art.objects()[at as usize];
-                    object.field() == pose.field
-                        && (0..pose.w * pose.h)
-                            .all(|n| object.opaque_at(n % pose.w, n / pose.w) == (pose.arr[n] != 0))
-                },
-            )
-        } else {
-            None
-        };
+        let found = self.resolver().shaped(&pose.arr, pose.w, pose.h, pose.field);
         if self.shapes.len() >= PARTIAL_CACHE {
             self.shapes.clear();
         }
         self.shapes.insert(memo, found);
         found
+    }
+
+    /// The lookup of the index's art for a pose (see [`resolve`]).
+    fn resolver(&self) -> resolve::Resolver<'_> {
+        resolve::Resolver::new(&self.pack.art, self.conditions.super_saiyan_goku, &self.unit_sizes)
+    }
+
+    fn pose_ref(pose: &Pose) -> resolve::PoseRef {
+        resolve::PoseRef { key: pose.key, mirror: pose.mirror_key(), field: pose.field }
     }
 
     /// The art made for exactly the pixels of `pose`, or for them mirrored left to right (drawn
@@ -1802,121 +1777,18 @@ impl ArtState {
         row: &[[u8; 3]; 16],
         unit: Option<&String>,
     ) -> (Option<u32>, bool) {
-        let best = self
-            .candidates(pose)
-            .into_iter()
-            .filter(|&(at, _)| unit.is_none_or(|unit| self.unit_of(at) == *unit))
-            .min_by_key(|&(at, mirrored)| {
-                let palette = &self.pack.art.objects()[at as usize].palette;
-                (u8::from(mirrored), palette.distance(row), u8::from(palette.mask == 0))
-            });
-        match best {
-            Some((at, mirrored)) => (Some(at), mirrored),
-            None => (None, false),
-        }
+        self.resolver().exact_art(&Self::pose_ref(pose), row, unit)
     }
 
     /// The objects of the pose's kind made for its pixels, and for them mirrored (`true`).
     fn candidates(&self, pose: &Pose) -> Vec<(u32, bool)> {
-        let index = &self.pack.art;
-        let of_kind = |&&at: &&u32| index.objects()[at as usize].field() == pose.field;
-        let mut found: Vec<(u32, bool)> =
-            index.objects_with(pose.key).iter().filter(of_kind).map(|&at| (at, false)).collect();
-        if let Some(mirror) = pose.mirror_key().filter(|&mirror| mirror != pose.key) {
-            found.extend(index.objects_with(mirror).iter().filter(of_kind).map(|&at| (at, true)));
-        }
-        found
+        self.resolver().candidates(&Self::pose_ref(pose))
     }
 
-    /// The unit an object's art is of: its id without the number of the pose (`battle-saibaman-004`
-    /// is of `battle-saibaman`).
-    fn unit_of(&self, at: u32) -> String {
-        let id = &self.pack.art.objects()[at as usize].id;
-        match id.rsplit_once('-') {
-            Some((unit, number)) if number.bytes().all(|b| b.is_ascii_digit()) => unit.to_owned(),
-            _ => id.clone(),
-        }
-    }
-
-    /// The unit whose art draws a pose whose pixels (or their mirror image) more than one unit has
-    /// art for. The units of one set of pixels are the same sprite in other colours (the three
-    /// Saibamen of the game) and each was drawn on its own, so they differ in the details: the
-    /// fighters of a formation are drawn from the unit with the most poses in the index, in the
-    /// colours of their own palettes, whatever their colours, and so are the frames of an
-    /// animation. While Super Saiyan Goku is in the party, a pose that both his normal and his Super
-    /// Saiyan art have is drawn from the Super Saiyan art: the normal art has the same pixels, in the
-    /// normal palette, where his hair is black; without him, from the normal art, however many poses
-    /// the Super Saiyan set has. Super Saiyan Vegeta is not in the party record: his units (see
-    /// [`SUPER_VEGETA_MARKS`]) are told from the normal Vegeta's by the colours, the pose being drawn from the units
-    /// whose art was made in the palette nearest to the one the game draws it in ([`ArtState::retain_by_palette`]).
-    /// `None` when one unit (or none) has art for the pose.
+    /// The unit whose art draws a pose that more than one unit has art for (see
+    /// [`resolve::Resolver::unit_for`]); `None` when one unit (or none) has art for it.
     fn unit_for(&self, pose: &Pose, row: &[[u8; 3]; 16]) -> Option<String> {
-        let mut units: Vec<String> =
-            self.candidates(pose).into_iter().map(|(at, _)| self.unit_of(at)).collect();
-        units.sort();
-        units.dedup();
-        if units.len() < 2 {
-            return None;
-        }
-        let super_saiyan = |unit: &String| unit.contains(SUPER_SAIYAN_GOKU_MARK);
-        let normal = |unit: &String| unit.contains(GOKU_MARK) && !super_saiyan(unit);
-        if units.iter().any(super_saiyan) && units.iter().any(normal) {
-            // Any set of Goku's art (the battle poses, the close-ups of the special attacks) that has a Super Saiyan set for
-            // these pixels is drawn from it while he is in the party, and from the normal set otherwise.
-            if self.conditions.super_saiyan_goku {
-                return units.into_iter().find(super_saiyan);
-            }
-            units.retain(|unit| !super_saiyan(unit));
-        }
-        self.retain_by_palette(pose, row, &mut units);
-        let sizes = self.unit_sizes();
-        units.into_iter().max_by_key(|unit| {
-            (sizes.get(unit).copied().unwrap_or(0), std::cmp::Reverse(unit.clone()))
-        })
-    }
-
-    /// Of the units of Super Saiyan Vegeta and the units of the normal Vegeta in `units`, all with art for the pose,
-    /// keeps those whose art was made in the colours nearest to `row`, those of the pose in the frame (a tie keeps the
-    /// normal ones). `units` is left as it is when it holds no such pair, or when the art of either side has no
-    /// palette to compare.
-    fn retain_by_palette(&self, pose: &Pose, row: &[[u8; 3]; 16], units: &mut Vec<String>) {
-        let super_saiyan =
-            |unit: &String| SUPER_VEGETA_MARKS.iter().any(|mark| unit.contains(mark));
-        let normal = |unit: &String| unit.contains(VEGETA_MARK) && !super_saiyan(unit);
-        let candidates = self.candidates(pose);
-        let nearest = |side: &dyn Fn(&String) -> bool| {
-            candidates
-                .iter()
-                .filter(|&&(at, _)| side(&self.unit_of(at)))
-                .map(|&(at, _)| &self.pack.art.objects()[at as usize].palette)
-                .filter(|palette| palette.mask != 0)
-                .map(|palette| palette.distance(row))
-                .min()
-        };
-        if !units.iter().any(super_saiyan) || !units.iter().any(normal) {
-            return;
-        }
-        let (Some(normal_distance), Some(super_distance)) =
-            (nearest(&normal), nearest(&super_saiyan))
-        else {
-            return;
-        };
-        if super_distance < normal_distance {
-            units.retain(|unit| super_saiyan(unit) || !normal(unit));
-        } else {
-            units.retain(|unit| !super_saiyan(unit));
-        }
-    }
-
-    /// The number of poses of each unit of the index.
-    fn unit_sizes(&self) -> &rustc_hash::FxHashMap<String, u32> {
-        self.unit_sizes.get_or_init(|| {
-            let mut sizes: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
-            for at in 0..self.pack.art.objects().len() {
-                *sizes.entry(self.unit_of(at as u32)).or_default() += 1;
-            }
-            sizes
-        })
+        self.resolver().unit_for(&Self::pose_ref(pose), row)
     }
 
     fn bg_palette_row(log: &FrameLog, palette: u8) -> [[u8; 3]; 16] {

@@ -286,6 +286,17 @@ fn with_webp(pattern: &str) -> String {
     pattern.strip_suffix(".png").map_or_else(|| pattern.to_owned(), |stem| format!("{stem}.webp"))
 }
 
+/// The palette with only the colours its mask uses: the pack writes those, so a colour outside the mask (never drawn)
+/// may come back as black.
+fn used(mut palette: Palette) -> Palette {
+    for (index, colour) in palette.colors.iter_mut().enumerate() {
+        if palette.mask & (1 << index) == 0 {
+            *colour = Default::default();
+        }
+    }
+    palette
+}
+
 fn stem(name: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(stem, _)| stem)
 }
@@ -628,7 +639,8 @@ fn compare(reference: &Path, installed: &Path, out: &mut dyn Write) -> anyhow::R
     anyhow::ensure!(a.len() == b.len(), "{} pictures, installed {}", a.len(), b.len());
     for (x, y) in a.iter().zip(b) {
         anyhow::ensure!(
-            (&x.name, &x.asset, x.tiles, x.palette) == (&y.name, &y.asset, y.tiles, y.palette)
+            (&x.name, &x.asset, x.tiles, used(x.palette))
+                == (&y.name, &y.asset, y.tiles, used(y.palette))
                 && stem(&x.art) == stem(&y.art),
             "the picture {} differs",
             x.name
@@ -639,8 +651,8 @@ fn compare(reference: &Path, installed: &Path, out: &mut dyn Write) -> anyhow::R
     let mut outlines = 0;
     for (x, y) in a.iter().zip(b) {
         anyhow::ensure!(
-            (x.key, &x.id, x.luma, x.palette, x.width, x.height, &x.mask)
-                == (y.key, &y.id, y.luma, y.palette, y.width, y.height, &y.mask)
+            (x.key, &x.id, x.luma, used(x.palette), x.width, x.height, &x.mask)
+                == (y.key, &y.id, y.luma, used(y.palette), y.width, y.height, &y.mask)
                 && stem(&x.art) == stem(&y.art),
             "the pose {} differs",
             x.id

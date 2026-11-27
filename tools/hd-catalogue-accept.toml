@@ -1,0 +1,24 @@
+# Flags of `xtask hd-catalogue verify --check` that were looked at and are false alarms: the art is
+# fine. One entry per catalogue id, the flags accepted for it and why, in one line. A real error is
+# never listed here: it is fixed in the art store. An entry whose flag is no longer raised is stale
+# and fails the check, so remove it then.
+
+[[accept]]
+id = "obj-19"
+flags = ["shape"]
+reason = "the picture is Vegeta's face as the object shows it; the object palette makes his hair brown, so the light and dark differ"
+
+[[accept]]
+id = "obj-06"
+flags = ["identity"]
+reason = "the picture is the Namekian elder's face; its prompt describes him without naming him"
+
+[[accept]]
+id = "pose-u020-p23"
+flags = ["colour"]
+reason = "the recoloured art has the same colours as the native pose; only the shading of the redraw differs"
+
+[[accept]]
+id = "pose-u026-p04"
+flags = ["colour"]
+reason = "the recoloured art keeps the native colour scheme (green head, purple armour); the redraw shades it differently"

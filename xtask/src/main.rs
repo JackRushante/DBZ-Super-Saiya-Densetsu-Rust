@@ -17,6 +17,7 @@ mod fuzz;
 mod gfx_log;
 mod hd_art_run;
 mod hd_bg;
+mod hd_catalogue;
 mod hd_coverage;
 mod hd_figures;
 mod hd_items;
@@ -1290,6 +1291,9 @@ fn usage() -> ExitCode {
         "       cargo run --release -p xtask -- hd-pack-to-store <pack.zip|pack dir> <art store> [--masks <dir>]"
     );
     eprintln!(
+        "       cargo run --release -p xtask -- hd-catalogue extract|verify|sheet [--out <dir>] [--art <art store>] [--identity <file>]"
+    );
+    eprintln!(
         "       cargo run --release -p xtask -- hd-maps dump [--out DIR] [--maps N,..] [--frames N] [--jobs N] [--base SAVE]"
     );
     eprintln!("       cargo run --release -p xtask -- hd-maps scan [--every N] [replay|dir...]");
@@ -1461,6 +1465,7 @@ fn main() -> anyhow::Result<ExitCode> {
         ["hd-pack-public", rest @ ..] => hd_pack_public(rest),
         ["hd-pack-to-store", rest @ ..] => hd_pack_to_store(rest),
         ["hd-coverage", rest @ ..] => hd_coverage(rest),
+        ["hd-catalogue", rest @ ..] => hd_catalogue::run(rest),
         ["hd-tour", rest @ ..] => hd_tour(rest),
         ["hd-maps", rest @ ..] => hd_maps(rest),
         ["bench-hd", rest @ ..] => bench_hd(rest),

@@ -1088,6 +1088,40 @@ the store's `index.json` by `id`: the fields the pack defines replace the store'
 how the art was made) stay. With `--masks`, the outlines of `masks.bin` are written as PNGs for the keys the folder lacks.
 Run `hd-convert` and `hd-import` afterwards.
 
+    cargo run --release -p xtask -- hd-catalogue extract [--out DIR] [--observed LOG]
+    cargo run --release -p xtask -- hd-catalogue verify --art <art store> [--out DIR] [--identity FILE] [--check [--accept FILE]]
+    cargo run --release -p xtask -- hd-catalogue sheet [--out DIR]
+    cargo run --release -p xtask -- hd-catalogue redo [--out DIR]
+
+checks the HD art against the game, statically (`--out` defaults to `.work/catalogue`; everything written is derived
+from the game and stays there). `extract` decodes from the cached ROM every battle pose of every unit (the unit's
+poseset and palette, the pose's layout and graphics) and the two pictures of every face and object portrait set: the
+catalogue (`catalogue.json`: the unit names of the game, the pose keys the renderer finds art by, the keys facing the
+other way and upside down, where each comes from in the ROM) and the native pictures as indexed PNGs. It also says for
+each pose whether the game can show it (`used`, with its evidence): the pose numbers the animation scripts and a few
+fixed routines can set (`docs/re/data/battle-poses.md`, "Which poses are used"); `--observed` adds a log of the pose
+loads a replay made (lines `<replay> f<frame> B <unit> <pose> ...`) as evidence and reports a load the static set does
+not reach.
+
+`verify` finds for each entry the art the renderer would draw (`ssd_hd::resolve`, the lookup the renderer shares: the
+pose's key, its mirror image, the unit and palette choice, then the shape), recolours it as the renderer does when it
+was made for another palette, and writes `report.json` with a verdict per entry. Flags: `missing` (a used pose with no
+art), `shape` (the art's silhouette, shrunk to the native size, covers under 80% of the pose, which no art the
+generator accepted does; a portrait's light and dark do not follow the picture's), `colour` (the art as drawn is more
+than 95, in RGB, from the colours of its palette indexes on average), `identity` (the art is made for another
+character or another look of this one, or its description, fighter or prompt does not name who the entry is, by
+`tools/hd-identity.toml`), `label` (the art matches the pose by its pixels but its name says it was made for a unit that
+cannot draw them: the picture is right and the name is wrong) and `shared` (one art serves characters told apart, or
+looks told apart that are drawn in other colours; several units of one sprite sharing art is by design and is not
+flagged). Without `--check` it exits 0. With `--check` it exits 1 when any used entry has a flag that
+`tools/hd-catalogue-accept.toml` does not accept (an entry, its flags and a one-line reason; only false alarms that
+were looked at belong there, and an accepted flag that is no longer raised fails the check as stale). `sheet` writes
+`index.html` and its images, one row per flagged entry, the most suspicious first: the native picture, the art, the art
+shrunk to the native size as drawn, who the entry is and what the art says it is, used or unused, the flags and scores.
+`redo` writes `redo.json`: the used entries whose picture is wrong (another look, the wrong colours, a portrait described
+without a name), grouped by identity with a plain description of the character from the table, and apart those with no
+art.
+
     cargo run --release -p xtask -- hd-art refpal [--pack DIR] [--maps-dump DIR] [--out FILE] [replay|dir...]
     cargo run --release -p xtask -- hd-art diff --pack A --pack-b B --pack-c C [--every N] [replay|dir...]
 

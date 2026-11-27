@@ -41,6 +41,7 @@ pub mod world;
 use ssd_oracle::{CgramWrite, Color, FrameLog, LineEntry, OamWrite, VramWrite};
 use std::sync::Arc;
 
+pub use art::resolve;
 pub use art::{
     ArtSource, ArtStats, COLOUR_CLASSES, Conditions, Drawn, DrawnPose, Fate, FrameTally, Image,
     ItemKey, KindPixels, PortraitUse, PoseShape, PoseStat, TallyCount, TallyItem, TallyLayer,
